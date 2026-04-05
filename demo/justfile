@@ -158,10 +158,17 @@ up:
     echo "  docker compose -f {{compose}} exec nginx openssl s_client -connect localhost:4444 </dev/null 2>/dev/null | openssl x509 -text -noout"
     echo ""
     echo "Verify MTC proof:"
-    echo "  docker compose -f {{compose}} exec mtc-tls-server mtc-tls-verify -addr localhost:4445 -bridge-url http://mtc-bridge:8080"
+    echo "  just demo verify"
     echo ""
     echo "Teardown:"
-    echo "  just demo-down"
+    echo "  just demo down"
+
+# Verify the MTC proof on port 4445
+verify:
+    docker compose -f {{compose}} exec mtc-tls-server mtc-tls-verify \
+        -url https://localhost:4445 \
+        -bridge-url http://mtc-bridge:8080 \
+        -insecure
 
 # Stop the PQC TLS demo and clean up
 down:

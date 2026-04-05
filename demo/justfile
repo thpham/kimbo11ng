@@ -105,20 +105,20 @@ up:
 
     # Export admin P12 to a format openssl can read:
     # keytool re-exports with password "changeit" (>= 6 chars), then
-    # nginx's openssl extracts PEM cert + key
-    $DC exec ejbca bash -c '\
-        keytool -importkeystore \
-            -srckeystore /opt/keyfactor/ejbca/p12/demo-admin.p12 \
-            -srcstoretype PKCS12 -srcstorepass ejbca \
-            -destkeystore /demo/certs/admin-reexport.p12 \
-            -deststoretype PKCS12 -deststorepass changeit \
-            -noprompt 2>/dev/null || true'
-    $DC exec nginx sh -c '\
-        openssl pkcs12 -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
-            -clcerts -nokeys -out /etc/nginx/certs/admin.crt 2>/dev/null && \
-        openssl pkcs12 -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
-            -nocerts -nodes -out /etc/nginx/certs/admin.key 2>/dev/null && \
-        echo "        Admin cert+key extracted to PEM."'
+    # nginx openssl extracts PEM cert + key
+    $DC exec ejbca keytool -importkeystore \
+        -srckeystore /opt/keyfactor/ejbca/p12/demo-admin.p12 \
+        -srcstoretype PKCS12 -srcstorepass ejbca \
+        -destkeystore /demo/certs/admin-reexport.p12 \
+        -deststoretype PKCS12 -deststorepass changeit \
+        -noprompt 2>/dev/null || true
+    $DC exec nginx openssl pkcs12 \
+        -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
+        -clcerts -nokeys -out /etc/nginx/certs/admin.crt 2>/dev/null
+    $DC exec nginx openssl pkcs12 \
+        -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
+        -nocerts -nodes -out /etc/nginx/certs/admin.key 2>/dev/null
+    echo "        Admin cert+key extracted to PEM."
 
     # Start MTC bridge + TLS server
     echo "[10/11] Starting MTC bridge + TLS server..."

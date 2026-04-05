@@ -84,7 +84,7 @@ services:
       EJBCA_BASE_URL: "https://ejbca:8443/ejbca/ejbca-rest-api"
       EJBCA_CLIENT_CERT: "/etc/mtc-bridge/certs/admin.crt"
       EJBCA_CLIENT_CERT_PASSWORD: "ejbca"
-      EJBCA_CA_NAME: "Hybrid-RootCA"
+      EJBCA_CA_NAME: ""
       EJBCA_INSECURE_SKIP_VERIFY: "true"
       MTC_STATE_DB_HOST: mtc-postgres
     volumes:
@@ -105,8 +105,8 @@ services:
     image: mtc-bridge-ejbca:latest
     entrypoint: ["mtc-tls-server"]
     command:
-      - "-cert=/etc/mtc-tls/certs/hybrid-server.crt"
-      - "-key=/etc/mtc-tls/certs/hybrid-server.key"
+      - "-cert=/etc/mtc-tls/certs/pqc-server.crt"
+      - "-key=/etc/mtc-tls/certs/pqc-server.key"
       - "-bridge-url=http://mtc-bridge:8080"
       - "-addr=:4445"
       - "-refresh=30"

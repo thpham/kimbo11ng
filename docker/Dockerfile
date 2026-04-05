@@ -61,8 +61,9 @@ FROM keyfactor/ejbca-ce:9.3.7
 
 USER root
 
-# OpenSSL shared libs (softhsmv3 runtime dependency)
+# OpenSSL shared libs + CLI (softhsmv3 runtime dependency + cert tooling)
 COPY --from=openssl-builder /opt/openssl/lib    /opt/openssl/lib
+COPY --from=openssl-builder /opt/openssl/bin    /opt/openssl/bin
 
 # SoftHSMv3 PKCS#11 library + management utility
 COPY --from=softhsm-builder /usr/local/lib/softhsm  /usr/local/lib/softhsm
@@ -86,13 +87,14 @@ RUN mkdir -p /var/lib/softhsmv3/tokens && \
     chown -R 10001:0 /var/lib/softhsmv3
 
 # Install gosu for privilege drop in init-softhsm.sh (root → 10001)
-ARG GOSU_VERSION=1.17
+ARG GOSU_VERSION=1.19
 ARG TARGETARCH
 RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${TARGETARCH}" \
     -o /usr/local/bin/gosu && chmod +x /usr/local/bin/gosu
 
 ENV SOFTHSM2_CONF=/etc/softhsmv3.conf
 ENV LD_LIBRARY_PATH=/opt/openssl/lib
+ENV PATH="/opt/openssl/bin:${PATH}"
 
 # kimbo11ng fat JAR — single COPY + symlink to avoid duplicating the layer
 COPY target/kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar \

@@ -212,3 +212,120 @@ clean-all: clean
 # Show EJBCA logs
 logs:
     docker compose logs -f ejbca
+
+# ─── PQC TLS Demo ────────────────────────────────────────────────────────────
+
+demo_compose := "demo/docker-compose.demo.yml"
+
+# Run the PQC TLS demo (EJBCA + nginx with Hybrid CA certificate)
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    DC="docker compose -f {{demo_compose}}"
+    PSQL="$DC exec -T postgres psql -U ejbca -d ejbca -c"
+
+    wait_ejbca() {
+        $DC exec ejbca sh -c \
+            'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done'
+    }
+
+    echo "=== PQC TLS Demo ==="
+    echo ""
+
+    # Start the stack
+    echo "[1/8] Starting services..."
+    $DC up -d
+
+    # Wait for EJBCA to be healthy
+    echo "[2/8] Waiting for EJBCA to be healthy..."
+    wait_ejbca
+
+    # Phase 1: enable protocol, create admin, import truststore
+    echo "[3/8] Phase 1: provisioning admin + truststore..."
+    $DC exec ejbca bash /demo/init-demo.sh
+
+    # Provision TestHSM token via postgres container
+    echo "       Provisioning TestHSM crypto token..."
+    PROPS=$(printf '%s\n' \
+        "pin=ad2bc4c864d6463d07d7a4b0fe91a6c6" \
+        "sharedLibrary=/usr/local/lib/softhsm/libsofthsmv3.so" \
+        "slotLabelValue=TestToken" \
+        "slotLabelType=SLOT_LABEL" \
+        "tokenName=TestHSM" \
+        "allow.extractable.privatekey=false")
+    PROPS_B64=$(echo "$PROPS" | base64 | tr -d '\n')
+    $PSQL \
+        "INSERT INTO CryptoTokenData \
+         (id,lastUpdate,rowProtection,rowVersion,tokenData,tokenName,tokenProps,tokenType) \
+         SELECT 1234567890,EXTRACT(EPOCH FROM NOW())::bigint*1000, \
+         NULL,0,NULL,'TestHSM','${PROPS_B64}','Pkcs11NgCryptoToken' \
+         WHERE NOT EXISTS (SELECT 1 FROM CryptoTokenData WHERE tokenName='TestHSM');" \
+        || true
+
+    # Restart EJBCA to pick up TestHSM token + truststore
+    echo "[4/8] Restarting EJBCA (load TestHSM token)..."
+    $DC restart ejbca
+    sleep 5
+    wait_ejbca
+
+    # Phase 2: create Hybrid CA keys + init CA
+    echo "[5/8] Phase 2: creating Hybrid Root CA..."
+    $DC exec ejbca bash /demo/init-demo-phase2.sh
+
+    # Patch CAData for alternativeSignatureAlgorithm via postgres
+    echo "       Patching CAData for ML-DSA-65 alternative signature..."
+    $PSQL \
+        "UPDATE CAData SET data = replace(data,
+         '<string>encryptionalgorithm</string>',
+         E'<string>alternativeSignatureAlgorithm</string>\n    <string>ML-DSA-65</string>\n   </void>\n   <void method=\"put\">\n    <string>encryptionalgorithm</string>')
+         WHERE name='Hybrid-RootCA'
+         AND data NOT LIKE '%alternativeSignatureAlgorithm%';"
+
+    $PSQL \
+        "UPDATE CAData SET data = replace(data,
+         E'defaultKey=demo-hybridRSA\n</string>',
+         E'defaultKey=demo-hybridRSA\nalternativeCertSignKey=demo-hybridMLDSA\n</string>')
+         WHERE name='Hybrid-RootCA'
+         AND data NOT LIKE '%alternativeCertSignKey%';"
+
+    # Restart EJBCA to pick up patched alternativeSignatureAlgorithm
+    echo "[6/8] Restarting EJBCA (load Hybrid CA config)..."
+    $DC restart ejbca
+    sleep 5
+    wait_ejbca
+
+    # Phase 3: issue server cert + write to shared volume
+    echo "[7/8] Phase 3: issuing server certificate..."
+    $DC exec ejbca bash /demo/init-demo-phase3.sh
+
+    # Restart nginx to pick up the new certs
+    echo "[8/8] Starting nginx with PQC certificate..."
+    $DC restart nginx
+    sleep 3
+
+    echo ""
+    echo "============================================"
+    echo "  PQC TLS Demo Ready!"
+    echo "============================================"
+    echo ""
+    echo "  Hybrid (RSA + ML-DSA-65 alt sig):  https://localhost:4443/"
+    echo "  Pure PQC (ML-DSA-65 primary):      https://localhost:4444/"
+    echo ""
+    echo "Inspect hybrid certificate:"
+    echo "  docker compose -f {{demo_compose}} exec nginx openssl s_client -connect localhost:443 </dev/null 2>/dev/null | openssl x509 -text -noout"
+    echo ""
+    echo "Inspect PQC certificate:"
+    echo "  docker compose -f {{demo_compose}} exec nginx openssl s_client -connect localhost:4444 </dev/null 2>/dev/null | openssl x509 -text -noout"
+    echo ""
+    echo "Teardown:"
+    echo "  just demo-down"
+
+# Stop the PQC TLS demo and clean up
+demo-down:
+    docker compose -f {{demo_compose}} down -v
+    @echo "Demo stack removed."
+
+# Show demo logs
+demo-logs:
+    docker compose -f {{demo_compose}} logs -f

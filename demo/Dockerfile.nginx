@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Build OpenSSL 3.6 from source
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS openssl-builder
+
+ARG OPENSSL_VERSION=3.6.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc make perl wget ca-certificates zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN wget -q https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
+    tar xf openssl-${OPENSSL_VERSION}.tar.gz && \
+    cd openssl-${OPENSSL_VERSION} && \
+    ./config \
+        --prefix=/opt/openssl \
+        --openssldir=/opt/openssl/ssl \
+        --libdir=lib \
+        shared \
+        zlib-dynamic \
+        no-tests && \
+    make -j$(nproc) && \
+    make install_sw
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Build nginx against OpenSSL 3.6
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS nginx-builder
+
+ARG NGINX_VERSION=1.27.4
+
+COPY --from=openssl-builder /opt/openssl /opt/openssl
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc make wget ca-certificates libpcre3-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN wget -q https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+    tar xf nginx-${NGINX_VERSION}.tar.gz && \
+    cd nginx-${NGINX_VERSION} && \
+    ./configure \
+        --prefix=/etc/nginx \
+        --sbin-path=/usr/sbin/nginx \
+        --conf-path=/etc/nginx/nginx.conf \
+        --error-log-path=/var/log/nginx/error.log \
+        --http-log-path=/var/log/nginx/access.log \
+        --pid-path=/var/run/nginx.pid \
+        --with-http_ssl_module \
+        --with-cc-opt="-I/opt/openssl/include" \
+        --with-ld-opt="-L/opt/openssl/lib -Wl,-rpath,/opt/openssl/lib" && \
+    make -j$(nproc) && \
+    make install
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Final nginx image
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpcre3 zlib1g ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /var/log/nginx /etc/nginx/certs
+
+COPY --from=openssl-builder /opt/openssl/lib  /opt/openssl/lib
+COPY --from=openssl-builder /opt/openssl/bin  /opt/openssl/bin
+COPY --from=nginx-builder   /usr/sbin/nginx   /usr/sbin/nginx
+COPY --from=nginx-builder   /etc/nginx        /etc/nginx
+
+ENV LD_LIBRARY_PATH=/opt/openssl/lib
+ENV PATH="/opt/openssl/bin:${PATH}"
+
+# Wait for certs to appear before starting nginx
+COPY demo/nginx-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 443 4444
+
+CMD ["/entrypoint.sh"]

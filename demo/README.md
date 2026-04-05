@@ -200,6 +200,31 @@ There is no `--custom-mtc-log` or similar command-line flag. The `CreateForTesti
 
 For now, `just demo verify` using `mtc-tls-verify` inside the container performs the same cryptographic verification that Chrome will eventually do natively.
 
+### Firefox: a potentially more open path for PQC verification
+
+Mozilla has made no announcement about MTC support. However, Firefox may offer an easier path for verifying PQC certificates directly, without the MTC indirection.
+
+**NSS (Firefox's crypto library) is actively adding ML-DSA support.** [NSS 3.121](https://firefox-source-docs.mozilla.org/security/nss/releases/nss_3_121.html) (February 2026) includes ML-DSA bug fixes, indicating that ML-DSA code is landing in the certificate verification stack.
+
+| Feature                  | Chrome/Brave                           | Firefox                                       |
+| ------------------------ | -------------------------------------- | --------------------------------------------- |
+| Custom CA trust          | System store only, no MTC override     | `certutil` + PKCS#11 modules + `about:config` |
+| ML-DSA cert verification | Refused — chose MTC path instead       | NSS adding support (in progress)              |
+| MTC verification         | Hardcoded log origins (no custom logs) | No MTC support                                |
+
+If NSS completes ML-DSA X.509 chain verification, Firefox could verify our pure PQC certificate directly:
+
+```bash
+# Import our PQC Root CA into Firefox's trust store
+certutil -A -n "PQC-RootCA" -t "CT,C,C" -i demo/certs/pqc-ca.pem -d ~/.mozilla/firefox/<profile>/
+
+# Then browse to https://localhost:4444/ — Firefox verifies ML-DSA-65 natively
+```
+
+This would bypass the MTC layer entirely — standard X.509 trust with a PQC signature algorithm. No hardcoded log origins, no protobuf, no component updater. Just add the CA and trust its certs.
+
+**Current status:** NSS 3.121 has ML-DSA code but full X.509 chain verification may not be enabled yet. Track progress via [NSS release notes](https://firefox-source-docs.mozilla.org/security/nss/index.html) and [Mozilla Bugzilla](https://bugzilla.mozilla.org/).
+
 ## How the MTC bridge works
 
 The [ca-extension-mtc-playground](https://github.com/thpham/ca-extension-mtc-playground) repo contains an EJBCA REST API adapter for DigiCert's MTC bridge. It replaces the original MariaDB polling with EJBCA's `/v1/certificate/search` endpoint:

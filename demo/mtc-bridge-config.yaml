@@ -1,0 +1,44 @@
+# MTC Bridge — EJBCA integration config for the PQC TLS demo
+#
+# EJBCA connection is via environment variables (set in docker-compose).
+# This file configures the bridge internals only.
+
+log:
+  name: "mtc-bridge-ejbca-demo"
+  origin: "localhost/mtc-bridge-ejbca"
+  batch_size: 100
+
+state_db:
+  host: "${MTC_STATE_DB_HOST:-mtc-postgres}"
+  port: 5432
+  database: "mtcbridge"
+  username: "mtcbridge"
+  password: "mtcbridge"
+  ssl_mode: "disable"
+
+http:
+  addr: ":8080"
+
+watcher:
+  poll_interval: 10s
+  revocation_poll_interval: 30s
+  checkpoint_interval: 30s
+  batch_size: 500
+
+cosigner:
+  key_file: "/etc/mtc-bridge/keys/cosigner.key"
+  key_id: "mtc-bridge-demo"
+
+logging:
+  level: "info"
+
+assertion_issuer:
+  batch_size: 5000
+  concurrency: 4
+  staleness_threshold: 3
+
+local_ca:
+  enabled: false
+
+acme:
+  enabled: false

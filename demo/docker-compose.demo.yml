@@ -58,8 +58,71 @@ services:
       - demo-certs:/etc/nginx/certs
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
 
+  # ─── MTC Bridge (polls EJBCA REST API → Merkle tree) ─────────────────────
+  mtc-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mtcbridge
+      POSTGRES_USER: mtcbridge
+      POSTGRES_PASSWORD: mtcbridge
+    volumes:
+      - mtc-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mtcbridge"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  mtc-bridge:
+    image: mtc-bridge-ejbca:latest
+    depends_on:
+      mtc-postgres:
+        condition: service_healthy
+      ejbca:
+        condition: service_healthy
+    environment:
+      EJBCA_BASE_URL: "https://ejbca:8443/ejbca/ejbca-rest-api"
+      EJBCA_CLIENT_CERT: "/etc/mtc-bridge/admin.p12"
+      EJBCA_CLIENT_CERT_PASSWORD: "ejbca"
+      EJBCA_CA_NAME: "Hybrid-RootCA"
+      EJBCA_INSECURE_SKIP_VERIFY: "true"
+      MTC_STATE_DB_HOST: mtc-postgres
+    volumes:
+      - ./mtc-bridge-config.yaml:/etc/mtc-bridge/config.yaml:ro
+      - mtc-keys:/etc/mtc-bridge/keys
+      - demo-certs:/etc/mtc-bridge/certs:ro
+      - ejbca-p12:/etc/mtc-bridge/ejbca-p12:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ─── MTC TLS Server (staples Merkle proof into TLS handshake) ───────────
+  mtc-tls-server:
+    image: mtc-bridge-ejbca:latest
+    entrypoint: ["mtc-tls-server"]
+    command:
+      - "-cert=/etc/mtc-tls/certs/hybrid-server.crt"
+      - "-key=/etc/mtc-tls/certs/hybrid-server.key"
+      - "-bridge-url=http://mtc-bridge:8080"
+      - "-addr=:4445"
+      - "-refresh=30"
+    depends_on:
+      mtc-bridge:
+        condition: service_healthy
+    ports:
+      - "4445:4445"
+    volumes:
+      - demo-certs:/etc/mtc-tls/certs:ro
+
 volumes:
   postgres-data:
   softhsm-tokens:
   ejbca-p12:
   demo-certs:
+  mtc-postgres-data:
+  mtc-keys:

@@ -300,8 +300,43 @@ demo:
     $DC exec ejbca bash /demo/init-demo-phase3.sh
 
     # Restart nginx to pick up the new certs
-    echo "[8/8] Starting nginx with PQC certificate..."
+    echo "[8/11] Starting nginx with PQC certificate..."
     $DC restart nginx
+    sleep 3
+
+    # ─── MTC Bridge integration ──────────────────────────────────────────
+    # Generate cosigner key if not present
+    echo "[9/11] Generating MTC cosigner key..."
+    $DC exec mtc-bridge sh -c \
+        'test -f /etc/mtc-bridge/keys/cosigner.key || mtc-bridge-ejbca -generate-key /etc/mtc-bridge/keys/cosigner.key' \
+        2>&1 || true
+
+    # Copy the admin P12 into the bridge container's volume
+    echo "        Copying admin P12 to MTC bridge..."
+    $DC exec mtc-bridge sh -c \
+        'cp /etc/mtc-bridge/ejbca-p12/demo-admin.p12 /etc/mtc-bridge/admin.p12' \
+        2>&1 || true
+
+    # Restart bridge to pick up the key + admin cert
+    echo "[10/11] Restarting MTC bridge..."
+    $DC restart mtc-bridge
+    sleep 5
+
+    # Wait for bridge to poll EJBCA, build tree, and create assertions
+    echo "[11/11] Waiting for MTC bridge to index certificates..."
+    for i in $(seq 1 12); do
+        HEALTH=$($DC exec -T mtc-bridge wget -qO- http://localhost:8080/healthz 2>/dev/null || echo '{}')
+        CERTS=$(echo "$HEALTH" | grep -o '"certs_processed":[0-9]*' | cut -d: -f2 || echo "0")
+        if [ "${CERTS:-0}" -gt 0 ]; then
+            echo "        Bridge indexed $CERTS certificates."
+            break
+        fi
+        echo "        Waiting for bridge to index certificates... ($i/12)"
+        sleep 10
+    done
+
+    # Restart mtc-tls-server to pick up assertions
+    $DC restart mtc-tls-server 2>/dev/null || true
     sleep 3
 
     echo ""
@@ -309,14 +344,18 @@ demo:
     echo "  PQC TLS Demo Ready!"
     echo "============================================"
     echo ""
-    echo "  Hybrid (RSA + ML-DSA-65 alt sig):  https://localhost:4443/"
-    echo "  Pure PQC (ML-DSA-65 primary):      https://localhost:4444/"
+    echo "  Hybrid X.509 (RSA + ML-DSA-65 alt):   https://localhost:4443/"
+    echo "  Pure PQC X.509 (ML-DSA-65 primary):    https://localhost:4444/"
+    echo "  MTC proof (Merkle inclusion, ~736B):    https://localhost:4445/"
     echo ""
-    echo "Inspect hybrid certificate:"
+    echo "  MTC Bridge dashboard:                   http://localhost:8080/healthz"
+    echo ""
+    echo "Inspect certificates:"
     echo "  docker compose -f {{demo_compose}} exec nginx openssl s_client -connect localhost:443 </dev/null 2>/dev/null | openssl x509 -text -noout"
-    echo ""
-    echo "Inspect PQC certificate:"
     echo "  docker compose -f {{demo_compose}} exec nginx openssl s_client -connect localhost:4444 </dev/null 2>/dev/null | openssl x509 -text -noout"
+    echo ""
+    echo "Verify MTC proof:"
+    echo "  docker compose -f {{demo_compose}} exec mtc-tls-server mtc-tls-verify -addr localhost:4445 -bridge-url http://mtc-bridge:8080"
     echo ""
     echo "Teardown:"
     echo "  just demo-down"

@@ -82,7 +82,7 @@ services:
         condition: service_healthy
     environment:
       EJBCA_BASE_URL: "https://ejbca:8443/ejbca/ejbca-rest-api"
-      EJBCA_CLIENT_CERT: "/etc/mtc-bridge/admin.p12"
+      EJBCA_CLIENT_CERT: "/etc/mtc-bridge/certs/admin.crt"
       EJBCA_CLIENT_CERT_PASSWORD: "ejbca"
       EJBCA_CA_NAME: "Hybrid-RootCA"
       EJBCA_INSECURE_SKIP_VERIFY: "true"
@@ -91,7 +91,6 @@ services:
       - ./mtc-bridge-config.yaml:/etc/mtc-bridge/config.yaml:ro
       - mtc-keys:/etc/mtc-bridge/keys
       - demo-certs:/etc/mtc-bridge/certs:ro
-      - ejbca-p12:/etc/mtc-bridge/ejbca-p12:ro
     ports:
       - "8080:8080"
     healthcheck:

@@ -233,9 +233,9 @@ demo:
     echo "=== PQC TLS Demo ==="
     echo ""
 
-    # Start the stack
-    echo "[1/8] Starting services..."
-    $DC up -d
+    # Start core services only (MTC services start after certs are issued)
+    echo "[1/8] Starting EJBCA + nginx..."
+    $DC up -d postgres ejbca nginx
 
     # Wait for EJBCA to be healthy
     echo "[2/8] Waiting for EJBCA to be healthy..."
@@ -305,21 +305,37 @@ demo:
     sleep 3
 
     # ─── MTC Bridge integration ──────────────────────────────────────────
-    # Generate cosigner key if not present
-    echo "[9/11] Generating MTC cosigner key..."
-    $DC exec mtc-bridge sh -c \
-        'test -f /etc/mtc-bridge/keys/cosigner.key || mtc-bridge-ejbca -generate-key /etc/mtc-bridge/keys/cosigner.key' \
-        2>&1 || true
+    echo "[9/11] Preparing MTC bridge..."
 
-    # Copy the admin P12 into the bridge container's volume
-    echo "        Copying admin P12 to MTC bridge..."
-    $DC exec mtc-bridge sh -c \
-        'cp /etc/mtc-bridge/ejbca-p12/demo-admin.p12 /etc/mtc-bridge/admin.p12' \
-        2>&1 || true
+    # Start mtc-postgres first (bridge needs it for key generation)
+    $DC up -d mtc-postgres
+    sleep 3
 
-    # Restart bridge to pick up the key + admin cert
-    echo "[10/11] Restarting MTC bridge..."
-    $DC restart mtc-bridge
+    # Generate cosigner key into the mtc-keys volume
+    # The -generate-key flag exits immediately after writing — no config needed
+    docker run --rm -v demo_mtc-keys:/keys --entrypoint mtc-bridge-ejbca \
+        mtc-bridge-ejbca:latest -generate-key /keys/cosigner.key 2>&1 || true
+
+    # Export admin P12 to a format openssl can read:
+    # keytool re-exports with password "changeit" (>= 6 chars), then
+    # nginx's openssl extracts PEM cert + key
+    $DC exec ejbca bash -c '\
+        keytool -importkeystore \
+            -srckeystore /opt/keyfactor/ejbca/p12/demo-admin.p12 \
+            -srcstoretype PKCS12 -srcstorepass ejbca \
+            -destkeystore /demo/certs/admin-reexport.p12 \
+            -deststoretype PKCS12 -deststorepass changeit \
+            -noprompt 2>/dev/null || true'
+    $DC exec nginx sh -c '\
+        openssl pkcs12 -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
+            -clcerts -nokeys -out /etc/nginx/certs/admin.crt 2>/dev/null && \
+        openssl pkcs12 -in /etc/nginx/certs/admin-reexport.p12 -passin pass:changeit \
+            -nocerts -nodes -out /etc/nginx/certs/admin.key 2>/dev/null && \
+        echo "        Admin cert+key extracted to PEM."'
+
+    # Start MTC bridge + TLS server
+    echo "[10/11] Starting MTC bridge + TLS server..."
+    $DC up -d mtc-bridge
     sleep 5
 
     # Wait for bridge to poll EJBCA, build tree, and create assertions

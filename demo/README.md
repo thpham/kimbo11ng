@@ -178,6 +178,28 @@ However, enabling this flag alone is **not sufficient** to verify our demo's MTC
 
 The most promising path for custom/local MTC verification is [DNS-based Trust Anchor IDs](https://issues.chromium.org/issues/415720499) — once implemented, browsers could discover our bridge's log origin via DNS records rather than requiring hardcoded trust.
 
+### Can we point Chrome/Brave at our custom MTC log?
+
+**No — not with current builds.** We verified this by examining the [Chromium source code](https://github.com/chromium/chromium/blob/main/chrome/browser/component_updater/pki_metadata_component_installer.cc):
+
+The `kVerifyMTCs` feature flag (`brave://flags/#verify-mtcs`) only enables/disables MTC verification — it has **no parameters** for specifying custom log origins or trust anchors. MTC trust data is loaded from a signed protobuf delivered by Google's Component Updater infrastructure:
+
+```
+Google Component Updater → protobuf on disk → TrustStoreChrome → hardcoded MTC anchors
+```
+
+There is no `--custom-mtc-log` or similar command-line flag. The `CreateForTesting()` method exists in the source but is only accessible from C++ unit tests, not from the browser UI.
+
+**Override paths (all require significant effort):**
+
+| Approach                         | Difficulty            | Description                                                                                                                                              |
+| -------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Intercept Component Updater data | Hard                  | Replace the PKI metadata protobuf on disk with a custom one containing our log origin. Requires crafting a valid `RootStore` proto with `MtcAnchorData`. |
+| Build Chromium from source       | Hard                  | Add our log origin to the compiled-in root store and build. Most reliable but heaviest.                                                                  |
+| DNS Trust Anchor IDs             | Easy (when available) | [Chromium issue #415720499](https://issues.chromium.org/issues/415720499) — serve our trust anchor via local DNS record. No custom build needed.         |
+
+For now, `just demo verify` using `mtc-tls-verify` inside the container performs the same cryptographic verification that Chrome will eventually do natively.
+
 ## How the MTC bridge works
 
 The [ca-extension-mtc-playground](https://github.com/thpham/ca-extension-mtc-playground) repo contains an EJBCA REST API adapter for DigiCert's MTC bridge. It replaces the original MariaDB polling with EJBCA's `/v1/certificate/search` endpoint:

@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -336,6 +337,63 @@ public abstract class HsmContract {
                 signAndVerify(alias, entry.canonicalName());
             }
         }
+    }
+
+    /**
+     * Symmetric keys, if the token makes them.
+     *
+     * <p>Skipped rather than failed on a token that does not advertise
+     * {@code CKM_GENERIC_SECRET_KEY_GEN} with {@code CKF_GENERATE}: this suite asserts that what a
+     * token claims it can do, it does, never that it claims anything in particular.
+     *
+     * <p>There is no cross-check against another provider here, and there cannot be: the key is
+     * {@code CKA_SENSITIVE} and never leaves the token, so nothing outside can recompute the MAC.
+     * What is checkable is that the same key over the same input is stable across a full
+     * re-enumeration — which is exactly what would break if the key were re-resolved to a different
+     * object, or if the token silently made a session key rather than a token one.
+     */
+    @Test
+    @DisplayName("generates a secret key, and MACs with it across a re-enumeration")
+    void secretKeyRoundTrip() throws Exception {
+        TokenCapabilities capabilities = slot().capabilities();
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                capabilities.canGenerate(CKM.GENERIC_SECRET_KEY_GEN)
+                        && capabilities.canSign(CKM.SHA256_HMAC),
+                "the token does not offer CKM_GENERIC_SECRET_KEY_GEN with CKF_GENERATE and"
+                        + " CKM_SHA256_HMAC with CKF_SIGN");
+
+        String alias = alias("hmac");
+        impl.generateKey("HmacSHA256", 256, alias);
+
+        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        assertTrue(keyStore.engineContainsAlias(alias));
+        assertTrue(keyStore.isSecretKey(alias), alias + " is not registered as a secret key");
+
+        byte[] message = ("kimbo11ng hsm contract " + alias).getBytes(StandardCharsets.UTF_8);
+        byte[] before = mac(alias, message);
+        assertEquals(32, before.length, "HmacSHA256 must be 32 bytes");
+
+        // The restart path, as for the key pairs above.
+        keyStore.clear();
+        slot().invalidateHandles();
+        keyStore.engineLoad(null, pin());
+
+        assertTrue(keyStore.engineContainsAlias(alias),
+                alias + " did not survive re-enumeration, so the token made a session key");
+        assertArrayEquals(before, mac(alias, message),
+                "the same key over the same input produced a different MAC after re-enumeration");
+        assertFalse(Arrays.equals(before, mac(alias, "something else".getBytes(StandardCharsets.UTF_8))));
+    }
+
+    /** MACs {@code message} with the token-held key registered under {@code alias}. */
+    private byte[] mac(String alias, byte[] message) throws Exception {
+        javax.crypto.SecretKey key = (javax.crypto.SecretKey)
+                impl.getProvider().getKeyStoreSpi().engineGetKey(alias, pin());
+        assertNotNull(key, "no secret key for " + alias);
+        assertNull(key.getEncoded(), "a sensitive key must not hand out its material");
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256", impl.getProvider());
+        mac.init(key);
+        return mac.doFinal(message);
     }
 
     @Test

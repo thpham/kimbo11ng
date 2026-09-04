@@ -19,6 +19,7 @@ import ch.ithings.kimbo11ng.provider.P11KeyRef;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
 import ch.ithings.kimbo11ng.provider.PublicKeyReader;
+import ch.ithings.kimbo11ng.provider.SecretKeyType;
 import ch.ithings.kimbo11ng.provider.TokenRuntime;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException;
@@ -33,6 +34,8 @@ import org.pkcs11.jacknji11.CKO;
 import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.LongRef;
 
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidAlgorithmParameterException;
@@ -245,13 +248,101 @@ public class CryptoTokenImpl {
         }
     }
 
+    /**
+     * Generates a secret key on the token.
+     *
+     * <p>Two calls, in the order EJBCA's own {@code KeyStoreTools.generateKey} makes them: the JCA
+     * hands no alias to a {@code KeyGenerator}, so the key is created under a provisional label and
+     * named by {@code setKeyEntry}. Going through the JCA rather than calling {@code C_GenerateKey}
+     * here is deliberate — it is the same path {@code PKCS11CryptoToken} takes, so a caller that
+     * reaches the provider directly and one that comes through the crypto token get the same key.
+     *
+     * <p>The only consumer of this method in EJBCA is database protection, whose HMAC key this is.
+     * In Community Edition nothing calls it: the one call site,
+     * {@code org.cesecore.dbprotection.CachedCryptoToken}, is a pass-through that CE never
+     * constructs. It is implemented anyway because the interface promises it, and because a
+     * promise kept only until someone relies on it is worse than no promise.
+     *
+     * @param algorithm one of {@link SecretKeyType#names()}
+     * @param keysize in bits, or 0 for the algorithm's default
+     */
     public void generateKey(String algorithm, int keysize, String alias)
             throws NoSuchAlgorithmException, NoSuchProviderException, KeyStoreException,
             CryptoTokenOfflineException {
-        if (bridge.bridgeGetKeyStore() == null) {
+        CachingKeyStoreWrapper keyStore = bridge.bridgeGetKeyStore();
+        if (keyStore == null) {
             throw new CryptoTokenOfflineException("Token is offline or not activated");
         }
-        throw new KeyStoreException("Symmetric key generation is not implemented");
+        TokenRuntime current = runtime;
+        if (current == null) {
+            throw new CryptoTokenOfflineException("Token is not initialized");
+        }
+        SecretKeyType type = SecretKeyType.lookup(algorithm)
+                .orElseThrow(() -> new NoSuchAlgorithmException("'" + algorithm + "' is not a"
+                        + " secret-key algorithm this token offers. Available: "
+                        + SecretKeyType.names() + "."));
+        if (!type.usableHere()) {
+            // Generating it would succeed and produce a key nothing in this JVM could use: the key
+            // is CKA_SENSITIVE and not CKA_EXTRACTABLE, and this provider registers no Cipher. Say
+            // so now rather than leave an unusable object on the token.
+            throw new NoSuchAlgorithmException(type.jcaName() + " keys can be generated on the"
+                    + " token, but this provider offers no Cipher service to use one with, and the"
+                    + " key is not extractable — so the key would be unusable. Use one of "
+                    + SecretKeyType.names().stream().filter(n -> !n.equals(type.jcaName())).toList()
+                    + ", which are backed by a Mac service.");
+        }
+        // Validated here rather than left to the generator, so a bad key size reports itself as a
+        // bad key size. Going through KeyGenerator.init would surface it as an unchecked
+        // InvalidParameterException wrapped in "failed to generate a key on the token", which
+        // blames the token for the caller's argument.
+        int bits;
+        try {
+            bits = type.validateBits(keysize);
+        } catch (IllegalArgumentException e) {
+            throw new KeyStoreException(e.getMessage(), e);
+        }
+        requireSecretAliasFree(current, alias);
+
+        SecretKey key;
+        try {
+            KeyGenerator generator = KeyGenerator.getInstance(type.jcaName(), p11Provider);
+            generator.init(bits);
+            key = generator.generateKey();
+        } catch (NoSuchAlgorithmException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Secret key generation failed (algorithm=" + algorithm + " keysize=" + keysize
+                    + " alias=" + alias + "): " + e.getMessage(), e);
+            throw new KeyStoreException("Failed to generate a " + type.jcaName() + " key on the"
+                    + " token: " + e.getMessage(), e);
+        }
+        // Names the key and puts the alias into the wrapper's cache in one step, so unlike the
+        // key-pair path this needs no cache rebuild afterwards.
+        keyStore.setKeyEntry(alias, key, null, null);
+        log.info("Generated a " + type.jcaName() + " secret key '" + alias + "'");
+    }
+
+    /**
+     * Refuses an alias the token already uses for a secret key.
+     *
+     * <p>The counterpart of {@link #requireAliasFree}, and there for the same reason: PKCS#11 puts
+     * no uniqueness constraint on {@code CKA_LABEL}, so without this the token ends up with two
+     * secret keys of the same name and enumeration picks one of them arbitrarily. Private keys are
+     * checked too — one alias must not name two different kinds of key.
+     */
+    private void requireSecretAliasFree(TokenRuntime current, String alias)
+            throws KeyStoreException, CryptoTokenOfflineException {
+        try (SessionLease lease = current.slot().borrow()) {
+            byte[] label = alias.getBytes(StandardCharsets.UTF_8);
+            for (long objectClass : new long[] {CKO.SECRET_KEY, CKO.PRIVATE_KEY}) {
+                long[] existing = current.slot().ce().FindObjects(lease.session(),
+                        new CKA(CKA.CLASS, objectClass), new CKA(CKA.LABEL, label));
+                if (existing != null && existing.length > 0) {
+                    throw new KeyStoreException("The token already holds a key with the alias '"
+                            + alias + "'. Delete it first, or choose another alias.");
+                }
+            }
+        }
     }
 
     /**
@@ -392,6 +483,10 @@ public class CryptoTokenImpl {
         Kimbo11ngKeyStoreSpi spi = current == null ? null : current.keyStoreSpi();
         if (spi == null) {
             return;
+        }
+        if (spi.isSecretKey(alias)) {
+            throw new InvalidKeyException("Alias '" + alias + "' names a secret key, which has no"
+                    + " public half and therefore no key pair to test.");
         }
         Optional<AlgorithmEntry> entry = spi.algorithmFor(alias);
         if (entry.isPresent() && !entry.get().canSign()) {
@@ -747,6 +842,19 @@ public class CryptoTokenImpl {
             return size.isEmpty() ? 2048 : Integer.parseInt(size);
         }
         return Integer.parseInt(keySpec);
+    }
+
+    /**
+     * True if this alias names a {@code CKO_SECRET_KEY} rather than a key pair.
+     *
+     * <p>Exists because EJBCA has no such concept: every alias it sees through
+     * {@code CryptoToken.getAliases} is assumed to be a key pair, and some of what it does with that
+     * assumption is not recoverable. See {@code Kimbo11ngCryptoToken.getPrivateKey}.
+     */
+    public boolean isSecretKey(String alias) {
+        TokenRuntime current = runtime;
+        Kimbo11ngKeyStoreSpi spi = current == null ? null : current.keyStoreSpi();
+        return spi != null && spi.isSecretKey(alias);
     }
 
     public Kimbo11ngProvider getProvider() {

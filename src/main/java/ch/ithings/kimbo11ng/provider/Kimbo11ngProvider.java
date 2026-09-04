@@ -40,17 +40,22 @@ public final class Kimbo11ngProvider extends Provider {
             new ConcurrentHashMap<>();
 
     /**
-     * The {@code Signature} algorithms currently registered, so that re-pointing this provider at a
-     * runtime with a different algorithm set can withdraw the ones that no longer apply.
+     * The capability-dependent services currently registered, as {@code "type:algorithm"}, so that
+     * re-pointing this provider at a runtime with a different algorithm set can withdraw the ones
+     * that no longer apply.
      *
      * <p>Without this the services stay frozen at whatever the first runtime for this (library,
      * slot) supported, while {@link #runtime()} reports the new one — a provider that answers
      * accurately about its token and inaccurately about itself.
      *
+     * <p>Only the services whose presence depends on the token are tracked: {@code Signature},
+     * {@code Mac} and {@code KeyGenerator}. {@code KeyStore}, the digests and the key-pair
+     * generators are registered unconditionally and have nothing to withdraw.
+     *
      * <p>{@code transient} because {@link Provider} is {@link java.io.Serializable} and this is a
      * cache of what was registered, rebuilt from the runtime on every {@code registerServices}.
      */
-    private final transient Set<String> registeredSignatures = ConcurrentHashMap.newKeySet();
+    private final transient Set<String> registeredServices = ConcurrentHashMap.newKeySet();
 
     /**
      * A classical signature service: the JCA name EJBCA asks for, the mechanism behind it, whether
@@ -114,13 +119,13 @@ public final class Kimbo11ngProvider extends Provider {
                 log.debug("Re-pointed provider " + name + " from " + previous + " to "
                         + newRuntime);
             }
-            provider.resyncSignatures(newRuntime);
+            provider.resyncServices(newRuntime);
         }
         return provider;
     }
 
     /**
-     * Brings the {@code Signature} services back in line after the runtime was swapped.
+     * Brings the capability-dependent services back in line after the runtime was swapped.
      *
      * <p>The instance is cached per (library, slot) and its name has to stay stable because EJBCA
      * holds on to it, so a differing algorithm set cannot be handled by making a second provider.
@@ -131,14 +136,15 @@ public final class Kimbo11ngProvider extends Provider {
      * <p>Only a genuine difference triggers the work: {@code forToken} runs on every init and
      * activate, and churning services under concurrent lookups for no reason is its own hazard.
      */
-    private synchronized void resyncSignatures(TokenRuntime newRuntime) {
-        Set<String> wanted = signatureSurface(newRuntime);
-        if (wanted.equals(registeredSignatures)) {
+    private synchronized void resyncServices(TokenRuntime newRuntime) {
+        Set<String> wanted = serviceSurface(newRuntime);
+        if (wanted.equals(registeredServices)) {
             return;
         }
-        for (String algorithm : Set.copyOf(registeredSignatures)) {
-            if (!wanted.contains(algorithm)) {
-                Service stale = getService("Signature", algorithm);
+        for (String key : Set.copyOf(registeredServices)) {
+            if (!wanted.contains(key)) {
+                int colon = key.indexOf(':');
+                Service stale = getService(key.substring(0, colon), key.substring(colon + 1));
                 if (stale != null) {
                     removeService(stale);
                 }
@@ -148,25 +154,33 @@ public final class Kimbo11ngProvider extends Provider {
         // algorithm, so the services that did not change are simply rebound to the new runtime.
         registerServices(newRuntime);
         log.info("Provider " + getName() + " now offers " + wanted.size()
-                + " signature algorithms after re-pointing to profile "
+                + " token-dependent services after re-pointing to profile "
                 + newRuntime.profile().name());
     }
 
-    /** The {@code Signature} algorithm names a runtime should be offering. */
-    private static Set<String> signatureSurface(TokenRuntime runtime) {
+    /** The {@code "type:algorithm"} keys a runtime should be offering. */
+    private static Set<String> serviceSurface(TokenRuntime runtime) {
         TokenCapabilities capabilities = runtime.algorithms().capabilities();
-        Set<String> names = new LinkedHashSet<>();
+        Set<String> keys = new LinkedHashSet<>();
         for (ClassicalSignature row : CLASSICAL_SIGNATURES) {
             if (capabilities.canSign(row.mechanism())) {
-                names.add(row.jcaName());
+                keys.add("Signature:" + row.jcaName());
             }
         }
         for (AlgorithmEntry entry : runtime.algorithms().supported()) {
             if (entry.canSign()) {
-                names.add(entry.canonicalName());
+                keys.add("Signature:" + entry.canonicalName());
             }
         }
-        return names;
+        for (SecretKeyType type : SecretKeyType.all()) {
+            if (capabilities.canGenerate(type.ckmKeyGen())) {
+                keys.add("KeyGenerator:" + type.jcaName());
+            }
+            if (type.isMac() && capabilities.canSign(type.ckmOperation())) {
+                keys.add("Mac:" + type.jcaName());
+            }
+        }
+        return keys;
     }
 
     private static String nameFor(TokenRuntime runtime) {
@@ -214,7 +228,7 @@ public final class Kimbo11ngProvider extends Provider {
         // recoverable for SignWithWorkingAlgorithm — it tries the next algorithm — where a
         // CKR_MECHANISM_INVALID mid-signature is not.
         TokenCapabilities capabilities = initialRuntime.algorithms().capabilities();
-        registeredSignatures.clear();
+        registeredServices.clear();
         int classical = 0;
         for (ClassicalSignature row : CLASSICAL_SIGNATURES) {
             if (!capabilities.canSign(row.mechanism())) {
@@ -232,7 +246,7 @@ public final class Kimbo11ngProvider extends Provider {
                             row.mechanismParam());
                 }
             });
-            registeredSignatures.add(row.jcaName());
+            registeredServices.add("Signature:" + row.jcaName());
             classical++;
         }
 
@@ -252,7 +266,7 @@ public final class Kimbo11ngProvider extends Provider {
                     return Kimbo11ngSignatureSpi.fromKeyEntry();
                 }
             });
-            registeredSignatures.add(entry.canonicalName());
+            registeredServices.add("Signature:" + entry.canonicalName());
             registered++;
         }
 
@@ -286,11 +300,46 @@ public final class Kimbo11ngProvider extends Provider {
             }
         });
 
+        // Symmetric keys. Registered only when the token will generate them, for the same reason
+        // the signature services are: EJBCA's symmetric path is
+        // KeyGenerator.getInstance(alg, providerName) followed by setKeyEntry, so a
+        // NoSuchAlgorithmException here is a clear refusal at the call site, where
+        // CKR_MECHANISM_INVALID from inside C_GenerateKey would name nothing.
+        //
+        // The Mac services are what make those keys worth generating: the key is CKA_SENSITIVE and
+        // not CKA_EXTRACTABLE, so nothing outside the token can use it. A KeyGenerator without a
+        // Mac would produce keys no caller could consume.
+        int symmetric = 0;
+        for (SecretKeyType type : SecretKeyType.all()) {
+            if (capabilities.canGenerate(type.ckmKeyGen())) {
+                putService(new Service(this, "KeyGenerator", type.jcaName(),
+                        Kimbo11ngKeyGeneratorSpi.class.getName(), null, null) {
+                    @Override
+                    public Object newInstance(Object constructorParameter) {
+                        return new Kimbo11ngKeyGeneratorSpi(runtime.get().slot(), type);
+                    }
+                });
+                registeredServices.add("KeyGenerator:" + type.jcaName());
+                symmetric++;
+            }
+            if (type.isMac() && capabilities.canSign(type.ckmOperation())) {
+                putService(new Service(this, "Mac", type.jcaName(),
+                        Kimbo11ngMacSpi.class.getName(), null, null) {
+                    @Override
+                    public Object newInstance(Object constructorParameter) {
+                        return new Kimbo11ngMacSpi(type);
+                    }
+                });
+                registeredServices.add("Mac:" + type.jcaName());
+                symmetric++;
+            }
+        }
+
         if (log.isDebugEnabled()) {
             log.debug("Registered provider " + getName() + " with " + classical + " of "
                     + CLASSICAL_SIGNATURES.size() + " classical and " + registered
-                    + " post-quantum signature services from profile "
-                    + initialRuntime.profile().name());
+                    + " post-quantum signature services, plus " + symmetric
+                    + " symmetric ones, from profile " + initialRuntime.profile().name());
         }
     }
 }

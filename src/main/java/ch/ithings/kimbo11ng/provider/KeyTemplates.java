@@ -120,6 +120,43 @@ public final class KeyTemplates {
         return new Pair(pub, priv);
     }
 
+    /**
+     * Template for a single secret key.
+     *
+     * <p>{@code CKA_PRIVATE} as well as {@code CKA_SENSITIVE}: a secret key readable without a
+     * login is a secret key on a shared partition that anyone with a session can enumerate. The
+     * asymmetric templates above set both for the same reason.
+     *
+     * <p>The usage attributes follow the key type rather than the caller's request. A generic
+     * secret exists here to be an HMAC key, which PKCS#11 models as signing; an AES key exists to
+     * encrypt and to wrap. Marking a key for everything would be simpler and would defeat
+     * {@code CKA_*}-based policy on an HSM that enforces it.
+     *
+     * @param valueBits the key length, already validated by {@link SecretKeyType#validateBits(int)}
+     */
+    public static List<CKA> secret(byte[] label, byte[] keyId, SecretKeyType type, int valueBits) {
+        List<CKA> template = new ArrayList<>(List.of(
+                new CKA(CKA.CLASS, CKO.SECRET_KEY),
+                new CKA(CKA.KEY_TYPE, type.ckk()),
+                new CKA(CKA.LABEL, label),
+                new CKA(CKA.ID, keyId),
+                new CKA(CKA.VALUE_LEN, (long) (valueBits / 8)),
+                new CKA(CKA.TOKEN, true),
+                new CKA(CKA.PRIVATE, true),
+                new CKA(CKA.SENSITIVE, true),
+                new CKA(CKA.EXTRACTABLE, false)));
+        if (type.isMac()) {
+            template.add(new CKA(CKA.SIGN, true));
+            template.add(new CKA(CKA.VERIFY, true));
+        } else {
+            template.add(new CKA(CKA.ENCRYPT, true));
+            template.add(new CKA(CKA.DECRYPT, true));
+            template.add(new CKA(CKA.WRAP, true));
+            template.add(new CKA(CKA.UNWRAP, true));
+        }
+        return template;
+    }
+
     private static List<CKA> privateBase(byte[] label, byte[] keyId, long keyType) {
         List<CKA> priv = new ArrayList<>(List.of(
                 new CKA(CKA.CLASS, CKO.PRIVATE_KEY),

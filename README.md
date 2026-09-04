@@ -40,6 +40,17 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 one service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A
 service is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
 
+### Symmetric keys
+
+`generateKey` creates a `CKO_SECRET_KEY` on the token — `HmacSHA256`, `HmacSHA384` or `HmacSHA512`,
+generated `CKA_SENSITIVE` and not `CKA_EXTRACTABLE` — and the provider registers a matching `Mac`
+service so the key can be used without leaving the HSM. This is the key EJBCA's database protection
+signs rows with; nothing in Community Edition calls it, since the only call site in the deployed EAR
+is a pass-through in `org.cesecore.dbprotection.CachedCryptoToken` that CE never constructs.
+
+`AES` is refused with an explanation rather than generated: the provider registers no `Cipher`, so
+an AES key on the token would be one nothing could use.
+
 ### What is not supported
 
 - **ML-KEM is generation and enumeration only.** It has no signature or KEM operation here: EJBCA
@@ -47,9 +58,12 @@ service is registered only if the token advertises its mechanism with the matchi
   explanation rather than being run through an RSA-style encryption test that cannot succeed.
 - **Verification.** The provider signs; it does not verify. EJBCA verifies with BouncyCastle from
   the public key, so `Signature.initVerify` through this provider is refused by name.
-- **Symmetric keys.** `generateKey` throws.
-- **Certificates on the token.** `KeyStore.getCertificate` returns null without a round trip;
-  EJBCA keeps issued certificates in its database.
+- **Symmetric encryption.** There is no `Cipher` service, so the token's AES mechanisms are not
+  reachable from here. Only the HMAC key types above are offered.
+- **Certificates on the token.** `KeyStore.getCertificate` returns null, deliberately and without
+  asking the token: EJBCA keeps issued certificates in its database, a PKCS#11 chain could not be
+  reconstructed from unordered objects anyway, and answering from memory keeps EJBCA's
+  per-key-generation cache rebuild free. This is a design decision, not a gap.
 
 ## Prerequisites
 

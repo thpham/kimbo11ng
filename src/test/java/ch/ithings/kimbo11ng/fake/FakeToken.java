@@ -17,6 +17,7 @@ import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKK;
 import org.pkcs11.jacknji11.CKM;
+import org.pkcs11.jacknji11.CKO;
 import org.pkcs11.jacknji11.CKR;
 import org.pkcs11.jacknji11.CKS;
 import org.pkcs11.jacknji11.CKU;
@@ -509,6 +510,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 // SoftHSMv3 advertises all three PSS mechanisms with CKF_SIGN|CKF_VERIFY.
                 CKM.SHA256_RSA_PKCS_PSS, CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
+                // Symmetric: the generation mechanisms carry CKF_GENERATE and the HMAC mechanisms
+                // CKF_SIGN|CKF_VERIFY, which is what SoftHSM reports for them.
+                CKM.AES_KEY_GEN, CKM.GENERIC_SECRET_KEY_GEN,
+                CKM.SHA256_HMAC, CKM.SHA384_HMAC, CKM.SHA512_HMAC,
                 CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
                 CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA,
                 CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM));
@@ -561,6 +566,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
                 || type == CKM_ML_KEM_KEY_PAIR_GEN) {
             return CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR;
+        }
+        // CKF_GENERATE, not CKF_GENERATE_KEY_PAIR: distinct flags on distinct mechanisms, and a
+        // token that confuses them would let a provider register the wrong service.
+        if (type == CKM.AES_KEY_GEN || type == CKM.GENERIC_SECRET_KEY_GEN) {
+            return CK_MECHANISM_INFO.CKF_GENERATE;
         }
         // Encapsulate/decapsulate, not sign — the distinction a presence-only probe would lose.
         if (type == CKM_ML_KEM) {
@@ -827,6 +837,54 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     // ---------------------------------------------------------------- key generation
+
+    /**
+     * {@code C_GenerateKey}: one secret key, as opposed to the pair {@code C_GenerateKeyPair} makes.
+     *
+     * <p>The material is real random of the requested length and is kept under an internal
+     * attribute rather than {@code CKA_VALUE}, so that a caller asking the token for the key bytes
+     * gets {@code CKR_ATTRIBUTE_SENSITIVE} the way a real token answers for a sensitive key — which
+     * is what forces the MAC to go through the token instead of quietly happening in software.
+     */
+    @Override
+    public synchronized long C_GenerateKey(long handle, CKM mechanism, CKA[] template, long count,
+            LongRef keyOut) {
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
+        if (session(handle) == null) {
+            return CKR.SESSION_HANDLE_INVALID;
+        }
+        if (!loggedIn) {
+            return CKR.USER_NOT_LOGGED_IN;
+        }
+        long ckm = mechanism.mechanism;
+        if (!mechanismList().contains(ckm)) {
+            return CKR.MECHANISM_INVALID;
+        }
+        if (ckm != CKM.AES_KEY_GEN && ckm != CKM.GENERIC_SECRET_KEY_GEN) {
+            return CKR.MECHANISM_INVALID;
+        }
+        Map<Long, byte[]> attrs = toMap(template);
+        byte[] valueLen = attrs.get(CKA.VALUE_LEN);
+        if (valueLen == null) {
+            // A real token needs a length for both of these mechanisms; CKA_VALUE_LEN is not
+            // optional the way it is for a mechanism that fixes the size itself.
+            return CKR.TEMPLATE_INCOMPLETE;
+        }
+        int bytes = (int) decodeLong(valueLen);
+        if (ckm == CKM.AES_KEY_GEN && bytes != 16 && bytes != 24 && bytes != 32) {
+            return CKR.ATTRIBUTE_VALUE_INVALID;
+        }
+        byte[] material = new byte[bytes];
+        RANDOM.nextBytes(material);
+        attrs.put(SECRET_MATERIAL, material);
+        attrs.put(SIGN_ALGORITHM, "HMAC".getBytes(StandardCharsets.UTF_8));
+        attrs.putIfAbsent(CKA.CLASS, encodeLong(CKO.SECRET_KEY));
+        keyOut.value = store(attrs);
+        return CKR.OK;
+    }
 
     @Override
     public synchronized long C_GenerateKeyPair(long handle, CKM mechanism, CKA[] pubTemplate,
@@ -1108,6 +1166,14 @@ public final class FakeToken extends UnsupportedNativeProvider {
         Map<Long, byte[]> key = objects.get(s.signKey);
         byte[] alg = key.get(SIGN_ALGORITHM);
         String algorithm = (alg == null) ? "PQC" : new String(alg, StandardCharsets.UTF_8);
+        if ("HMAC".equals(algorithm)) {
+            // A real HMAC, so a test can check the token's answer against one computed in software
+            // from the same material — which is what proves the key travelled correctly and that
+            // the mechanism-to-digest mapping is right.
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance(macAlgorithm(s.signMechanism));
+            mac.init(new javax.crypto.spec.SecretKeySpec(key.get(SECRET_MATERIAL), "HMAC"));
+            return mac.doFinal(data);
+        }
         if ("PQC".equals(algorithm)) {
             // No real PQC signing: nothing under test verifies these, and a wrong-length blob
             // would be a worse lie than an obviously synthetic one of plausible size.
@@ -1125,6 +1191,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
         // PKCS#11 returns ECDSA as the raw r||s pair, not DER — mirroring that is essential,
         // because converting it back is exactly what Kimbo11ngSignatureSpi has to get right.
         return "EC".equals(algorithm) ? derToRawEcdsa(der, fieldSize(key)) : der;
+    }
+
+    /** The JCA MAC name for an HMAC mechanism, so the fake computes the digest the caller asked for. */
+    private static String macAlgorithm(long ckm) {
+        if (ckm == CKM.SHA384_HMAC) {
+            return "HmacSHA384";
+        }
+        if (ckm == CKM.SHA512_HMAC) {
+            return "HmacSHA512";
+        }
+        return "HmacSHA256";
     }
 
     private static String signatureAlgorithm(long ckm, String keyAlgorithm) {
@@ -1204,6 +1281,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** Internal-only attribute slots, well outside the PKCS#11 vendor-defined range. */
     private static final long PRIVATE_MATERIAL = 0x7F000001L;
     private static final long SIGN_ALGORITHM = 0x7F000002L;
+    /** Secret-key bytes. Not CKA_VALUE: a sensitive key must not answer a read of its material. */
+    private static final long SECRET_MATERIAL = 0x7F000003L;
 
     private long store(Map<Long, byte[]> attributes) {
         long handle = nextHandle.getAndIncrement();

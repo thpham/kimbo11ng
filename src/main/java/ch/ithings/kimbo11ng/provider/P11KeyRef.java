@@ -85,8 +85,21 @@ public final class P11KeyRef {
      * @return the object handle, or -1 if the token no longer holds this key
      */
     public long resolve(CryptokiE ce, long session) {
+        return resolve(ce, session, CKO.PRIVATE_KEY);
+    }
+
+    /**
+     * As {@link #resolve(CryptokiE, long)}, for a key that is not a private key.
+     *
+     * <p>{@code CKO_SECRET_KEY} is the third object class a key can have, and it is a separate
+     * search: a secret key and a private key may legitimately share both a label and a
+     * {@code CKA_ID}, so the class is what tells them apart.
+     *
+     * @param objectClass the {@code CKO_*} class to search
+     */
+    public long resolve(CryptokiE ce, long session, long objectClass) {
         if (hasCkaId()) {
-            long byId = findOne(ce, session, new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
+            long byId = findOne(ce, session, new CKA(CKA.CLASS, objectClass),
                     new CKA(CKA.ID, ckaId));
             if (byId >= 0) {
                 return byId;
@@ -98,7 +111,7 @@ public final class P11KeyRef {
                 log.debug("No object with CKA_ID for '" + label + "'; falling back to the label");
             }
         }
-        return findOne(ce, session, new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
+        return findOne(ce, session, new CKA(CKA.CLASS, objectClass),
                 new CKA(CKA.LABEL, labelBytes()));
     }
 

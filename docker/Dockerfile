@@ -1,18 +1,24 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Prebuilt OpenSSL + SoftHSMv3, from docker/Dockerfile.toolchain.
 #
-# Compiling those two from source is 418s natively and was 5696s for linux/arm64 under
-# QEMU, and it does not change between releases — so it lives in its own image, rebuilt
-# only when OPENSSL_VERSION or SOFTHSM_VERSION moves. See docker/Dockerfile.toolchain.
+# Compiling those two from source takes 446s on amd64 and 329s on arm64, both native, and
+# it does not change between releases — so it lives in its own image, rebuilt only when
+# OPENSSL_VERSION or SOFTHSM_VERSION moves. See docker/Dockerfile.toolchain.
 #
-# Override to build against a local toolchain instead of the published one:
-#   just toolchain-build && just docker-build
+# Pinned by digest, like every other external reference here (GitHub Actions, jacknji11,
+# the EJBCA base image). It is not only hygiene: toolchain.yml and ci.yml both trigger on a
+# push to main, so a tag that changes with a version bump can be referenced by a CI run
+# before it exists — which is exactly what happened on the first run. A digest can only
+# ever name something already published.
 #
-# TODO pin by digest (@sha256:…) once the toolchain workflow has published the first
-# image. A tag is mutable, and every other external reference in this repository —
-# GitHub Actions, jacknji11, the EJBCA base image — is pinned.
+# To bump: change the versions in docker/Dockerfile.toolchain and the justfile, run
+# `gh workflow run toolchain.yml`, take the digest from its job summary, and change the
+# line below in a separate commit. The order matters, for the reason above.
+#
+# `just docker-build` overrides this with the version-derived tag instead, so that
+# `just toolchain-build` works offline and without GHCR credentials.
 # ─────────────────────────────────────────────────────────────────────────────
-ARG TOOLCHAIN=ghcr.io/thpham/ejbca-ce-toolchain:openssl3.6.0-softhsmv0.28.1
+ARG TOOLCHAIN=ghcr.io/thpham/ejbca-ce-toolchain@sha256:29360d98d2c42547f3da2390c08c16c6ebaf29be88a82bb0d055340e6361ea44
 FROM ${TOOLCHAIN} AS toolchain
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,138 @@
+name: Toolchain
+
+# Builds and publishes ghcr.io/thpham/ejbca-ce-toolchain — OpenSSL and SoftHSMv3 compiled
+# from source — so that docker/Dockerfile does not have to. Deliberately not part of CI:
+# it only needs to run when one of the two versions below changes, which is a handful of
+# times a year, and running it costs what the old CI pipeline cost in full.
+#
+# After a successful run, copy the digest from the job summary into the TOOLCHAIN default
+# in docker/Dockerfile and commit it.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - docker/Dockerfile.toolchain
+      - .github/workflows/toolchain.yml
+
+env:
+  # Keep in step with the same two variables in the justfile, which is the source of truth
+  # for a local `just toolchain-build`.
+  OPENSSL_VERSION: "3.6.0"
+  SOFTHSM_VERSION: "v0.28.1"
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/thpham/ejbca-ce-toolchain
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # One leg per architecture on a native runner. Compiling OpenSSL and SoftHSM under QEMU
+  # is what made this 95 minutes in the first place, and it is the whole content here.
+  build:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest (${{ matrix.platform }})
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile.toolchain
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
+            SOFTHSM_VERSION=${{ env.SOFTHSM_VERSION }}
+          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: toolchain-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: toolchain-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The tag encodes both versions, so a bump publishes a new one rather than moving an
+      # existing tag. docker/Dockerfile still pins the digest; the tag is for humans.
+      - name: Create the manifest list
+        id: manifest
+        working-directory: /tmp/digests
+        run: |
+          TAG="${IMAGE}:openssl${OPENSSL_VERSION}-softhsm${SOFTHSM_VERSION}"
+          docker buildx imagetools create -t "$TAG" $(printf "${IMAGE}@%s " *)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Report the digest to pin
+        run: |
+          TAG='${{ steps.manifest.outputs.tag }}'
+          DIGEST=$(docker buildx imagetools inspect "$TAG" \
+                     --format '{{ .Manifest.Digest }}')
+          {
+            echo "## Toolchain published"
+            echo
+            echo "    $TAG"
+            echo
+            echo "Pin this in the \`TOOLCHAIN\` default of \`docker/Dockerfile\`:"
+            echo
+            echo "    ARG TOOLCHAIN=${IMAGE}@${DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect "$TAG"

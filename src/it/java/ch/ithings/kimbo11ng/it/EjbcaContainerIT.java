@@ -82,41 +82,79 @@ class EjbcaContainerIT {
     private static ch.ithings.kimbo11ng.it.ejbca.api.V1CaApi caApi;
     private static ch.ithings.kimbo11ng.it.ejbca.api.V1CertificateApi certApi;
 
+    /**
+     * Set when this class is loaded, which the Testcontainers extension does before it starts
+     * {@link #COMPOSE}. The gap to the first line of {@link #setUp()} is therefore the compose
+     * stack coming up, to within class-loading noise — an approximation, but the only one
+     * available without reaching into the extension's lifecycle.
+     */
+    private static final long CLASS_LOADED_AT = System.nanoTime();
+
+    /** A step of {@link #setUp()}, so {@link #step} can time it. */
+    private interface SetUpStep {
+        void run() throws Exception;
+    }
+
+    /**
+     * Runs one setUp step and prints how long it took.
+     *
+     * <p>{@code System.out} rather than a logger on purpose: this has to be legible in the raw
+     * Failsafe output of a CI run without a logging config, which is the only place the numbers
+     * are wanted. Setup is 60% of this class's wall clock and there was no breakdown of it.
+     */
+    private static void step(String name, SetUpStep body) throws Exception {
+        long start = System.nanoTime();
+        body.run();
+        timing(name, System.nanoTime() - start);
+    }
+
+    private static void timing(String name, long nanos) {
+        System.out.printf("[it-timing] %-34s %6.1fs%n", name, nanos / 1_000_000_000.0);
+    }
+
     @BeforeAll
     static void setUp() throws Exception {
         Assumptions.assumeTrue(
             DockerClientFactory.instance().isDockerAvailable(),
             "Docker not available — skipping integration tests");
 
+        long setUpStart = System.nanoTime();
+        timing("0 compose stack up (approx)", setUpStart - CLASS_LOADED_AT);
+
         // 1. Enable REST Certificate Management protocol (persisted to DB)
-        enableProtocol("REST Certificate Management");
+        step("1 enable REST protocol",
+            () -> enableProtocol("REST Certificate Management"));
 
         // 2. Generate it-admin.p12 and register as Super Administrator
-        generateItAdminCert();
+        step("2 generate it-admin cert", EjbcaContainerIT::generateItAdminCert);
 
         // 3. Import ManagementCA into WildFly truststore (enables mTLS client auth)
-        importManagementCaIntoTruststore();
+        step("3 import CA into truststore", EjbcaContainerIT::importManagementCaIntoTruststore);
 
         // 4. Provision TestHSM Pkcs11NgCryptoToken (idempotent DB insert)
-        provisionTestHsmToken();
+        step("4 provision TestHSM token", EjbcaContainerIT::provisionTestHsmToken);
 
         // 5. Restart EJBCA — picks up TestHSM token + reloads truststore
-        restartEjbcaAndWait();
+        step("5 restart EJBCA", EjbcaContainerIT::restartEjbcaAndWait);
 
         // 6. Extract it-admin.p12 and build mTLS EJBCA API client
-        File p12 = extractItAdminP12();
-        ch.ithings.kimbo11ng.it.ejbca.ApiClient apiClient = buildEjbcaApiClient(p12);
-        caApi = new ch.ithings.kimbo11ng.it.ejbca.api.V1CaApi(apiClient);
-        certApi = new ch.ithings.kimbo11ng.it.ejbca.api.V1CertificateApi(apiClient);
+        step("6 build mTLS client", () -> {
+            File p12 = extractItAdminP12();
+            ch.ithings.kimbo11ng.it.ejbca.ApiClient apiClient = buildEjbcaApiClient(p12);
+            caApi = new ch.ithings.kimbo11ng.it.ejbca.api.V1CaApi(apiClient);
+            certApi = new ch.ithings.kimbo11ng.it.ejbca.api.V1CertificateApi(apiClient);
+        });
 
         // 7. Create PQC Root CA (ML-DSA-65) for certificate issuance tests
-        createPqcRootCa();
+        step("7 create ML-DSA root CA", EjbcaContainerIT::createPqcRootCa);
 
         // 7b. Create SLH-DSA Root CA (SLH-DSA-SHA2-128F)
-        createSlhDsaRootCa();
+        step("7b create SLH-DSA root CA", EjbcaContainerIT::createSlhDsaRootCa);
 
         // 7c. Create Hybrid Root CA (RSA primary + ML-DSA-65 alternative)
-        createHybridRootCa();
+        step("7c create hybrid root CA", EjbcaContainerIT::createHybridRootCa);
+
+        timing("setUp total", System.nanoTime() - setUpStart);
     }
 
     // ─── Setup helpers ────────────────────────────────────────────────────────

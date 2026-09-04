@@ -217,11 +217,44 @@ public class Kimbo11ngCryptoToken extends BaseCryptoToken implements P11SlotUser
      * from the key-usage set. An ML-KEM key legitimately reports {@code CKA_DECRYPT} and no
      * {@code CKA_SIGN}, which selects the encryption branch — and key encapsulation is not
      * encryption, so the test fails inside a JCA {@code Cipher} with a message about padding.
+     *
+     * <p>A secret key is refused here too, with its own message. Not for a better error: without
+     * this, {@code super.testKeyPair} reaches {@link #getPrivateKey(String)} — see there.
      */
     @Override
     public void testKeyPair(String alias)
             throws InvalidKeyException, CryptoTokenOfflineException {
         impl.requireTestableKeyPair(alias);
         super.testKeyPair(alias);
+    }
+
+    /**
+     * Answers for a secret-key alias instead of letting {@code BaseCryptoToken} cast one.
+     *
+     * <p>{@code BaseCryptoToken.getPrivateKey} is
+     * {@code (PrivateKey) getKeyStore().getKey(alias, pin)} — an unguarded {@code checkcast}, whose
+     * {@code catch} covers {@code KeyStoreException}, {@code UnrecoverableKeyException},
+     * {@code NoSuchAlgorithmException} and {@code ProviderException}, and not
+     * {@code ClassCastException}. Since symmetric keys became possible here, an alias naming one is
+     * reachable from that cast, and the resulting CCE is unchecked: it escapes every caller.
+     *
+     * <p>The caller that matters is {@code HsmKeepAliveWorker}. It walks
+     * {@code CryptoToken.getAliases()} — every alias, unfiltered — and calls {@code testKeyPair} on
+     * each, catching {@code InvalidKeyException}, {@code CryptoTokenOfflineException} and
+     * {@code KeyStoreException}. A CCE is none of those, so one secret key on the token would take
+     * down the whole keep-alive service for it, on a schedule, with a stack trace naming a cast.
+     *
+     * <p>{@code CryptoTokenOfflineException} is what {@code BaseCryptoToken} itself throws when an
+     * alias has no private key, so this reports the same condition the same way — and
+     * {@code doesPrivateKeyExist} catches it and answers false, which is the truth.
+     */
+    @Override
+    public java.security.PrivateKey getPrivateKey(String alias) throws CryptoTokenOfflineException {
+        if (impl.isSecretKey(alias)) {
+            throw new CryptoTokenOfflineException("Alias '" + alias + "' names a secret key on this"
+                    + " token, not a private key. Secret keys are used through a Mac service, not"
+                    + " through getPrivateKey.");
+        }
+        return super.getPrivateKey(alias);
     }
 }

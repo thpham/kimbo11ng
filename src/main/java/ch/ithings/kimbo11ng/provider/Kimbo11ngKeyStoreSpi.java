@@ -27,9 +27,11 @@ import java.security.cert.Certificate;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -48,6 +50,16 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     private final Map<String, Kimbo11ngPrivateKey> privateKeys = new ConcurrentHashMap<>();
     private final Map<String, PublicKey> publicKeys = new ConcurrentHashMap<>();
 
+    /**
+     * Secret keys, kept apart from {@link #privateKeys} rather than in one map of {@code Key}.
+     *
+     * <p>They are a different object class on the token ({@code CKO_SECRET_KEY}), they are found by
+     * a different search, and every caller that walks the private keys — key usages, the public-key
+     * pairing, the algorithm lookup — means asymmetric keys specifically. One map would have made
+     * each of those quietly wrong for a secret key rather than simply not finding it.
+     */
+    private final Map<String, Kimbo11ngSecretKey> secretKeys = new ConcurrentHashMap<>();
+
     public Kimbo11ngKeyStoreSpi(TokenRuntime runtime) {
         this.runtime = runtime;
     }
@@ -58,7 +70,8 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public Key engineGetKey(String alias, char[] password) throws UnrecoverableKeyException {
-        return privateKeys.get(alias);
+        Key key = privateKeys.get(alias);
+        return key != null ? key : secretKeys.get(alias);
     }
 
     @Override
@@ -94,6 +107,10 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) {
+        if (key instanceof Kimbo11ngSecretKey secretKey) {
+            setSecretKeyEntry(alias, secretKey);
+            return;
+        }
         if (!(key instanceof Kimbo11ngPrivateKey p11Key)) {
             return;
         }
@@ -122,6 +139,45 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         }
     }
 
+    /**
+     * Gives a freshly generated secret key its alias.
+     *
+     * <p>This is the second half of symmetric key generation, and the JCA splits it that way: a
+     * {@code KeyGenerator} is handed no name, so {@link Kimbo11ngKeyGeneratorSpi} creates the object
+     * under a provisional label and the caller names it here. EJBCA's own
+     * {@code KeyStoreTools.generateKey} performs exactly these two calls in sequence.
+     *
+     * <p>Unlike the key-pair case there is one object to relabel, not two — a secret key has no
+     * public half to keep in step.
+     */
+    private void setSecretKeyEntry(String alias, Kimbo11ngSecretKey secretKey) {
+        try (SessionLease lease = slot().borrow()) {
+            long session = lease.session();
+            CryptokiE ce = slot().ce();
+            byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
+            P11KeyRef ref = secretKey.ref();
+            int relabelled = 0;
+            for (long handle : ref.findAll(ce, session, CKO.SECRET_KEY)) {
+                ce.SetAttributeValue(session, handle, new CKA(CKA.LABEL, labelBytes));
+                relabelled++;
+            }
+            if (relabelled == 0) {
+                // The generator wrote a CKA_ID and this search uses it, so finding nothing means
+                // the object is gone. Registering the alias anyway would leave EJBCA holding a name
+                // for a key the token does not have, and the failure would surface on first use.
+                log.error("Not registering secret key '" + alias + "': no CKO_SECRET_KEY object"
+                        + " matches " + ref + " on the token.");
+                return;
+            }
+            secretKeys.put(alias,
+                    new Kimbo11ngSecretKey(secretKey.getAlgorithm(), slot(),
+                            new P11KeyRef(ref.ckaId(), alias, null)));
+            log.info("Registered secret key '" + alias + "' (" + secretKey.getAlgorithm() + ")");
+        } catch (Exception e) {
+            log.error("Failed to label secret key entry '" + alias + "': " + e.getMessage(), e);
+        }
+    }
+
     @Override
     public void engineSetKeyEntry(String alias, byte[] key, Certificate[] chain) {
         throw new UnsupportedOperationException("Cannot set raw key bytes on a PKCS#11 token");
@@ -146,6 +202,10 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     public void engineDeleteEntry(String alias) {
         Kimbo11ngPrivateKey key = privateKeys.get(alias);
         if (key == null) {
+            if (secretKeys.containsKey(alias)) {
+                deleteSecretEntry(alias);
+                return;
+            }
             log.warn("Not deleting '" + alias + "': no such key in this keystore");
             return;
         }
@@ -176,24 +236,63 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         }
     }
 
+    /** The secret-key half of {@link #engineDeleteEntry}: one object class, no public half. */
+    private void deleteSecretEntry(String alias) {
+        Kimbo11ngSecretKey key = secretKeys.get(alias);
+        try (SessionLease lease = slot().borrow()) {
+            long session = lease.session();
+            CryptokiE ce = slot().ce();
+            P11KeyRef ref = key.ref();
+            if (!ref.hasCkaId()) {
+                log.warn("Deleting secret key '" + alias + "' by label: it carries no CKA_ID, so"
+                        + " any other object with the same label will be removed with it.");
+            }
+            int destroyed = 0;
+            for (long handle : ref.findAll(ce, session, CKO.SECRET_KEY)) {
+                ce.DestroyObject(session, handle);
+                destroyed++;
+            }
+            log.info("Deleted " + destroyed + " secret-key object(s) for alias '" + alias + "'");
+        } catch (Exception e) {
+            log.error("Failed to delete secret key '" + alias + "': " + e.getMessage(), e);
+        } finally {
+            secretKeys.remove(alias);
+            slot().invalidateHandles();
+        }
+    }
+
+    /**
+     * Every alias this keystore holds, asymmetric and symmetric.
+     *
+     * <p>A union rather than two enumerations, because {@code CachingKeyStoreWrapper} builds its
+     * whole alias cache from this one call: an alias missing here is an alias EJBCA reports as
+     * absent even though the token holds the key.
+     */
     @Override
     public Enumeration<String> engineAliases() {
-        return Collections.enumeration(privateKeys.keySet());
+        if (secretKeys.isEmpty()) {
+            return Collections.enumeration(privateKeys.keySet());
+        }
+        Set<String> all = new LinkedHashSet<>(privateKeys.keySet());
+        all.addAll(secretKeys.keySet());
+        return Collections.enumeration(all);
     }
 
     @Override
     public boolean engineContainsAlias(String alias) {
-        return privateKeys.containsKey(alias);
+        return privateKeys.containsKey(alias) || secretKeys.containsKey(alias);
     }
 
     @Override
     public int engineSize() {
-        return privateKeys.size();
+        // Sum, not union: an alias cannot name both a private and a secret key here, because
+        // generation refuses an alias the token already uses for either.
+        return privateKeys.size() + secretKeys.size();
     }
 
     @Override
     public boolean engineIsKeyEntry(String alias) {
-        return privateKeys.containsKey(alias);
+        return engineContainsAlias(alias);
     }
 
     @Override
@@ -215,6 +314,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     public void engineLoad(InputStream stream, char[] password) throws IOException {
         privateKeys.clear();
         publicKeys.clear();
+        secretKeys.clear();
 
         if (!slot().isLoggedIn()) {
             if (password == null || password.length == 0) {
@@ -244,6 +344,63 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         // sessions would let another thread delete a key between the two halves.
         try (SessionLease lease = slot().borrow()) {
             enumerateKeys(lease.session());
+            enumerateSecretKeys(lease.session());
+        }
+    }
+
+    /**
+     * Loads the {@code CKO_SECRET_KEY} objects on the token.
+     *
+     * <p>A separate pass rather than a wider search, because the two classes share almost nothing:
+     * a secret key has no public half to pair, no algorithm row to resolve, and no
+     * {@code CKA_KEY_TYPE} that identifies the operation it will be used for.
+     *
+     * <h2>What the algorithm name means here</h2>
+     *
+     * <p>It names the <em>key type</em> — {@code AES} or {@code GenericSecret} — and not the MAC or
+     * cipher the key will serve. PKCS#11 does not record that: a {@code CKK_GENERIC_SECRET} object
+     * is equally an HmacSHA256 and an HmacSHA512 key, and the mechanism is chosen by the
+     * {@code Mac} service at use, not by the key. Naming it {@code HmacSHA256} on a guess would
+     * make a key that was generated for SHA-512 report the wrong algorithm forever after a restart.
+     */
+    private void enumerateSecretKeys(long session) {
+        CryptokiE ce = slot().ce();
+        long[] handles = ce.FindObjects(session, new CKA(CKA.CLASS, CKO.SECRET_KEY));
+        if (handles == null) {
+            return;
+        }
+        for (long handle : handles) {
+            try {
+                CKA[] attrs = ce.GetAttributeValue(session, handle, CKA.LABEL, CKA.KEY_TYPE);
+                byte[] labelBytes = attrs[0].getValue();
+                Long keyType = CkULong.typeCode(attrs[1]);
+                if (keyType == null) {
+                    log.warn("Skipping secret key handle " + handle + ": no CKA_KEY_TYPE");
+                    continue;
+                }
+                String algorithm;
+                if (keyType == CKK.AES) {
+                    algorithm = "AES";
+                } else if (keyType == CKK.GENERIC_SECRET) {
+                    algorithm = "GenericSecret";
+                } else {
+                    log.warn("Skipping secret key handle " + handle + ": CKK 0x"
+                            + Long.toHexString(keyType) + " is not a key type this provider can"
+                            + " use. It stays on the token, untouched.");
+                    continue;
+                }
+                String alias = labelBytes != null
+                        ? new String(labelBytes, StandardCharsets.UTF_8).trim()
+                        : "secret-" + handle;
+                byte[] ckaId = P11KeyRef.readCkaId(ce, session, handle);
+                secretKeys.put(alias, new Kimbo11ngSecretKey(algorithm, slot(),
+                        new P11KeyRef(ckaId, alias, null), handle));
+                if (log.isDebugEnabled()) {
+                    log.debug("Loaded secret key alias=" + alias + " algorithm=" + algorithm);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to process secret key handle " + handle + ": " + e.getMessage());
+            }
         }
     }
 
@@ -413,9 +570,15 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         return key == null ? Optional.empty() : key.entry();
     }
 
+    /** True if this alias names a secret key rather than a key pair. */
+    public boolean isSecretKey(String alias) {
+        return secretKeys.containsKey(alias);
+    }
+
     /** Drops cached keys; used when the token is deactivated. */
     public void clear() {
         privateKeys.clear();
         publicKeys.clear();
+        secretKeys.clear();
     }
 }

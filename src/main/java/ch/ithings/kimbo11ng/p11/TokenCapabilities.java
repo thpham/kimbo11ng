@@ -169,6 +169,17 @@ public final class TokenCapabilities {
         return can(ckm, CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR);
     }
 
+    /**
+     * True if the token will generate a <em>single</em> key with this mechanism.
+     *
+     * <p>{@code CKF_GENERATE} and {@code CKF_GENERATE_KEY_PAIR} are distinct flags on distinct
+     * mechanisms: {@code C_GenerateKey} produces one secret key, {@code C_GenerateKeyPair} produces
+     * two. A token may offer either without the other.
+     */
+    public boolean canGenerate(long ckm) {
+        return can(ckm, CK_MECHANISM_INFO.CKF_GENERATE);
+    }
+
     /** True if the token will sign with this mechanism. */
     public boolean canSign(long ckm) {
         return can(ckm, CK_MECHANISM_INFO.CKF_SIGN);

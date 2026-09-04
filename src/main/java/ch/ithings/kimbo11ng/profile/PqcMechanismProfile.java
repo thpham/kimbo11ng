@@ -4,64 +4,59 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
-import java.security.InvalidAlgorithmParameterException;
+import java.util.Collection;
+import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
- * Abstraction for PKCS#11 PQC mechanism constants.
- * Different HSM vendors may use different CKM/CKK/CKP values for the same algorithms.
- * Implementations map algorithm names to the vendor-specific constants.
+ * A vendor's description of how post-quantum algorithms appear over PKCS#11.
+ *
+ * <p>An implementation supplies a table of {@link AlgorithmEntry} and the attribute its token uses
+ * for parameter sets; {@link AbstractTableProfile} provides every lookup on top of that. Adding a
+ * vendor should require no logic — if it does, the missing variation belongs in
+ * {@code AlgorithmEntry}, not in an override here.
+ *
+ * <p>Implementations are discovered with {@link java.util.ServiceLoader}, so a vendor profile can
+ * ship as a separate jar without touching this project.
  */
 public interface PqcMechanismProfile {
 
-    // Key generation mechanisms
-    long ckmMlDsaKeyPairGen();
-    long ckmMlKemKeyPairGen();
+    /**
+     * Stable identifier, matched case-insensitively against the
+     * {@code kimbo11ng.pqc.profile} token property.
+     */
+    String name();
 
-    // Sign/verify and encapsulate/decapsulate mechanisms
-    long ckmMlDsa();
-    long ckmMlKem();
+    /** Every algorithm this profile describes. */
+    Collection<AlgorithmEntry> entries();
 
-    // Key types
-    long ckkMlDsa();
-    long ckkMlKem();
-
-    // Attribute ID for parameter set selection
+    /**
+     * Attribute holding the parameter set, {@code CKA_PARAMETER_SET} (0x61D) in PKCS#11 v3.2.
+     * Vendors that predate the attribute may use a different id, or none — see
+     * {@link AlgorithmEntry#ckpParameterSet()}.
+     */
     long ckaParameterSet();
 
     /**
-     * Resolve a key spec string like "ML-DSA-65" to a CKP parameter set value.
+     * Resolve a key specification such as {@code "ML-DSA-65"}, tolerating separator and case
+     * differences.
      */
-    long resolveMlDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException;
+    Optional<AlgorithmEntry> lookup(String keySpec);
 
     /**
-     * Resolve a key spec string like "ML-KEM-768" to a CKP parameter set value.
+     * Reverse lookup for a key already on the token.
+     *
+     * @param ckk the key type read from {@code CKA_KEY_TYPE}
+     * @param ckp the parameter set read from the profile's parameter-set attribute, or empty when
+     *            the token did not report one
+     * @return the single matching entry, or empty when the pair is ambiguous or unknown. Ambiguity
+     *         is deliberately not resolved by guessing: a wrong parameter set means a wrong OID in
+     *         an issued certificate.
      */
-    long resolveMlKemParamSet(String keySpec) throws InvalidAlgorithmParameterException;
+    Optional<AlgorithmEntry> lookupByKeyType(long ckk, OptionalLong ckp);
 
-    // SLH-DSA (FIPS 205)
-    long ckmSlhDsaKeyPairGen();
-    long ckmSlhDsa();
-    long ckkSlhDsa();
-
-    /**
-     * Resolve a key spec string like "SLH-DSA-SHA2-128S" to a CKP parameter set value.
-     */
-    long resolveSlhDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException;
-
-    /**
-     * Map a CKK key type value to an algorithm string (e.g., "RSA", "EC", "ML-DSA", "ML-KEM", "SLH-DSA").
-     * Returns null if the key type is not recognized by this profile.
-     */
-    String algorithmForKeyType(long ckk);
-
-    /**
-     * Determine the key spec string (e.g., "ML-DSA-65") from CKK + CKP parameter set.
-     * Used when reading existing keys from the token to display algorithm details.
-     */
-    String keySpecForParams(long ckk, long paramSet);
-
-    /**
-     * Whether this profile supports the given key spec string (ML-DSA, ML-KEM, SLH-DSA).
-     */
-    boolean supports(String keySpec);
+    /** True if {@link #lookup(String)} would resolve this key specification. */
+    default boolean supports(String keySpec) {
+        return lookup(keySpec).isPresent();
+    }
 }

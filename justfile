@@ -9,6 +9,13 @@ set dotenv-load := false
 ejbca_version   := "9.3.7"
 ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version
 openssl_version := "3.6.0"
+# softhsmv3 (now pqctoday-org/pqctoday-hsm) is built from source. Pinned to a release tag:
+# upstream is under heavy development and building an unpinned HEAD makes the image
+# unreproducible and breaks without warning — which it did, between the last published
+# image and today.
+# NOTE: v0.4.7 and v0.4.8 are unbuildable upstream (gitlinks without .gitmodules); moving to
+# v0.5.0+ additionally requires --recurse-submodules in docker/Dockerfile. See that file.
+softhsm_version := "v0.28.1"
 
 # EJBCA dependency JARs: "filename groupId artifactId version"
 # Extracted from the base image and installed to local Maven repo.
@@ -17,7 +24,7 @@ ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 c
 
 # Build configuration
 module_dir := "."
-artifact   := "kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar"
+artifact   := "kimbo11ng-jar-with-dependencies.jar"
 deps_dir   := "deps/ejbca"
 ejbca_lib  := "/opt/keyfactor/ejbca/dist/ejbca.ear/lib"
 
@@ -75,11 +82,32 @@ install-deps: extract-jars
 # Full setup: extract + install + build
 setup: install-deps build
 
+# Only needed to build against upstream instead of Keyfactor's fork:
+#   just jacknji11-upstream && mvn verify -Djacknji11.version=1.3-SNAPSHOT
+# The contingency rehearsal for EJBCA no longer shipping jacknji11 — see
+# docs/JACKNJI11_PROVENANCE.md. Upstream's own tests need a real PKCS#11 token, so they are skipped.
+# Build upstream jacknji11 (joelhockey/jacknji11, MIT) from source and install it locally
+jacknji11-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SRC="${JACKNJI11_SRC:-$(mktemp -d)/jacknji11}"
+    if [ -d "$SRC/.git" ]; then
+        echo "Updating $SRC..."
+        git -C "$SRC" fetch --depth 1 origin master && git -C "$SRC" reset --hard FETCH_HEAD
+    else
+        echo "Cloning upstream into $SRC..."
+        git clone --depth 1 https://github.com/joelhockey/jacknji11.git "$SRC"
+    fi
+    echo "Upstream HEAD: $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
+    cd "$SRC" && mvn -q -DskipTests install
+    echo "Installed $(cd "$SRC" && mvn -q help:evaluate -Dexpression=project.groupId -DforceStdout):jacknji11:$(cd "$SRC" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout)"
+
 # Show current version matrix
 versions:
     #!/usr/bin/env bash
     echo "EJBCA:     {{ejbca_version}} ({{ejbca_image}})"
     echo "OpenSSL:   {{openssl_version}}"
+    echo "SoftHSMv3: {{softhsm_version}} (pqctoday-org/pqctoday-hsm)"
     echo "Artifact:  {{artifact}}"
     echo ""
     echo "Dependencies:"
@@ -92,25 +120,33 @@ versions:
 
 # Build the kimbo11ng fat JAR
 build:
-    cd {{module_dir}} && mvn clean package -q
+    # 'verify', not 'package': the build gates (unit tests, artifact contents, SpotBugs,
+    # coverage floor, duplicate classes, license headers) are all bound to the verify phase.
+    cd {{module_dir}} && mvn clean verify -q
     @echo "Built: {{module_dir}}/target/{{artifact}}"
 
-# Build without clean
+# Build without clean or gates — fast path for `just deploy` hot-reload iteration only.
 build-quick:
-    cd {{module_dir}} && mvn package -q
-    @echo "Built: {{module_dir}}/target/{{artifact}}"
+    cd {{module_dir}} && mvn package -q -DskipTests
+    @echo "Built (ungated): {{module_dir}}/target/{{artifact}}"
+
+# Unit tests + all build gates, no Docker required
+test:
+    cd {{module_dir}} && mvn clean verify
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 # Build the Docker image (EJBCA + softhsmv3 + kimbo11ng)
 docker-build: build
     docker build -f docker/Dockerfile -t ghcr.io/thpham/ejbca-ce:latest \
-        --build-arg OPENSSL_VERSION={{openssl_version}} .
+        --build-arg OPENSSL_VERSION={{openssl_version}} \
+        --build-arg SOFTHSM_VERSION={{softhsm_version}} .
 
 # Build Docker image without cache
 docker-build-nocache: build
     docker build -f docker/Dockerfile -t kimbo11ng-ejbca \
-        --build-arg OPENSSL_VERSION={{openssl_version}} --no-cache .
+        --build-arg OPENSSL_VERSION={{openssl_version}} \
+        --build-arg SOFTHSM_VERSION={{softhsm_version}} --no-cache .
 
 # Start all services (EJBCA + MariaDB)
 up:
@@ -122,6 +158,67 @@ up:
 # Stop all services
 down:
     docker compose down
+
+# ─── Thales Luna (optional) ──────────────────────────────────────────────────
+
+# Compose files for a stack with a side-mounted Luna client. Nothing Thales-owned ships in the
+# image; see docs/VENDOR_PROFILE_CHECKLIST.md for what to mount and how to register the client.
+luna_compose := "-f docker-compose.yml -f docker-compose.luna.yml"
+
+# LUNA_HOST_DIR is an extracted minimal client; LUNA_HOST_CONFIG holds Chrystoki.conf and the certs.
+# Start the stack with a side-mounted Luna client
+luna-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${LUNA_HOST_DIR:?set LUNA_HOST_DIR to an extracted Luna 10.9.2 minimal client}"
+    : "${LUNA_HOST_CONFIG:?set LUNA_HOST_CONFIG to the directory holding Chrystoki.conf}"
+    docker compose {{luna_compose}} up -d
+    echo "Waiting for EJBCA to be healthy..."
+    docker compose {{luna_compose}} exec ejbca sh -c 'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done' || true
+    docker compose {{luna_compose}} logs ejbca 2>&1 | grep -i luna || true
+    echo "EJBCA is ready."
+
+# Report what the container makes of the mounted client — run this first when it will not connect
+luna-status:
+    docker compose {{luna_compose}} exec ejbca sh -c \
+        'source /opt/keyfactor/bin/luna-discover.sh; luna_discover; luna_summary; \
+         echo "ChrystokiConfigurationPath=${ChrystokiConfigurationPath:-unset}"; \
+         command -v lunacm >/dev/null && lunacm -e "slot list" || echo "lunacm not on PATH"'
+
+# Requires LUNA_PARTITION and LUNA_PIN; see create-token for why this is a DB insert.
+# Create a Pkcs11NgCryptoToken bound to a Luna partition
+create-luna-token:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${LUNA_PARTITION:?set LUNA_PARTITION to the partition label}"
+    : "${LUNA_PIN:?set LUNA_PIN to the partition password}"
+    TOKEN_NAME="${LUNA_TOKEN_NAME:-LunaHSM}"
+    EXISTS=$(docker compose {{luna_compose}} exec -T postgres psql -U ejbca -d ejbca -tAc \
+        "SELECT COUNT(*) FROM CryptoTokenData WHERE tokenName='${TOKEN_NAME}';")
+    if [ "$EXISTS" -gt 0 ]; then
+        echo "${TOKEN_NAME} token already exists, skipping."
+        exit 0
+    fi
+    # EJBCA stores the PIN obfuscated, not encrypted. This inserts it in the clear, which is
+    # acceptable for a test partition and is not acceptable for anything else — use the admin UI
+    # for a real one.
+    PROPS=$(printf '%s\n' \
+        "#$(date -u '+%a %b %d %H:%M:%S UTC %Y')" \
+        "pin=${LUNA_PIN}" \
+        "sharedLibrary=/usr/local/luna/libs/64/libCryptoki2.so" \
+        "slotLabelValue=${LUNA_PARTITION}" \
+        "slotLabelType=SLOT_LABEL" \
+        "tokenName=${TOKEN_NAME}" \
+        "allow.extractable.privatekey=false")
+    PROPS_B64=$(echo "$PROPS" | base64 | tr -d '\n')
+    TOKEN_ID=1234567891
+    docker compose {{luna_compose}} exec -T postgres psql -U ejbca -d ejbca -c \
+        "INSERT INTO CryptoTokenData (id, lastUpdate, rowProtection, rowVersion, tokenData, tokenName, tokenProps, tokenType) \
+         VALUES ($TOKEN_ID, EXTRACT(EPOCH FROM NOW())::bigint * 1000, NULL, 0, NULL, '${TOKEN_NAME}', '$PROPS_B64', 'Pkcs11NgCryptoToken');"
+    echo "Created ${TOKEN_NAME} (Pkcs11NgCryptoToken) with id=$TOKEN_ID"
+    docker compose {{luna_compose}} restart ejbca
+    sleep 20
+    echo "Done."
 
 # ─── Deploy (hot-reload JAR into running container) ──────────────────────────
 

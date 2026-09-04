@@ -1,0 +1,45 @@
+# Optional Thales Luna overlay. Nothing here applies unless you ask for it:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.luna.yml up -d
+#
+# or `just luna-up`, which is the same thing.
+#
+# Set LUNA_HOST_DIR to an extracted Luna 10.9.2 minimal client, and LUNA_HOST_CONFIG to the
+# directory holding Chrystoki.conf and the client/server certificates. The client itself is never
+# baked into the image: it is not redistributable, and its certificates are bound to a hostname.
+#
+# Three things bite people here, all of them appliance-side rather than container-side:
+#
+#  1. The NTLS client certificate is bound to the hostname that created it, which is why `hostname`
+#     below is pinned. A fresh container with a generated hostname means re-registering the client
+#     on the appliance every run.
+#  2. `ntls ipcheck` must be DISABLED on the appliance when several clients share one source IP —
+#     which is exactly what a compose stack looks like from the outside. Leave it enabled only if
+#     each container has its own routable address.
+#  3. Chrystoki.conf's certificate and client-token paths must point at the in-container mount
+#     (/usr/local/luna-config), not at wherever they were on the machine that registered the
+#     client. Thales's guidance is to change those paths and nothing else in the file.
+#
+# A DPoD Luna Cloud HSM service client works through the same mount: unzip setup-<client>.zip,
+# untar the Linux client inside it, and point LUNA_HOST_DIR at the result. Its Chrystoki.conf comes
+# pre-configured and bound to the partition, so none of the three notes above apply.
+
+services:
+
+  ejbca:
+    # Pinned because the client certificate registered on the appliance is tied to it.
+    hostname: ${LUNA_HOSTNAME:-ejbca-luna}
+    environment:
+      LUNA_CLIENT_DIR: /usr/local/luna
+      # Kept outside the client tree on purpose. Nesting a writable mount inside a read-only one
+      # needs the mount point to already exist in the source tree, which it does not for a DPoD
+      # client; a sibling path sidesteps that entirely.
+      LUNA_CHRYSTOKI_PATH: /usr/local/luna-config
+      # Uncomment to keep the built-in SoftHSM token out of the way on a Luna-only stack.
+      # SOFTHSM_ENABLED: "false"
+    volumes:
+      # The client tree: libraries and tools, read-only — nothing writes into it.
+      - ${LUNA_HOST_DIR:?set LUNA_HOST_DIR to an extracted Luna minimal client}:/usr/local/luna:ro
+      # Chrystoki.conf plus certificates, writable: the library keeps a client token file here, and
+      # `vtl createCert` run inside the container writes here too.
+      - ${LUNA_HOST_CONFIG:?set LUNA_HOST_CONFIG to the directory holding Chrystoki.conf}:/usr/local/luna-config

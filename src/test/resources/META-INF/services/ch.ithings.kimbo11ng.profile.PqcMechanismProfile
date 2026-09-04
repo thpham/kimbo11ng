@@ -1,0 +1,4 @@
+# Test-only profile, discovered alongside the two in src/main/resources.
+# ServiceLoader reads every copy of this file on the classpath, which is exactly how a vendor
+# profile shipping in its own jar would arrive.
+ch.ithings.kimbo11ng.fake.VendorTestProfile

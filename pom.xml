@@ -13,9 +13,52 @@
     <description>PKCS#11 NG CryptoToken for EJBCA CE — JackNJI11 + PQC support</description>
 
     <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <!-- 'release' (not source/target) so the JDK 21 compiler cannot resolve APIs
+             that do not exist on the Java 17 runtime EJBCA 9.3.7 ships. -->
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Reproducible builds: fixed entry timestamps in the produced JARs. -->
+        <project.build.outputTimestamp>2026-01-01T00:00:00Z</project.build.outputTimestamp>
+        <!-- Must match the BouncyCastle inside keyfactor/ejbca-ce:9.3.7
+             (ejbca.ear/lib/bcprov-jdk18on-1.80.2.jar). Scope is 'provided': the container's
+             copy is what runs, and pinning the same version keeps compilation honest. -->
+        <bouncycastle.version>1.80.2</bouncycastle.version>
+        <!-- Also shipped in ejbca.ear/lib. JNA in particular must not be duplicated: two copies
+             in one classloader fail with "native library already loaded in another classloader". -->
+        <jna.version>5.12.1</jna.version>
+        <commons-logging.version>1.2</commons-logging.version>
+        <!-- org.pkcs11:jacknji11 is upstream's own coordinate (joelhockey/jacknji11, MIT). Two
+             builds answer to it here: 1.3.1 is Keyfactor's fork — rebranded com.keyfactor in its
+             own pom, published nowhere, and installed under the upstream groupId by
+             `just install-deps` — and 1.3-SNAPSHOT is upstream HEAD, built by `just jacknji11-upstream`.
+             The default is 1.3.1 because that is what a fresh clone can get. Building against
+             upstream instead is `mvn verify -Djacknji11.version=1.3-SNAPSHOT`, which rehearses the
+             contingency where EJBCA stops shipping jacknji11 at all.
+             Verified on 2026-09-05: both build clean, 583 unit tests and 23 ITs green either way.
+             See docs/JACKNJI11_PROVENANCE.md. -->
+        <jacknji11.version>1.3.1</jacknji11.version>
+        <!-- Coverage floor, as measured by jacoco:check on the bundle. Baseline at the start of
+             phase 0 was LINE 0.09 / BRANCH 0.25, with every PKCS#11-touching class at 0% because
+             nothing could be tested without an HSM; the fake token lifted it to 0.25 / 0.30, and
+             phase 1's registry, template and enumeration tests to 0.47 / 0.37, and phase 2's
+             pool, module and lifecycle tests to 0.68 / 0.57, and phase 3's key-identity and
+             recovery tests to 0.71 / 0.60, and phase 4's public-key tests to 0.72 / 0.61, and
+             phase 5's capability-probe tests to 0.75 / 0.65, and phase 6's key-usage tests to
+             0.76 / 0.66, and phase 7's algorithm matrix, signature round trips and
+             KeyPairGenerator coverage to 0.79 / 0.68, and phase 8's profile conformance kit and
+             HSM contract to 0.79 / 0.67.
+             Each phase raises these; they must never be lowered.
+
+             MEASURE ON A CLEAN RUN. The JaCoCo agent appends to jacoco.exec by default, so
+             repeated `mvn verify` without `clean` accumulates coverage across runs and reports a
+             figure no single build can reproduce. Phase 8 was briefly ratcheted to 0.80 on such a
+             measurement and `just build` failed on the very next clean build.
+
+             And leave headroom: ConcurrentTokenAccessTest injects faults, so which recovery paths
+             it exercises differs run to run. The observed range is LINE 0.797-0.803 and
+             BRANCH 0.682-0.686, which is why the floors sit below the worst run and not on it. -->
+        <jacoco.line.min>0.79</jacoco.line.min>
+        <jacoco.branch.min>0.67</jacoco.branch.min>
     </properties>
 
     <dependencies>
@@ -35,7 +78,7 @@
         <dependency>
             <groupId>org.pkcs11</groupId>
             <artifactId>jacknji11</artifactId>
-            <version>1.3.1</version>
+            <version>${jacknji11.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>
@@ -58,25 +101,39 @@
             <version>1.2.17</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Provided by EJBCA. Bundling a second copy puts two BouncyCastleProvider classes
+             into one EAR classloader, which breaks provider identity and BC's own
+             instanceof checks (AlgorithmTools uses instanceof MLDSAKey/SLHDSAKey). -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.80</version>
-            <scope>compile</scope>
+            <version>${bouncycastle.version}</version>
+            <scope>provided</scope>
         </dependency>
-        <!-- JNA for jacknji11 JNA backend -->
+        <!-- Test scope only, and only so the tests can call EJBCA's real AlgorithmTools: its
+             static initializer needs DefaultSignatureAlgorithmIdentifierFinder from bcpkix.
+             Asserting against the class EJBCA actually uses to resolve signature algorithms is
+             worth a test dependency; nothing in src/main touches it, and ArtifactContentsIT still
+             asserts the shipped jar carries no BouncyCastle at all. Same version as the ear's. -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- JNA backend for jacknji11. Provided: ejbca.ear/lib/jna-5.12.1.jar. -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna</artifactId>
-            <version>5.13.0</version>
-            <scope>compile</scope>
+            <version>${jna.version}</version>
+            <scope>provided</scope>
         </dependency>
-        <!-- commons-logging needed by jacknji11's Cryptoki -->
+        <!-- Needed by jacknji11's Cryptoki. Provided: ejbca.ear/lib/commons-logging-1.2.jar. -->
         <dependency>
             <groupId>commons-logging</groupId>
             <artifactId>commons-logging</artifactId>
-            <version>1.2</version>
-            <scope>compile</scope>
+            <version>${commons-logging.version}</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Test -->
@@ -235,6 +292,15 @@
                 <artifactId>maven-assembly-plugin</artifactId>
                 <version>3.6.0</version>
                 <configuration>
+                    <!-- Deliberately version-free: the deployable is referenced by name from the
+                         Dockerfile, the justfile and the deploy recipe, and a version in the file
+                         name means every bump silently breaks all three. The version is not lost —
+                         addDefaultImplementationEntries below puts Implementation-Version in the
+                         manifest, which is where you read it off a deployed jar anyway.
+                         appendAssemblyId is left at its default so the output stays a secondary
+                         artifact: setting it to false makes the assembly replace the project's main
+                         artifact, which is not what we want and which mvn warns about. -->
+                    <finalName>kimbo11ng</finalName>
                     <descriptorRefs>
                         <descriptorRef>jar-with-dependencies</descriptorRef>
                     </descriptorRefs>
@@ -259,15 +325,177 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
                 <configuration>
-                    <source>17</source>
-                    <target>17</target>
+                    <release>${maven.compiler.release}</release>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <!-- Warnings are errors. Where a warning is genuine but the fix
+                                     belongs to a later phase, the site carries a targeted
+                                     @SuppressWarnings with a TODO naming that phase - never a
+                                     blanket -Xlint exclusion. -->
+                                <arg>-Xlint:all</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <!-- Same strictness, minus two categories: under -Pit the test
+                                     source root also holds the OpenAPI-generated EJBCA REST
+                                     client, which emits 'this-escape' (ApiClient) and 'serial'
+                                     (ApiException). That code is regenerated on every build, so
+                                     it cannot carry suppressions. Everything else still fails
+                                     the build, and main sources stay fully strict above. -->
+                                <arg>-Xlint:all,-this-escape,-serial</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
             </plugin>
+
+            <!-- Supply-chain gates: one version per dependency, no class present twice. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <id>enforce-build-hygiene</id>
+                        <phase>validate</phase>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion><version>[17,)</version></requireJavaVersion>
+                                <requireMavenVersion><version>[3.8,)</version></requireMavenVersion>
+                                <dependencyConvergence/>
+                                <banDuplicatePomDependencyVersions/>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.basepom.maven</groupId>
+                <artifactId>duplicate-finder-maven-plugin</artifactId>
+                <version>2.0.1</version>
+                <executions>
+                    <execution>
+                        <id>find-duplicate-classes</id>
+                        <phase>verify</phase>
+                        <goals><goal>check</goal></goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <failBuildInCaseOfDifferentContentConflict>true</failBuildInCaseOfDifferentContentConflict>
+                    <failBuildInCaseOfEqualContentConflict>false</failBuildInCaseOfEqualContentConflict>
+                    <checkTestClasspath>false</checkTestClasspath>
+                </configuration>
+            </plugin>
+
+            <!-- Asserts the shipped artifact carries no second copy of BouncyCastle.
+                 Runs in the default build (not only -Pit) because it is the deployment gate. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.2.5</version>
+                <executions>
+                    <execution>
+                        <id>artifact-contents</id>
+                        <phase>integration-test</phase>
+                        <goals><goal>integration-test</goal></goals>
+                        <configuration>
+                            <includes>
+                                <include>**/ArtifactContentsIT.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>artifact-contents-verify</id>
+                        <phase>verify</phase>
+                        <goals><goal>verify</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Static analysis, including the security detectors (find-sec-bugs):
+                 this is crypto-handling code, so weak-crypto and key-handling findings matter. -->
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>4.8.6.4</version>
+                <configuration>
+                    <effort>Max</effort>
+                    <threshold>Medium</threshold>
+                    <includeTests>false</includeTests>
+                    <excludeFilterFile>src/spotbugs/exclude.xml</excludeFilterFile>
+                    <plugins>
+                        <plugin>
+                            <groupId>com.h3xstream.findsecbugs</groupId>
+                            <artifactId>findsecbugs-plugin</artifactId>
+                            <version>1.13.0</version>
+                        </plugin>
+                    </plugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>spotbugs-check</id>
+                        <phase>verify</phase>
+                        <goals><goal>check</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.12</version>
+                <executions>
+                    <execution>
+                        <id>jacoco-prepare-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-check</id>
+                        <phase>verify</phase>
+                        <goals><goal>check</goal></goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.line.min}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.branch.min}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>com.mycila</groupId>
                 <artifactId>license-maven-plugin</artifactId>

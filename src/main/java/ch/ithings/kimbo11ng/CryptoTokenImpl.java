@@ -4,13 +4,22 @@
  */
 package ch.ithings.kimbo11ng;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
+import ch.ithings.kimbo11ng.p11.Pkcs11Module;
+import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
+import ch.ithings.kimbo11ng.p11.SessionLease;
+import ch.ithings.kimbo11ng.p11.TokenCapabilities;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
-import ch.ithings.kimbo11ng.provider.CryptokiDevice;
+import ch.ithings.kimbo11ng.provider.KeyTemplates;
+import ch.ithings.kimbo11ng.provider.P11KeyRef;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
-import ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey;
-import ch.ithings.kimbo11ng.slot.SlotListWrapper;
+import ch.ithings.kimbo11ng.provider.PublicKeyReader;
+import ch.ithings.kimbo11ng.provider.TokenRuntime;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException;
 import com.keyfactor.util.keys.token.CryptoTokenOfflineException;
@@ -18,59 +27,65 @@ import com.keyfactor.util.keys.token.KeyGenParams;
 import com.keyfactor.util.keys.token.pkcs11.NoSuchSlotException;
 import com.keyfactor.util.keys.token.pkcs11.Pkcs11SlotLabelType;
 import org.apache.log4j.Logger;
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
-import org.bouncycastle.asn1.x9.ECNamedCurveTable;
 import org.pkcs11.jacknji11.CKA;
-import org.pkcs11.jacknji11.CKK;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CKO;
 import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.LongRef;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
-import java.security.Security;
+import java.security.PublicKey;
 import java.security.cert.CertificateException;
 import java.security.spec.AlgorithmParameterSpec;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.RSAKeyGenParameterSpec;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
- * Core implementation of the PKCS#11 NG CryptoToken.
- * All business logic lives here; the EJBCA entry point
- * ({@code org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken})
- * is a thin delegate that extends BaseCryptoToken and forwards to this class.
+ * The PKCS#11 NG crypto token. The EJBCA entry point
+ * ({@code org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken}) is a thin delegate.
  */
 public class CryptoTokenImpl {
 
     private static final Logger log = Logger.getLogger(CryptoTokenImpl.class);
 
-    // Property keys (compatible with PKCS11CryptoToken UI)
+    // Property keys, matching the PKCS11CryptoToken UI so a token can be configured the same way.
     public static final String SHLIB_LABEL_KEY = "sharedLibrary";
     public static final String SLOT_LABEL_VALUE = "slotLabelValue";
     public static final String SLOT_LABEL_TYPE = "slotLabelType";
-    public static final String PASSWORD_LABEL_KEY = "pin";
-    public static final String ATTRIB_LABEL_KEY = "attributesFile";
     public static final String DO_NOT_ADD_P11_PROVIDER = "doNotAddP11Provider";
     public static final String TOKEN_FRIENDLY_NAME = "tokenFriendlyName";
 
     private final CryptoTokenBridge bridge;
-    private CryptokiDevice device;
-    private Kimbo11ngProvider p11Provider;
-    private PqcMechanismProfile pqcProfile;
+    private final Pkcs11ModuleRegistry modules;
+    private volatile TokenRuntime runtime;
+    private volatile Kimbo11ngProvider p11Provider;
 
     public CryptoTokenImpl(CryptoTokenBridge bridge) {
-        this.bridge = bridge;
+        this(bridge, Pkcs11ModuleRegistry.shared());
     }
 
-    public void init(Properties properties, byte[] data, int id) throws NoSuchSlotException, CryptoTokenOfflineException {
-        if (log.isDebugEnabled()) {
-            log.debug("Initializing CryptoTokenImpl id=" + id);
-        }
+    /** For tests, which supply a registry backed by a fake token. */
+    public CryptoTokenImpl(CryptoTokenBridge bridge, Pkcs11ModuleRegistry modules) {
+        this.bridge = bridge;
+        this.modules = modules;
+    }
+
+    public void init(Properties properties, byte[] data, int id)
+            throws NoSuchSlotException, CryptoTokenOfflineException {
         bridge.bridgeSetId(id);
         bridge.bridgeSetProperties(properties);
         initDevice(properties);
@@ -79,74 +94,92 @@ public class CryptoTokenImpl {
         if (friendlyName != null && !friendlyName.isEmpty()) {
             bridge.bridgeSetTokenName(friendlyName);
         }
-
         if (log.isDebugEnabled()) {
-            log.debug("CryptoTokenImpl initialized: lib=" + properties.getProperty(SHLIB_LABEL_KEY) +
-                    " provider=" + p11Provider.getName() + " pqcProfile=" + pqcProfile);
+            log.debug("Initialized token " + id + ": " + runtime
+                    + " provider=" + p11Provider.getName());
         }
     }
 
+    /**
+     * Logs in and publishes a keystore, which is what EJBCA reads as "online".
+     *
+     * <p>{@code authCode} is <b>not</b> zeroed here, and must not be. The array belongs to
+     * {@code BaseCryptoToken}, which keeps it in {@code mAuthCode} and hands the same instance back
+     * on every {@code autoActivate()} — the mechanism that brings a token back after it goes
+     * offline. Clearing it would make the first recovery attempt log in with a PIN of NUL
+     * characters and lock the token's user PIN after a few tries. The copy this code does own is
+     * the encoded byte array inside {@link ch.ithings.kimbo11ng.p11.Pins}, which is zeroed in a
+     * {@code finally} at the point of use.
+     */
     public void activate(char[] authCode)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
-        if (device == null) {
+        if (runtime == null) {
             try {
-                log.info("CryptoTokenImpl.activate: device is null, calling initDevice");
                 initDevice(bridge.bridgeGetProperties());
             } catch (NoSuchSlotException e) {
-                throw new CryptoTokenOfflineException("Slot not found during lazy init: " + e.getMessage(), e);
-            } catch (Exception e) {
-                throw new CryptoTokenOfflineException("initDevice failed: " + e.getMessage(), e);
+                throw new CryptoTokenOfflineException("Slot not found during lazy init: "
+                        + e.getMessage(), e);
             }
         }
         try {
-            device.login(authCode);
+            // P11Slot.login classifies the CKR itself, so a missing token surfaces as offline and
+            // only a rejected credential surfaces as an authentication failure. Previously every
+            // failure here — including "no token in slot" — was reported as a bad PIN.
+            runtime.slot().login(authCode);
             KeyStore ks = KeyStore.getInstance("PKCS11", p11Provider);
             ks.load(null, authCode);
             bridge.bridgeSetKeyStore(ks);
-            if (log.isDebugEnabled()) {
-                log.debug("CryptoTokenImpl activated successfully");
-            }
-        } catch (CryptoTokenOfflineException e) {
+        } catch (CryptoTokenOfflineException | CryptoTokenAuthenticationFailedException e) {
             throw e;
         } catch (Exception e) {
-            throw new CryptoTokenAuthenticationFailedException(
-                    "Failed to activate PKCS#11 NG token: " + e.getMessage());
+            throw Pkcs11Errors.offline("Failed to activate the PKCS#11 NG token", e);
         }
     }
 
+    /**
+     * Takes the token offline for real.
+     *
+     * <p>Order matters and is the point of the method. The keystore goes first so nothing new can
+     * be started, then the cached key handles are dropped, then the token is logged out. Doing it
+     * the other way round leaves a window in which EJBCA hands out a key whose session has already
+     * lost its authentication, and the signature fails somewhere unrelated.
+     *
+     * <p>Sessions are deliberately left open: logout ends the authentication, which is what
+     * "deactivated" means, and keeping the sessions means a later activate does not have to
+     * rebuild the pool. {@link #reset()} is what releases them.
+     */
     public void deactivate() {
-        if (device != null) {
-            device.logout();
-        }
         try {
             bridge.bridgeSetKeyStore(null);
         } catch (KeyStoreException e) {
-            log.warn("Failed to clear keystore on deactivate: " + e.getMessage());
+            log.warn("Failed to clear the keystore on deactivate: " + e.getMessage());
+        }
+        TokenRuntime current = runtime;
+        if (current != null) {
+            Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
+            if (spi != null) {
+                // Otherwise a deactivated token keeps handing out usable key handles.
+                spi.clear();
+            }
+            current.slot().logout();
         }
     }
 
+    /** Deactivates, then drains the session pool. The library itself stays initialized. */
     public void reset() {
         deactivate();
-        if (device != null) {
-            device.close();
+        TokenRuntime current = runtime;
+        if (current != null) {
+            current.slot().close();
         }
     }
 
-    // ---- Public key lookup without certificate ----
-
-    public java.security.PublicKey readPublicKey(String alias, boolean includeHardToken)
-            throws java.security.KeyStoreException, CryptoTokenOfflineException {
-        Kimbo11ngKeyStoreSpi spi = p11Provider != null ? p11Provider.getKeyStoreSpi() : null;
-        if (spi != null) {
-            java.security.PublicKey pubKey = spi.getPublicKey(alias);
-            if (pubKey != null) {
-                return pubKey;
-            }
-        }
-        return null; // caller falls back to super.readPublicKey()
+    /** Public key for an alias, or null so the caller can fall back to the certificate. */
+    public PublicKey readPublicKey(String alias, boolean includeHardToken) {
+        TokenRuntime current = runtime;
+        Kimbo11ngKeyStoreSpi spi = current == null ? null : current.keyStoreSpi();
+        return spi == null ? null : spi.getPublicKey(alias);
     }
-
-    // ---- Key management ----
 
     public void deleteEntry(String alias)
             throws KeyStoreException, NoSuchAlgorithmException, CertificateException,
@@ -159,44 +192,42 @@ public class CryptoTokenImpl {
 
     public void generateKeyPair(KeyGenParams keyGenParams, String alias)
             throws InvalidAlgorithmParameterException, CryptoTokenOfflineException {
-        log.info("CryptoTokenImpl.generateKeyPair(KeyGenParams) called, alias=" + alias +
-                " device=" + (device != null ? "set" : "null") +
-                " p11Provider=" + (p11Provider != null ? p11Provider.getName() : "null"));
         generateKeyPair(keyGenParams.getKeySpecification(), alias);
     }
 
     public void generateKeyPair(String keySpec, String alias)
             throws InvalidAlgorithmParameterException, CryptoTokenOfflineException {
-        bridge.bridgeGetKeyStore(); // triggers autoActivate
+        bridge.bridgeGetKeyStore(); // triggers EJBCA's auto-activation if a PIN is configured
+        TokenRuntime current = runtime;
+        if (current == null) {
+            throw new CryptoTokenOfflineException("Token is not initialized");
+        }
         try {
-            long session = device.getOrOpenSession();
-            CryptokiE ce = device.getCe();
-            byte[] labelBytes = alias.getBytes("UTF-8");
+            requireAliasFree(current, alias);
+            byte[] label = alias.getBytes(StandardCharsets.UTF_8);
+            byte[] keyId = KeyTemplates.newKeyId();
+            String upper = keySpec.toUpperCase(Locale.ROOT);
 
-            if (keySpec.startsWith("RSA") || keySpec.matches("\\d+")) {
-                generateRsaKeyPair(ce, session, labelBytes, keySpec, alias);
-            } else if (keySpec.startsWith("EC") || keySpec.startsWith("secp") ||
-                       keySpec.startsWith("P-") || keySpec.startsWith("prime")) {
-                generateEcKeyPair(ce, session, labelBytes, keySpec, alias);
-            } else if (pqcProfile.supports(keySpec)) {
-                String normalized = keySpec.toUpperCase().replace("-", "").replace("_", "");
-                if (normalized.startsWith("MLDSA")) {
-                    generateMlDsaKeyPair(ce, session, labelBytes, keySpec, alias);
-                } else if (normalized.startsWith("MLKEM")) {
-                    generateMlKemKeyPair(ce, session, labelBytes, keySpec, alias);
-                } else if (normalized.startsWith("SLHDSA")) {
-                    generateSlhDsaKeyPair(ce, session, labelBytes, keySpec, alias);
-                } else {
-                    throw new InvalidAlgorithmParameterException("Unsupported PQC key specification: " + keySpec);
-                }
-            } else {
-                throw new InvalidAlgorithmParameterException("Unsupported key specification: " + keySpec);
+            if (keySpec.matches("\\d+") || upper.startsWith("RSA")) {
+                requireMechanism(current, CKM.RSA_PKCS_KEY_PAIR_GEN, keySpec);
+                generateRsa(current, label, keyId, parseRsaKeySize(keySpec), alias);
+                return;
             }
+            Optional<AlgorithmEntry> entry = current.profile().lookup(keySpec);
+            if (entry.isPresent()) {
+                requirePqcSupported(current, entry.get());
+                generatePqc(current, label, keyId, entry.get(), alias);
+                return;
+            }
+            String curveName = curveNameOf(keySpec);
+            requireCurveOrBetterProfile(current, keySpec, curveName);
+            requireMechanism(current, CKM.EC_KEY_PAIR_GEN, keySpec);
+            generateEc(current, label, keyId, curveName, alias);
         } catch (InvalidAlgorithmParameterException e) {
-            log.error("InvalidAlgorithmParameterException generating key pair: " + e.getMessage(), e);
             throw e;
         } catch (Exception e) {
-            log.error("Exception generating key pair (keySpec=" + keySpec + " alias=" + alias + "): " + e.getMessage(), e);
+            log.error("Key generation failed (keySpec=" + keySpec + " alias=" + alias + "): "
+                    + e.getMessage(), e);
             throw new CryptoTokenOfflineException("Failed to generate key pair: " + e.getMessage());
         }
     }
@@ -204,12 +235,13 @@ public class CryptoTokenImpl {
     public void generateKeyPair(AlgorithmParameterSpec spec, String alias)
             throws InvalidAlgorithmParameterException, CertificateException,
             IOException, CryptoTokenOfflineException {
-        if (spec instanceof java.security.spec.ECGenParameterSpec) {
-            generateKeyPair("EC" + ((java.security.spec.ECGenParameterSpec) spec).getName(), alias);
-        } else if (spec instanceof java.security.spec.RSAKeyGenParameterSpec) {
-            generateKeyPair("RSA" + ((java.security.spec.RSAKeyGenParameterSpec) spec).getKeysize(), alias);
+        if (spec instanceof ECGenParameterSpec ecSpec) {
+            generateKeyPair(ecSpec.getName(), alias);
+        } else if (spec instanceof RSAKeyGenParameterSpec rsaSpec) {
+            generateKeyPair("RSA" + rsaSpec.getKeysize(), alias);
         } else {
-            throw new InvalidAlgorithmParameterException("Unsupported spec type: " + spec.getClass().getName());
+            throw new InvalidAlgorithmParameterException(
+                    "Unsupported spec type: " + spec.getClass().getName());
         }
     }
 
@@ -219,213 +251,392 @@ public class CryptoTokenImpl {
         if (bridge.bridgeGetKeyStore() == null) {
             throw new CryptoTokenOfflineException("Token is offline or not activated");
         }
-        throw new KeyStoreException("Symmetric key generation not yet implemented");
+        throw new KeyStoreException("Symmetric key generation is not implemented");
     }
 
-    public Set<Long> getKeyUsagesFromKey(String alias, boolean isPrivate, long... keyUsages) {
-        return java.util.Collections.emptySet();
+    /**
+     * The {@code CKA_*} usage attributes EJBCA reasons about for a private key.
+     *
+     * <p>Two, not seven, and the restriction is the point. Both EJBCA consumers treat the returned
+     * set as a closed vocabulary of exactly these:
+     * {@code BaseCryptoToken.testKeyPair} asks {@code contains(261) && !contains(264)}, and
+     * {@code CryptoTokenManagementSessionBean.getKeyUsageStringForKeyPairInfo} compares the set for
+     * <em>equality</em> against {@code {261}}, {@code {264}} and {@code {261,264}}, mapping them to
+     * the three {@code KeyPairInfo.KeyUsage} values and to {@code null} otherwise. Adding
+     * {@code CKA_UNWRAP} — which every RSA key here has — would make that equality never match, and
+     * the admin UI would show no key usage at all: worse than the empty set this replaces.
+     */
+    private static final long[] PRIVATE_KEY_USAGES = {CKA.DECRYPT, CKA.SIGN};
+
+    /** The public-key counterparts. Nothing in EJBCA CE reads these; they are here to be true. */
+    private static final long[] PUBLIC_KEY_USAGES = {CKA.ENCRYPT, CKA.VERIFY};
+
+    /** Everything a private key may be marked for, when a caller asks without naming any. */
+    private static final long[] ALL_PRIVATE_USAGES = {
+            CKA.DECRYPT, CKA.SIGN, CKA.SIGN_RECOVER, CKA.UNWRAP, CKA.DERIVE};
+
+    /** Everything a public key may be marked for. */
+    private static final long[] ALL_PUBLIC_USAGES = {
+            CKA.ENCRYPT, CKA.VERIFY, CKA.VERIFY_RECOVER, CKA.WRAP, CKA.DERIVE};
+
+    /** @see #PRIVATE_KEY_USAGES */
+    public Set<Long> getKeyUsagesFromPrivateKey(String alias) throws CryptoTokenOfflineException {
+        return getKeyUsagesFromKey(alias, true, PRIVATE_KEY_USAGES);
     }
 
-    // ---- Private helpers ----
+    /** @see #PUBLIC_KEY_USAGES */
+    public Set<Long> getKeyUsagesFromPublicKey(String alias) throws CryptoTokenOfflineException {
+        return getKeyUsagesFromKey(alias, false, PUBLIC_KEY_USAGES);
+    }
 
-    private void generateRsaKeyPair(CryptokiE ce, long session, byte[] labelBytes,
-            String keySpec, String alias) throws Exception {
-        int keySize = parseRsaKeySize(keySpec);
-        CKA[] pubTemplate = {
-            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-            new CKA(CKA.KEY_TYPE, CKK.RSA),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(CKA.MODULUS_BITS, (long) keySize),
-            new CKA(CKA.PUBLIC_EXPONENT, java.math.BigInteger.valueOf(65537).toByteArray()),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.VERIFY, true),
-            new CKA(CKA.ENCRYPT, true),
-            new CKA(CKA.WRAP, true)
-        };
-        CKA[] privTemplate = {
-            new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-            new CKA(CKA.KEY_TYPE, CKK.RSA),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.PRIVATE, true),
-            new CKA(CKA.SENSITIVE, true),
-            new CKA(CKA.EXTRACTABLE, false),
-            new CKA(CKA.SIGN, true),
-            new CKA(CKA.DECRYPT, true),
-            new CKA(CKA.UNWRAP, true)
-        };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(CKM.RSA_PKCS_KEY_PAIR_GEN),
-                    pubTemplate, privTemplate, pubRef, privRef);
+    /**
+     * Which of {@code keyUsages} the token has actually set on this key.
+     *
+     * <p>Read from the object rather than inferred from the algorithm, because the two can differ:
+     * a key imported by a vendor tool, or generated by an earlier version of this code, carries
+     * whatever template it was created with. What EJBCA does with the answer is decide which test
+     * to run against the pair, so guessing here means running a signing test on a decryption key.
+     *
+     * @param keyUsages the {@code CKA_*} attributes to ask about; empty means every usage attribute
+     *                  defined for the key's class
+     */
+    public Set<Long> getKeyUsagesFromKey(String alias, boolean isPrivate, long... keyUsages)
+            throws CryptoTokenOfflineException {
+        TokenRuntime current = runtime;
+        if (current == null) {
+            return Collections.emptySet();
         }
-        log.info("Generated RSA-" + keySize + " key pair on HSM with alias=" + alias +
-                " privHandle=" + privRef.value() + " pubHandle=" + pubRef.value());
-        java.security.PublicKey rsaPubKey = Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubRef.value());
-        registerKeyPairInSpi(alias, privRef.value(), "RSA", rsaPubKey);
-    }
-
-    private void generateEcKeyPair(CryptokiE ce, long session, byte[] labelBytes,
-            String keySpec, String alias) throws Exception {
-        String curveName = keySpec.startsWith("EC") ? keySpec.substring(2).trim() : keySpec;
-        byte[] ecParamsDer = encodeEcParams(curveName);
-        CKA[] pubTemplate = {
-            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-            new CKA(CKA.KEY_TYPE, CKK.EC),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(CKA.EC_PARAMS, ecParamsDer),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.VERIFY, true)
-        };
-        CKA[] privTemplate = {
-            new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-            new CKA(CKA.KEY_TYPE, CKK.EC),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.PRIVATE, true),
-            new CKA(CKA.SENSITIVE, true),
-            new CKA(CKA.EXTRACTABLE, false),
-            new CKA(CKA.SIGN, true)
-        };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(CKM.EC_KEY_PAIR_GEN),
-                    pubTemplate, privTemplate, pubRef, privRef);
-        }
-        log.info("Generated EC key pair (curve=" + curveName + ") on HSM with alias=" + alias +
-                " privHandle=" + privRef.value() + " pubHandle=" + pubRef.value());
-        java.security.PublicKey ecPubKey = Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubRef.value());
-        registerKeyPairInSpi(alias, privRef.value(), "EC", ecPubKey);
-    }
-
-    private void generateMlDsaKeyPair(CryptokiE ce, long session, byte[] labelBytes,
-            String keySpec, String alias) throws Exception {
-        long paramSet = pqcProfile.resolveMlDsaParamSet(keySpec);
-        CKA[] pubTemplate = {
-            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkMlDsa()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.VERIFY, true)
-        };
-        CKA[] privTemplate = {
-            new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkMlDsa()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.PRIVATE, true),
-            new CKA(CKA.SENSITIVE, true),
-            new CKA(CKA.EXTRACTABLE, false),
-            new CKA(CKA.SIGN, true)
-        };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(pqcProfile.ckmMlDsaKeyPairGen()),
-                    pubTemplate, privTemplate, pubRef, privRef);
-        }
-        log.info("Generated ML-DSA key pair (" + keySpec + ") on HSM with alias=" + alias +
-                " privHandle=" + privRef.value() + " pubHandle=" + pubRef.value());
-        java.security.PublicKey pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubRef.value(), keySpec);
-        registerKeyPairInSpi(alias, privRef.value(), "ML-DSA", pubKey);
-    }
-
-    private void generateMlKemKeyPair(CryptokiE ce, long session, byte[] labelBytes,
-            String keySpec, String alias) throws Exception {
-        long paramSet = pqcProfile.resolveMlKemParamSet(keySpec);
-        CKA[] pubTemplate = {
-            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkMlKem()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true)
-        };
-        CKA[] privTemplate = {
-            new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkMlKem()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.PRIVATE, true),
-            new CKA(CKA.SENSITIVE, true),
-            new CKA(CKA.EXTRACTABLE, false)
-        };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(pqcProfile.ckmMlKemKeyPairGen()),
-                    pubTemplate, privTemplate, pubRef, privRef);
-        }
-        log.info("Generated ML-KEM key pair (" + keySpec + ") on HSM with alias=" + alias +
-                " privHandle=" + privRef.value() + " pubHandle=" + pubRef.value());
-        java.security.PublicKey pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubRef.value(), keySpec);
-        registerKeyPairInSpi(alias, privRef.value(), "ML-KEM", pubKey);
-    }
-
-    private void generateSlhDsaKeyPair(CryptokiE ce, long session, byte[] labelBytes,
-            String keySpec, String alias) throws Exception {
-        long paramSet = pqcProfile.resolveSlhDsaParamSet(keySpec);
-        CKA[] pubTemplate = {
-            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkSlhDsa()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.VERIFY, true)
-        };
-        CKA[] privTemplate = {
-            new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-            new CKA(CKA.KEY_TYPE, pqcProfile.ckkSlhDsa()),
-            new CKA(CKA.LABEL, labelBytes),
-            new CKA(pqcProfile.ckaParameterSet(), paramSet),
-            new CKA(CKA.TOKEN, true),
-            new CKA(CKA.PRIVATE, true),
-            new CKA(CKA.SENSITIVE, true),
-            new CKA(CKA.EXTRACTABLE, false),
-            new CKA(CKA.SIGN, true)
-        };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(pqcProfile.ckmSlhDsaKeyPairGen()),
-                    pubTemplate, privTemplate, pubRef, privRef);
-        }
-        log.info("Generated SLH-DSA key pair (" + keySpec + ") on HSM with alias=" + alias +
-                " privHandle=" + privRef.value() + " pubHandle=" + pubRef.value());
-        java.security.PublicKey pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubRef.value(), keySpec);
-        registerKeyPairInSpi(alias, privRef.value(), "SLH-DSA", pubKey);
-    }
-
-    private void registerKeyPairInSpi(String alias, long privHandle, String algorithm,
-            java.security.PublicKey pubKey) {
-        Kimbo11ngKeyStoreSpi spi = p11Provider != null ? p11Provider.getKeyStoreSpi() : null;
-        if (spi != null) {
-            spi.registerGeneratedKeyPair(alias, privHandle, algorithm, pubKey);
-        }
-        try {
-            java.security.KeyStore underlying = bridge.bridgeGetKeyStore().getKeyStore();
-            bridge.bridgeSetKeyStore(underlying);
+        long[] wanted = (keyUsages == null || keyUsages.length == 0)
+                ? (isPrivate ? ALL_PRIVATE_USAGES : ALL_PUBLIC_USAGES)
+                : keyUsages;
+        long objectClass = isPrivate ? CKO.PRIVATE_KEY : CKO.PUBLIC_KEY;
+        try (SessionLease lease = current.slot().borrow()) {
+            CryptokiE ce = current.slot().ce();
+            long handle = findObject(current, ce, lease.session(), objectClass, alias);
+            if (handle < 0) {
+                // Not an error: EJBCA asks for every alias it knows, including ones whose public
+                // half a token may not hold.
+                if (log.isDebugEnabled()) {
+                    log.debug("No " + (isPrivate ? "private" : "public") + " key object for alias '"
+                            + alias + "'; reporting no usages");
+                }
+                return Collections.emptySet();
+            }
+            Set<Long> usages = new TreeSet<>();
+            for (long cka : wanted) {
+                if (isAttributeTrue(ce, lease.session(), handle, cka)) {
+                    usages.add(cka);
+                }
+            }
+            return usages;
+        } catch (CryptoTokenOfflineException e) {
+            throw e;
         } catch (Exception e) {
-            log.warn("Could not refresh keystore cache after key generation: " + e.getMessage());
+            throw Pkcs11Errors.offline(
+                    "Could not read the key usages for alias '" + alias + "'", e);
         }
     }
 
-    private void initDevice(Properties properties) throws NoSuchSlotException, CryptoTokenOfflineException {
+    /**
+     * One attribute per call, deliberately.
+     *
+     * <p>A bulk {@code C_GetAttributeValue} returns non-zero if <em>any</em> requested type is
+     * invalid for the object, and jacknji11 turns any non-zero return into an exception — so one
+     * attribute a token does not implement would lose the answers for all the others.
+     */
+    private static boolean isAttributeTrue(CryptokiE ce, long session, long handle, long cka) {
+        try {
+            return Boolean.TRUE.equals(ce.GetAttributeValue(session, handle, cka).getValueBool());
+        } catch (Exception e) {
+            // CKR_ATTRIBUTE_TYPE_INVALID, CKR_ATTRIBUTE_SENSITIVE, or a value that is not a
+            // one-byte CK_BBOOL. In every case the token is not telling us this usage is granted,
+            // and "not granted" is the safe reading.
+            if (log.isDebugEnabled()) {
+                log.debug("Attribute 0x" + Long.toHexString(cka) + " unreadable on handle " + handle
+                        + ": " + e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * The object handle for one half of an alias's key pair.
+     *
+     * <p>By {@code CKA_ID} through the enumerated {@link P11KeyRef} when the alias is known, which
+     * is what pairs a public key with its private half even after one of them was relabelled.
+     * Falls back to a label search for an alias this instance has not enumerated.
+     */
+    private long findObject(TokenRuntime current, CryptokiE ce, long session, long objectClass,
+            String alias) {
+        Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
+        P11KeyRef ref = spi == null ? null : spi.referenceFor(alias);
+        long[] found = ref != null
+                ? ref.findAll(ce, session, objectClass, true)
+                : ce.FindObjects(session, new CKA(CKA.CLASS, objectClass),
+                        new CKA(CKA.LABEL, alias.getBytes(StandardCharsets.UTF_8)));
+        return (found == null || found.length == 0) ? -1 : found[0];
+    }
+
+    /**
+     * Refuses a key test EJBCA cannot perform, before it picks the wrong one.
+     *
+     * <p>{@code BaseCryptoToken.testKeyPair} has exactly two branches — sign, or encrypt/decrypt
+     * with a JCA {@code Cipher} — chosen from the usage set. An ML-KEM key reports
+     * {@code CKA_DECRYPT} and no {@code CKA_SIGN}, so it lands in the encryption branch, and
+     * key encapsulation is not RSA encryption: the test fails with a {@code Cipher} error that
+     * says nothing about why. There is no third branch to add from here, so the honest answer is
+     * to say so.
+     */
+    public void requireTestableKeyPair(String alias) throws InvalidKeyException {
+        TokenRuntime current = runtime;
+        Kimbo11ngKeyStoreSpi spi = current == null ? null : current.keyStoreSpi();
+        if (spi == null) {
+            return;
+        }
+        Optional<AlgorithmEntry> entry = spi.algorithmFor(alias);
+        if (entry.isPresent() && !entry.get().canSign()) {
+            throw new InvalidKeyException("Key '" + alias + "' is "
+                    + entry.get().canonicalName() + ", a key-encapsulation algorithm. EJBCA's key"
+                    + " test can either sign or encrypt, and neither is a KEM operation, so there"
+                    + " is nothing here to test. The key pair was generated on the token and is"
+                    + " enumerated normally.");
+        }
+    }
+
+    // ---- generation ----
+
+    /**
+     * Refuses a post-quantum algorithm the probe excluded, naming the reason.
+     *
+     * <p>What this replaces: {@code ca init} with an ML-DSA-65 key on a token whose firmware does
+     * not have the mechanism produced {@code CKR_MECHANISM_INVALID} from inside
+     * {@code C_GenerateKeyPair}, with nothing naming the mechanism, the algorithm, or the fact that
+     * fifteen other algorithms in the same profile would have worked.
+     */
+    private void requirePqcSupported(TokenRuntime current, AlgorithmEntry entry)
+            throws InvalidAlgorithmParameterException {
+        String reason = current.algorithms().rejectionReason(entry.canonicalName());
+        if (reason == null) {
+            return;
+        }
+        if (!current.algorithms().failFast()) {
+            log.warn("Generating a " + entry.canonicalName() + " key even though " + reason
+                    + " (" + TokenCapabilities.PROBE_FAIL_FAST + "=false). If the token rejects the"
+                    + " mechanism, this is why.");
+            return;
+        }
+        throw new InvalidAlgorithmParameterException(entry.canonicalName()
+                + " cannot be generated on this token: " + reason + ". The profile in use is '"
+                + current.profile().name() + "'; algorithms this token does offer are listed in"
+                + " the log at token initialisation. Set " + TokenCapabilities.PROBE_FAIL_FAST
+                + "=false to attempt it anyway.");
+    }
+
+    /**
+     * Catches a key specification that is neither a curve nor an algorithm the active profile
+     * describes, and says which profile would have described it.
+     *
+     * <p>Anything not RSA and not in the profile falls through to the EC path, so a token
+     * configured with the wrong profile answered a request for ML-DSA-65 with "string ML-DSA-65 is
+     * not an OID" — an accurate statement about the EC branch and no help at all about the actual
+     * mistake, which is one property.
+     */
+    private void requireCurveOrBetterProfile(TokenRuntime current, String keySpec, String curveName)
+            throws InvalidAlgorithmParameterException {
+        if (KeyTemplates.isKnownCurve(curveName)) {
+            return;
+        }
+        // Only on the failure path, so the ServiceLoader scan costs nothing in normal operation.
+        // Every profile that knows the algorithm is named, not the first one found: which of them
+        // is right for this HSM is the operator's call, and picking one to suggest would be the
+        // same guess this phase exists to remove.
+        List<String> knownTo = ProfileResolver.available().stream()
+                .filter(p -> p.lookup(keySpec).isPresent())
+                .map(PqcMechanismProfile::name)
+                .sorted()
+                .toList();
+        if (!knownTo.isEmpty()) {
+            throw new InvalidAlgorithmParameterException("'" + keySpec + "' is not a curve name,"
+                    + " and the profile in use ('" + current.profile().name() + "') does not"
+                    + " describe it. These profiles do: " + knownTo + ". Set "
+                    + ProfileResolver.PROFILE_PROPERTY + " to whichever matches this HSM, or"
+                    + " remove it and let the capability probe choose.");
+        }
+        throw new InvalidAlgorithmParameterException("'" + keySpec + "' is neither a curve name"
+                + " this provider recognises nor an algorithm described by any installed profile"
+                + " (in use: '" + current.profile().name() + "').");
+    }
+
+    /** The same check for RSA and EC, where the mechanism is fixed and there is no profile row. */
+    private void requireMechanism(TokenRuntime current, long ckm, String keySpec)
+            throws InvalidAlgorithmParameterException {
+        AlgorithmSupport algorithms = current.algorithms();
+        if (algorithms.capabilities().canGenerateKeyPair(ckm)) {
+            return;
+        }
+        String message = "the token does not offer key-pair generation with "
+                + TokenCapabilities.name(ckm);
+        if (!algorithms.failFast()) {
+            log.warn("Generating a '" + keySpec + "' key even though " + message + " ("
+                    + TokenCapabilities.PROBE_FAIL_FAST + "=false).");
+            return;
+        }
+        throw new InvalidAlgorithmParameterException("Cannot generate a '" + keySpec
+                + "' key: " + message + ". Set " + TokenCapabilities.PROBE_FAIL_FAST
+                + "=false to attempt it anyway.");
+    }
+
+    /**
+     * Refuses to generate over an alias the token already uses.
+     *
+     * <p>PKCS#11 has no uniqueness constraint on {@code CKA_LABEL}, so without this the token ends
+     * up holding two private keys with the same name. Everything then still appears to work —
+     * enumeration picks one of them, arbitrarily — until a restart picks the other and the CA
+     * signs with a key its certificate does not match.
+     *
+     * <p>The token is asked, not the local cache: another node, or an operator with a vendor tool,
+     * may have created the key since this instance last enumerated.
+     */
+    private void requireAliasFree(TokenRuntime current, String alias)
+            throws InvalidAlgorithmParameterException, CryptoTokenOfflineException {
+        try (SessionLease lease = current.slot().borrow()) {
+            long[] existing = current.slot().ce().FindObjects(lease.session(),
+                    new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
+                    new CKA(CKA.LABEL, alias.getBytes(StandardCharsets.UTF_8)));
+            if (existing != null && existing.length > 0) {
+                throw new InvalidAlgorithmParameterException("The token already holds a private"
+                        + " key with the alias '" + alias + "'. Delete it first, or choose another"
+                        + " alias; generating a second key with the same label would leave two"
+                        + " keys that cannot be told apart.");
+            }
+        }
+    }
+
+    private void generateRsa(TokenRuntime current, byte[] label, byte[] keyId, int bits,
+            String alias) throws Exception {
+        KeyTemplates.Pair templates = KeyTemplates.rsa(label, keyId, bits);
+        generateAndRegister(current, templates, keyId, CKM.RSA_PKCS_KEY_PAIR_GEN, alias, "RSA",
+                null, PublicKeyReader::readRsaPublicKey);
+        log.info("Generated RSA-" + bits + " key pair '" + alias + "'");
+    }
+
+    private void generateEc(TokenRuntime current, byte[] label, byte[] keyId, String curveName,
+            String alias) throws Exception {
+        KeyTemplates.Pair templates = KeyTemplates.ec(label, keyId, curveName);
+        generateAndRegister(current, templates, keyId, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
+                PublicKeyReader::readEcPublicKey);
+        log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
+    }
+
+    private void generatePqc(TokenRuntime current, byte[] label, byte[] keyId,
+            AlgorithmEntry entry, String alias) throws Exception {
+        KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile());
+        // The entry is passed rather than re-derived from the token, so the OID recorded in the
+        // SubjectPublicKeyInfo is the one the key was actually generated as.
+        generateAndRegister(current, templates, keyId, entry.ckmKeyPairGen(), alias,
+                entry.family().jcaName(), entry,
+                (ce, session, handle) -> PublicKeyReader.readPqcPublicKey(ce, session, handle,
+                        entry));
+        log.info("Generated " + entry.canonicalName() + " key pair '" + alias + "'");
+    }
+
+    /** Reads a freshly generated public key from its object handle. */
+    @FunctionalInterface
+    private interface PublicKeyFetch {
+        PublicKey read(CryptokiE ce, long session, long handle) throws Exception;
+    }
+
+    /**
+     * Generates a pair and reads its public key under a single session lease.
+     *
+     * <p>One lease for both steps, because the public-key handle is only meaningful in the session
+     * that produced it: reading it on a different session is a different object table and, on some
+     * modules, a different handle entirely.
+     */
+    private void generateAndRegister(TokenRuntime current, KeyTemplates.Pair templates,
+            byte[] keyId, long mechanism, String alias, String algorithm, AlgorithmEntry entry,
+            PublicKeyFetch reader) throws Exception {
+        long privHandle;
+        PublicKey publicKey;
+        try (SessionLease lease = current.slot().borrow()) {
+            CryptokiE ce = current.slot().ce();
+            LongRef pubRef = new LongRef();
+            LongRef privRef = new LongRef();
+            ce.GenerateKeyPair(lease.session(), new CKM(mechanism),
+                    templates.pub(), templates.priv(), pubRef, privRef);
+            privHandle = privRef.value();
+            publicKey = reader.read(ce, lease.session(), pubRef.value());
+        }
+        register(current, new P11KeyRef(keyId, alias, entry), privHandle, algorithm, publicKey);
+    }
+
+    private void register(TokenRuntime current, P11KeyRef ref, long privHandle, String algorithm,
+            PublicKey publicKey) {
+        Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
+        if (spi != null) {
+            spi.registerGeneratedKeyPair(ref.label(), ref, privHandle, algorithm, publicKey);
+        } else if (log.isDebugEnabled()) {
+            log.debug("No KeyStore SPI yet; '" + ref.label()
+                    + "' will appear on the next enumeration");
+        }
+        refreshKeyStoreCache(ref.label());
+    }
+
+    /**
+     * Makes a freshly generated key visible to EJBCA.
+     *
+     * <p>{@code BaseCryptoToken.setKeyStore} wraps our KeyStore in a {@code CachingKeyStoreWrapper}
+     * whose alias list is a {@code HashMap} built once, at construction, and updated only through
+     * {@code setKeyEntry} and {@code deleteEntry}. A key generated on the token never passes
+     * through the KeyStore API, so the cache does not learn about it and {@code ca init} fails with
+     * "No key with alias" for a key that demonstrably exists. Handing the same underlying KeyStore
+     * back to {@code setKeyStore} rebuilds the wrapper and its cache.
+     *
+     * <p>The obvious alternative does not work: {@code CachingKeyStoreWrapper.setKeyEntry} would
+     * update the cache directly, but {@code KeyStore.setKeyEntry} refuses a {@code PrivateKey}
+     * without a certificate chain, and we have none. EJBCA's own {@code KeyStoreTools} gets around
+     * that by minting a self-signed placeholder certificate with the new key — which an ML-KEM key
+     * cannot do, because it cannot sign. So the rebuild stays.
+     *
+     * <p>It is cheap because {@code engineGetCertificate} answers without touching the token: the
+     * rebuild reads only this SPI's in-memory maps. Were it to search the token per alias, every
+     * key generation would cost one search per key already on it.
+     *
+     * <p>{@code getKeyStore()} is deprecated in EJBCA, and this is the one call that needs it. If
+     * a future EJBCA removes it, the fallback is EJBCA's own approach in {@code KeyStoreTools}:
+     * mint a self-signed placeholder certificate so {@code setKeyEntry} accepts the key. That is
+     * not used here because an ML-KEM key cannot sign one.
+     */
+    @SuppressWarnings("deprecation")
+    private void refreshKeyStoreCache(String alias) {
+        try {
+            CachingKeyStoreWrapper wrapper = bridge.bridgeGetKeyStore();
+            if (wrapper != null) {
+                bridge.bridgeSetKeyStore(wrapper.getKeyStore());
+            }
+        } catch (Exception e) {
+            // Not fatal: the alias reappears on the next activation, which re-enumerates.
+            log.warn("Could not refresh the keystore cache after generating '" + alias
+                    + "'; it may not be visible until the token is reactivated: " + e.getMessage());
+        }
+    }
+
+    // ---- init ----
+
+    private void initDevice(Properties properties)
+            throws NoSuchSlotException, CryptoTokenOfflineException {
         String libPath = properties.getProperty(SHLIB_LABEL_KEY);
         if (libPath == null || libPath.isEmpty()) {
-            throw new CryptoTokenOfflineException("Property '" + SHLIB_LABEL_KEY + "' is required");
+            throw new CryptoTokenOfflineException(
+                    "Property '" + SHLIB_LABEL_KEY + "' is required");
         }
         String slotLabelValue = properties.getProperty(SLOT_LABEL_VALUE, "0");
-        String slotLabelTypeStr = properties.getProperty(SLOT_LABEL_TYPE,
-                Pkcs11SlotLabelType.SLOT_INDEX.getKey());
-        Pkcs11SlotLabelType slotLabelType = Pkcs11SlotLabelType.getFromKey(slotLabelTypeStr);
+        Pkcs11SlotLabelType slotLabelType = Pkcs11SlotLabelType.getFromKey(
+                properties.getProperty(SLOT_LABEL_TYPE, Pkcs11SlotLabelType.SLOT_INDEX.getKey()));
         if (slotLabelType == null) {
             slotLabelType = Pkcs11SlotLabelType.SLOT_INDEX;
         }
+
         long slotId;
         try {
             slotId = resolveSlotId(libPath, slotLabelType, slotLabelValue);
@@ -434,77 +645,106 @@ public class CryptoTokenImpl {
         } catch (Exception e) {
             throw new NoSuchSlotException("Failed to resolve slot: " + e.getMessage(), e);
         }
-        device = new CryptokiDevice(libPath, slotId);
-        p11Provider = new Kimbo11ngProvider(device);
-        pqcProfile = ProfileResolver.resolve(properties, device);
 
-        boolean doNotAdd = Boolean.parseBoolean(
-                properties.getProperty(DO_NOT_ADD_P11_PROVIDER, "false"));
-        if (!doNotAdd) {
-            if (Security.getProvider(p11Provider.getName()) == null) {
-                Security.addProvider(p11Provider);
-            }
+        P11Slot slot = modules.get(libPath).slot(slotId, properties);
+        // Before anything else is decided: a slot-level call, so it needs no session and no PIN,
+        // which is what lets the algorithm table be settled at init rather than at first use.
+        TokenCapabilities capabilities = slot.capabilities();
+        PqcMechanismProfile profile = ProfileResolver.resolve(properties, capabilities);
+        boolean failFast = Boolean.parseBoolean(
+                properties.getProperty(TokenCapabilities.PROBE_FAIL_FAST, "true"));
+        AlgorithmSupport algorithms = AlgorithmSupport.compute(profile, capabilities, failFast);
+        log.info(algorithms.describe());
+
+        boolean backfill = Boolean.parseBoolean(
+                properties.getProperty(TokenRuntime.BACKFILL_KEY_IDS, "true"));
+        // Lenient by default, and only for enumeration — generation is always strict. The one
+        // thing this relaxes is a token that labels an existing key with a different OID than the
+        // one we resolved, which happens for real: a token from the NIST draft era uses the
+        // pre-standard ML-DSA OIDs. The length check still runs, so a key of the wrong parameter
+        // set is still refused; what is allowed through is a naming disagreement on a key whose
+        // material is right. An operator who wants that to be fatal sets the property.
+        PublicKeyReader.Policy policy = Boolean.parseBoolean(properties.getProperty(
+                PublicKeyReader.STRICT_PUBLIC_KEY, "false"))
+                ? PublicKeyReader.Policy.STRICT
+                : PublicKeyReader.Policy.LENIENT;
+        TokenRuntime newRuntime = new TokenRuntime(slot, algorithms, backfill, policy);
+        // The signing path can see that the HSM is gone but cannot act on it; clearing EJBCA's
+        // keystore is what stops work being routed to a CA whose token is not answering, and what
+        // lets autoActivate() log in again with the PIN EJBCA holds and we do not.
+        slot.onOffline((reason, cause) -> takeOffline(reason));
+        // Same provider object per (library, slot); only the runtime behind it changes.
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(newRuntime);
+        this.runtime = newRuntime;
+        this.p11Provider = provider;
+
+        if (!Boolean.parseBoolean(properties.getProperty(DO_NOT_ADD_P11_PROVIDER, "false"))) {
+            // BaseCryptoToken.setJCAProvider registers it in java.security.Security and throws if
+            // the name cannot then be resolved, so registration is EJBCA's job, not ours.
+            bridge.bridgeSetJCAProvider(provider);
         }
-        bridge.bridgeSetJCAProvider(p11Provider);
+    }
+
+    /** Clears the keystore so EJBCA treats this token as offline and re-activates it later. */
+    private void takeOffline(String reason) {
+        try {
+            bridge.bridgeSetKeyStore(null);
+            TokenRuntime current = runtime;
+            if (current != null && current.keyStoreSpi() != null) {
+                current.keyStoreSpi().clear();
+            }
+            log.warn("Token taken offline: " + reason);
+        } catch (KeyStoreException e) {
+            log.error("Could not take the token offline after " + reason + ": " + e.getMessage(), e);
+        }
     }
 
     private long resolveSlotId(String libPath, Pkcs11SlotLabelType labelType, String labelValue)
             throws Exception {
-        SlotListWrapper wrapper = new SlotListWrapper(libPath);
-        long[] slots = wrapper.getSlotList();
+        // Through the registry, so this shares one C_Initialize with the slot-list wrapper EJBCA
+        // asks for separately. Previously resolving a slot and then opening it initialized the
+        // same library two or three times.
+        Pkcs11Module module = modules.get(libPath);
+        long[] slots = module.slotList();
         if (slots == null || slots.length == 0) {
             throw new NoSuchSlotException("No slots found in library: " + libPath);
         }
         if (labelType == Pkcs11SlotLabelType.SLOT_NUMBER) {
             return Long.parseLong(labelValue);
-        } else if (labelType == Pkcs11SlotLabelType.SLOT_INDEX) {
-            int idx = Integer.parseInt(labelValue);
-            if (idx < 0 || idx >= slots.length) {
-                throw new NoSuchSlotException("Slot index " + idx + " out of range (0-" + (slots.length - 1) + ")");
+        }
+        if (labelType == Pkcs11SlotLabelType.SLOT_INDEX) {
+            int index = Integer.parseInt(labelValue);
+            if (index < 0 || index >= slots.length) {
+                throw new NoSuchSlotException("Slot index " + index + " out of range (0-"
+                        + (slots.length - 1) + ")");
             }
-            return slots[idx];
-        } else if (labelType == Pkcs11SlotLabelType.SLOT_LABEL) {
+            return slots[index];
+        }
+        if (labelType == Pkcs11SlotLabelType.SLOT_LABEL) {
             for (long slotId : slots) {
-                char[] label = wrapper.getTokenLabel(slotId);
+                char[] label = module.tokenLabel(slotId);
                 if (label != null && new String(label).trim().equals(labelValue.trim())) {
                     return slotId;
                 }
             }
             throw new NoSuchSlotException("No slot found with label: " + labelValue);
-        } else {
-            return slots[0];
         }
+        return slots[0];
     }
 
-    private static byte[] encodeEcParams(String curveName) throws Exception {
-        String oid = resolveEcOid(curveName);
-        return new ASN1ObjectIdentifier(oid).getEncoded();
-    }
-
-    private static String resolveEcOid(String name) {
-        switch (name.toUpperCase().replace("-", "").replace("_", "")) {
-            case "P256": case "SECP256R1": case "PRIME256V1": return "1.2.840.10045.3.1.7";
-            case "P384": case "SECP384R1": return "1.3.132.0.34";
-            case "P521": case "SECP521R1": return "1.3.132.0.35";
-            case "SECP256K1": return "1.3.132.0.10";
-            case "BRAINPOOLP256R1": return "1.3.36.3.3.2.8.1.1.7";
-            case "BRAINPOOLP384R1": return "1.3.36.3.3.2.8.1.1.11";
-            case "BRAINPOOLP512R1": return "1.3.36.3.3.2.8.1.1.13";
-            default:
-                org.bouncycastle.asn1.x9.X9ECParameters x9 = ECNamedCurveTable.getByName(name);
-                if (x9 != null) {
-                    ASN1ObjectIdentifier oid = ECNamedCurveTable.getOID(name);
-                    if (oid != null) return oid.getId();
-                }
-                return name;
+    /** Strips an optional {@code EC} prefix EJBCA sometimes prepends to a curve name. */
+    private static String curveNameOf(String keySpec) {
+        String upper = keySpec.toUpperCase(Locale.ROOT);
+        if (upper.startsWith("EC") && keySpec.length() > 2 && !upper.startsWith("ECDSA")) {
+            return keySpec.substring(2).trim();
         }
+        return keySpec;
     }
 
     private static int parseRsaKeySize(String keySpec) {
-        if (keySpec.startsWith("RSA")) {
-            String sizeStr = keySpec.substring(3).trim();
-            if (sizeStr.isEmpty()) return 2048;
-            return Integer.parseInt(sizeStr);
+        if (keySpec.toUpperCase(Locale.ROOT).startsWith("RSA")) {
+            String size = keySpec.substring(3).trim();
+            return size.isEmpty() ? 2048 : Integer.parseInt(size);
         }
         return Integer.parseInt(keySpec);
     }
@@ -513,11 +753,13 @@ public class CryptoTokenImpl {
         return p11Provider;
     }
 
-    public CryptokiDevice getDevice() {
-        return device;
+    public P11Slot getSlot() {
+        TokenRuntime current = runtime;
+        return current == null ? null : current.slot();
     }
 
     public PqcMechanismProfile getPqcProfile() {
-        return pqcProfile;
+        TokenRuntime current = runtime;
+        return current == null ? null : current.profile();
     }
 }

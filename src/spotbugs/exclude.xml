@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2026 Thomas Pham — kimbo11ng
+  SPDX-License-Identifier: Apache-2.0
+
+  SpotBugs exclusions.
+
+  Two kinds of entry, and only two:
+    - "scheduled": a real finding whose fix belongs to a named hardening phase. It carries the
+      phase number and must be deleted when that phase lands.
+    - "permanent": the detector's assumption does not hold for this code, with the reason stated.
+
+  The threshold stays at Medium and the build stays failing, so any NEW finding breaks the build.
+  This file is expected to shrink to near-empty, not to grow.
+-->
+<FindBugsFilter>
+
+    <!-- ===== scheduled: phase 3 (durable key identity) ===== -->
+
+    <!-- The runtime publishes the live KeyStoreSpi so CryptoTokenImpl can register generated keys
+         with it. Phase 3 removes the registration hand-off entirely: keys are then resolved from
+         the token by CKA_ID, so nothing needs to reach into the SPI's maps. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.TokenRuntime"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.CryptoTokenImpl"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- The key maps are published for the CryptoTokenImpl registration path. Phase 3 removes the
+         accessors: keys are resolved from the token by CKA_ID instead of cached and handed out. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- ===== permanent, justified ===== -->
+
+    <!-- AbstractTableProfile validates its algorithm table in the constructor and throws if two
+         entries share a name or are indistinguishable on the token. That throw IS the safety
+         property: it is what stops a profile that would label a key with the wrong OID from ever
+         existing. The finalizer attack the detector warns about needs an attacker-supplied
+         subclass overriding finalize(); every subclass is final, in this jar, and named in our own
+         META-INF/services descriptor, so a partially constructed profile is unreachable. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.profile.AbstractTableProfile"/>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+
+    <!-- The PKCS#11 library path is the operator-configured 'sharedLibrary' token property. An
+         administrator naming the shared object to load is the feature, not untrusted input;
+         EJBCA additionally constrains it to cryptotoken.p11.lib.* entries in web.properties.
+         Canonicalizing it is what lets the registry recognise one library reached by two paths. -->
+    <Match>
+        <Or>
+            <Class name="ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry"/>
+            <Class name="ch.ithings.kimbo11ng.p11.Pkcs11Module"/>
+            <Class name="ch.ithings.kimbo11ng.p11.P11Slot"/>
+            <Class name="ch.ithings.kimbo11ng.slot.SlotListWrapper"/>
+            <Class name="com.keyfactor.util.keys.token.pkcs11.JackNJI11SlotListWrapperFactory"/>
+        </Or>
+        <Bug pattern="PATH_TRAVERSAL_IN"/>
+    </Match>
+
+    <!-- Pkcs11Module hands out its CryptokiE because every PKCS#11 call needs the library binding.
+         The hazard the detector is pointing at was the SESSION, and that is no longer reachable
+         this way: a session comes only from SessionPool.borrow() as an AutoCloseable lease. The
+         CryptokiE itself carries no per-caller state - it is the loaded library. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.p11.Pkcs11Module"/>
+        <Method name="ce"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- Pkcs11ModuleRegistry is deliberately both: one shared instance, so "initialize each library
+         exactly once" holds across the deployment, and constructible, so a test can hold its own
+         backed by a fake token instead of inheriting modules from whichever test ran first. That
+         is not the singleton pattern the detector is matching against. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry"/>
+        <Bug pattern="SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR"/>
+    </Match>
+
+    <!-- java.security.Provider extends Properties (Hashtable). No JCA provider overrides
+         equals(); identity comparison is what the JCA framework relies on, and EJBCA's
+         SignWithWorkingAlgorithm caches per Provider.hashCode(). -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngProvider"/>
+        <Bug pattern="EQ_DOESNT_OVERRIDE_EQUALS"/>
+    </Match>
+
+</FindBugsFilter>

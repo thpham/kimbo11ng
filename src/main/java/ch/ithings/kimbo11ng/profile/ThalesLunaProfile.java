@@ -4,64 +4,89 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
-import java.security.InvalidAlgorithmParameterException;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry.KeyOp;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /**
- * Scaffold profile for Thales Luna HSMs.
- * Luna 7.8.4+ supports ML-DSA and ML-KEM but uses vendor-specific CKM values
- * before full PKCS#11 v3.2 adoption.
+ * Thales Luna Network/PCIe HSM, firmware 7.9.0 or later with Luna HSM Client 10.9.0 or later.
  *
- * TODO: Populate with actual Thales Luna CKM/CKK constants when available.
- * See: https://thalesdocs.com/gphsm/luna/7/docs/network/Content/sdk/pkcs11/pkcs11_pqc.htm
+ * <p><b>This profile is optional.</b> Luna 7.9.0 implements post-quantum keys with the standard
+ * PKCS#11 v3.2 numbering — the same key types, mechanisms, parameter-set attribute and {@code CKP_*}
+ * values as {@link Pkcs11v32Profile} — so a Luna token works correctly under the default profile,
+ * with the capability probe narrowing the algorithm table to what the firmware actually advertises.
+ * The profile exists so that Luna can be named explicitly (<code>kimbo11ng.pqc.profile=thales-luna</code>)
+ * and so that the difference from a v3.2 token is stated in code rather than discovered at runtime:
+ * Luna supports ML-DSA and ML-KEM but <b>not SLH-DSA</b>, so the twelve SLH-DSA rows are absent
+ * here. Under the default profile the same twelve rows are excluded by the probe instead.
+ *
+ * <p><b>Constants.</b> All identical to v3.2: {@code CKK_ML_DSA} 0x4A, {@code CKK_ML_KEM} 0x49,
+ * {@code CKM_ML_DSA_KEY_PAIR_GEN} 0x1C, {@code CKM_ML_DSA} 0x1D, {@code CKM_ML_KEM_KEY_PAIR_GEN}
+ * 0x0F, {@code CKM_ML_KEM} 0x17, {@code CKA_PARAMETER_SET} 0x61D with {@code CKP_*} 1/2/3 per
+ * family. Luna adds one vendor mechanism, {@code CKM_EXTMU_ML_DSA} (0x80000175) for external-mu
+ * signing, which kimbo11ng does not use; its proprietary surface for ML-KEM is the
+ * {@code CA_EncapsulateKey}/{@code CA_DecapsulateKey} functions rather than different constants,
+ * and kimbo11ng does not encapsulate.
+ *
+ * <p><b>Known firmware limits (7.9.x).</b> ML-DSA private keys cannot be wrapped or unwrapped, and
+ * there is no SLH-DSA support or published roadmap for it. Neither affects certificate signing.
+ *
+ * <p>Sources: Luna HSM Firmware 7.9.0 Customer Release Notes; the ML-DSA and ML-KEM programming
+ * guides in the Luna SDK documentation. See {@code docs/VENDOR_PROFILE_CHECKLIST.md}.
  */
-public class ThalesLunaProfile implements PqcMechanismProfile {
+public final class ThalesLunaProfile extends AbstractTableProfile {
 
-    private static final String NOT_YET = "Thales Luna PQC profile not yet populated. " +
-            "Requires vendor-specific CKM values from Luna firmware 7.8.4+ documentation.";
+    // Firmware 7.9.0 uses the v3.2 values verbatim; they are repeated rather than imported so that
+    // a future divergence is a one-line edit here and not a change to the v3.2 profile.
+    private static final long CKK_ML_DSA = 0x0000004AL;
+    private static final long CKK_ML_KEM = 0x00000049L;
 
-    @Override public long ckmMlDsaKeyPairGen()  { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckmMlKemKeyPairGen()  { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckmMlDsa()            { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckmMlKem()            { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckkMlDsa()            { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckkMlKem()            { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckaParameterSet()     { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckmSlhDsaKeyPairGen() { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckmSlhDsa()           { throw new UnsupportedOperationException(NOT_YET); }
-    @Override public long ckkSlhDsa()           { throw new UnsupportedOperationException(NOT_YET); }
+    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
+    private static final long CKM_ML_DSA = 0x0000001DL;
+    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
+    private static final long CKM_ML_KEM = 0x00000017L;
 
-    @Override
-    public long resolveMlDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        throw new InvalidAlgorithmParameterException(NOT_YET);
+    private static final String SIG_ARC = "2.16.840.1.101.3.4.3.";
+    private static final String KEM_ARC = "2.16.840.1.101.3.4.4.";
+
+    private static final Set<KeyOp> SIGNING = Set.of(KeyOp.SIGN, KeyOp.VERIFY);
+    private static final Set<KeyOp> KEM = Set.of(KeyOp.ENCAPSULATE, KeyOp.DECAPSULATE);
+
+    public ThalesLunaProfile() {
+        super(table());
+    }
+
+    private static List<AlgorithmEntry> table() {
+        return List.of(
+            mlDsa("ML-DSA-44", 1L, SIG_ARC + "17", 1312),
+            mlDsa("ML-DSA-65", 2L, SIG_ARC + "18", 1952),
+            mlDsa("ML-DSA-87", 3L, SIG_ARC + "19", 2592),
+
+            mlKem("ML-KEM-512",  1L, KEM_ARC + "1", 800),
+            mlKem("ML-KEM-768",  2L, KEM_ARC + "2", 1184),
+            mlKem("ML-KEM-1024", 3L, KEM_ARC + "3", 1568));
+    }
+
+    private static AlgorithmEntry mlDsa(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN,
+                CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+    }
+
+    private static AlgorithmEntry mlKem(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
+                CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
     }
 
     @Override
-    public long resolveMlKemParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        throw new InvalidAlgorithmParameterException(NOT_YET);
+    public String name() {
+        return "thales-luna";
     }
 
     @Override
-    public long resolveSlhDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        throw new InvalidAlgorithmParameterException(NOT_YET);
-    }
-
-    @Override
-    public String algorithmForKeyType(long ckk) {
-        return null; // Not yet mapped
-    }
-
-    @Override
-    public String keySpecForParams(long ckk, long paramSet) {
-        return null;
-    }
-
-    @Override
-    public boolean supports(String keySpec) {
-        return false; // Not yet functional
-    }
-
-    @Override
-    public String toString() {
-        return "ThalesLunaProfile (scaffold - not yet implemented)";
+    public long ckaParameterSet() {
+        return Pkcs11v32Profile.CKA_PARAMETER_SET;
     }
 }

@@ -460,6 +460,67 @@ class EjbcaContainerIT {
         return apiClient;
     }
 
+    // ─── The extension point everything else rests on ─────────────────────────
+
+    /** Where the Dockerfile drops our jar, and the class name EJBCA looks for inside it. */
+    private static final String EAR_LIB = "/opt/keyfactor/ejbca/dist/ejbca.ear/lib";
+    private static final String HOOK_CLASS =
+            "org/cesecore/keys/token/p11ng/cryptotoken/Pkcs11NgCryptoToken.class";
+    /**
+     * The SoftHSM token PIN. Passed for completeness only: {@code provisionTestHsmToken} stores an
+     * auto-activation PIN, so EJBCA answers "the supplied PIN was ignored" either way.
+     */
+    private static final String SOFTHSM_PIN = "1234";
+
+    /**
+     * Checks the one thing every other test in this file silently assumes: that this EJBCA build
+     * can still find and construct our crypto token type.
+     *
+     * <p>It adds no coverage — the hook is already proved by everything below working. What it adds
+     * is a name for the failure. EJBCA CE ships <em>no</em> {@code p11ng} package of its own: the
+     * only trace of it in a stock image is the class-name string inside {@code CryptoTokenFactory},
+     * which {@code createCryptoToken} feeds to a plain {@code Class.forName} and which returns
+     * {@code null} on failure. So if that registration is ever removed or licence-gated, this jar
+     * stops being reachable and the symptom surfaces much later as "no such token", "CA creation
+     * failed" or "no valid signing algorithm found" — messages that all point at our code rather
+     * than at the missing hook.
+     *
+     * <p>That is not hypothetical. ejbca.org states that as of EJBCA 9.6.2 all use of HSM Crypto
+     * Tokens requires Enterprise Edition. No CE 9.6.2 exists yet, so this passes today; the point
+     * is that the first run against a newer CE should say which brick was pulled out.
+     */
+    @Test
+    @Order(0)
+    void ejbcaCanStillConstructOurCryptoTokenType() throws Exception {
+        ContainerState ejbca = ejbcaContainer();
+
+        // 1. Our jar is deployed and still carries the fully-qualified name EJBCA looks up. Guards
+        //    the mistakes on our side of the contract: a failed deploy, or a package rename.
+        //
+        //    grep straight at the jar rather than unzip, because the EJBCA image has neither
+        //    unzip nor jar nor python3. Zip keeps entry names uncompressed in the local header and
+        //    again in the central directory, so a plain byte search finds them — which is also why
+        //    this asserts "present" rather than an exact count.
+        org.testcontainers.containers.Container.ExecResult deployed = ejbca.execInContainer(
+                "sh", "-c", "grep -q '" + HOOK_CLASS + "' " + EAR_LIB + "/kimbo11ng-*.jar");
+        assertEquals(0, deployed.getExitCode(),
+                "The kimbo11ng jar in " + EAR_LIB + " does not contain " + HOOK_CLASS
+                + ". EJBCA resolves that exact name reflectively, so nothing else here can work."
+                + "\nstdout: " + deployed.getStdout() + "\nstderr: " + deployed.getStderr());
+
+        // 2. EJBCA actually resolved it. Activation only reaches the token if CryptoTokenFactory
+        //    constructed one, so a clean activate is proof the reflective lookup succeeded.
+        org.testcontainers.containers.Container.ExecResult activated = ejbca.execInContainer(
+                "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "activate", "TestHSM", SOFTHSM_PIN);
+        assertEquals(0, activated.getExitCode(),
+                "EJBCA could not activate the TestHSM token, which means it could not construct"
+                + " org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken."
+                + " The p11ng extension point may have been removed or licence-gated in this EJBCA"
+                + " build — see the EJBCA 9.6.2 note in docs/JACKNJI11_PROVENANCE.md. Every other"
+                + " failure in this class is likely a consequence of this one."
+                + "\nstdout: " + activated.getStdout() + "\nstderr: " + activated.getStderr());
+    }
+
     // ─── REST API tests ───────────────────────────────────────────────────────
 
     @Test
@@ -608,7 +669,133 @@ class EjbcaContainerIT {
             "Certificate must be signed with SHA256WithRSA (primary). sigAlgOID=" + cert.getSigAlgOID());
     }
 
+    @Test @Order(19)
+    void testMlKemKey_refusesWithAnExplanation() throws Exception {
+        // EJBCA's key test has two branches, sign and RSA-style encrypt/decrypt, chosen from the
+        // key-usage set. An ML-KEM key honestly reports CKA_DECRYPT and no CKA_SIGN, so it lands
+        // in the encryption branch — and encapsulation is not encryption. Without the interception
+        // this fails inside a JCA Cipher with a message about padding.
+        org.testcontainers.containers.Container.ExecResult r =
+            ejbcaContainer().execInContainer(
+                "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
+                "--token", "TestHSM", "--alias", "it-mlkem");
+
+        assertEquals(1, r.getExitCode(),
+            "testkey on a KEM key must fail, not silently pass.\nstdout: " + r.getStdout());
+        assertTrue(r.getStdout().contains("key-encapsulation"),
+            "the failure must say why. Output: " + r.getStdout());
+        assertTrue(r.getStdout().contains("ML-KEM-768"),
+            "the failure must name the algorithm. Output: " + r.getStdout());
+    }
+
+    // ─── Parameter-set and signature-algorithm coverage ───────────────────────
+    //
+    // ML-DSA-65 is the one algorithm the old code defaulted to when it could not read a parameter
+    // set, so a suite that only ever built ML-DSA-65 CAs could not have caught the default. These
+    // build the other two, and check the OID that actually lands in an issued certificate.
+
+    @Test @Order(20)
+    void mlDsa44Ca_issuesCertWithItsOwnOid() throws Exception {
+        createRootCa("MLDSA44-RootCA", "CN=ML-DSA-44 Root CA,O=ithings,C=CH",
+            "it-mldsa44CA", "ML-DSA-44", "ML-DSA", "ML-DSA-44");
+        X509Certificate cert = enrollKeystoreAndGetCert(
+            "it-mldsa44ee", "CN=it-mldsa44ee.ithings.ch,O=ithings,C=CH", "MLDSA44-RootCA");
+
+        // ML-DSA-44 OID = 2.16.840.1.101.3.4.3.17 (FIPS 204). The old default would have put
+        // .18 here, and the certificate would have been unverifiable by every relying party.
+        assertEquals("2.16.840.1.101.3.4.3.17", cert.getSigAlgOID(),
+            "sigAlgOID=" + cert.getSigAlgOID());
+    }
+
+    @Test @Order(21)
+    void mlDsa87Ca_issuesCertWithItsOwnOid() throws Exception {
+        createRootCa("MLDSA87-RootCA", "CN=ML-DSA-87 Root CA,O=ithings,C=CH",
+            "it-mldsa87CA", "ML-DSA-87", "ML-DSA", "ML-DSA-87");
+        X509Certificate cert = enrollKeystoreAndGetCert(
+            "it-mldsa87ee", "CN=it-mldsa87ee.ithings.ch,O=ithings,C=CH", "MLDSA87-RootCA");
+
+        // ML-DSA-87 OID = 2.16.840.1.101.3.4.3.19
+        assertEquals("2.16.840.1.101.3.4.3.19", cert.getSigAlgOID(),
+            "sigAlgOID=" + cert.getSigAlgOID());
+    }
+
+    @Test @Order(22)
+    void ecP384Ca_issuesEcdsaSignedCert() throws Exception {
+        createRootCa("EC384-RootCA", "CN=EC P-384 Root CA,O=ithings,C=CH",
+            "it-ec384CA", "secp384r1", "ECDSA", "SHA384withECDSA");
+        X509Certificate cert = enrollKeystoreAndGetCert(
+            "it-ec384ee", "CN=it-ec384ee.ithings.ch,O=ithings,C=CH", "EC384-RootCA");
+
+        // ecdsa-with-SHA384 = 1.2.840.10045.4.3.3. Also the only end-to-end check that the raw
+        // r||s the token returns is being DER-wrapped correctly on a curve other than P-256.
+        assertEquals("1.2.840.10045.4.3.3", cert.getSigAlgOID(),
+            "sigAlgOID=" + cert.getSigAlgOID());
+    }
+
+    @Test @Order(23)
+    void rsaPssCa_issuesPssSignedCert() throws Exception {
+        // RSA-PSS needs a CK_RSA_PKCS_PSS_PARAMS block that jacknji11 supplies no default for, and
+        // a wrong salt length produces a signature that is the right size and fails only at the
+        // relying party. Issuing a real certificate and reading its algorithm is the check.
+        // "2048", not "RSA2048": ejbca.sh ca init parses an RSA --keyspec as a number, even though
+        // cryptotoken generatekey accepts either spelling.
+        createRootCa("RSAPSS-RootCA", "CN=RSA-PSS Root CA,O=ithings,C=CH",
+            "it-pssCA", "2048", "RSA", "SHA256withRSAandMGF1");
+        X509Certificate cert = enrollKeystoreAndGetCert(
+            "it-pssee", "CN=it-pssee.ithings.ch,O=ithings,C=CH", "RSAPSS-RootCA");
+
+        // id-RSASSA-PSS = 1.2.840.113549.1.1.10
+        assertEquals("1.2.840.113549.1.1.10", cert.getSigAlgOID(),
+            "sigAlgOID=" + cert.getSigAlgOID());
+        // And the signature must actually verify under the CA's own public key — the only thing
+        // that catches a salt length the verifier disagrees with.
+        cert.verify(caCertificate("RSAPSS-RootCA").getPublicKey());
+    }
+
     // ─── Private helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Generate a CA key on TestHSM and initialise a root CA that signs with it.
+     *
+     * @param signatureAlgorithm the JCA name EJBCA will ask this provider for
+     */
+    static void createRootCa(String caName, String dn, String alias, String keySpec,
+            String keyType, String signatureAlgorithm) throws Exception {
+        ContainerState ejbca = ejbcaContainer();
+        String propsFile = "/tmp/it-" + alias + ".properties";
+
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "TestHSM", "--alias", alias, "--keyspec", keySpec);
+
+        ejbca.execInContainer("bash", "-c",
+            "printf 'certSignKey " + alias + "\\ncrlSignKey " + alias + "\\n"
+            + "defaultKey " + alias + "\\ntestKey " + alias + "\\n' > " + propsFile);
+
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "ca", "init",
+            "--caname", caName,
+            "--dn", dn,
+            "--tokenName", "TestHSM",
+            "--tokenPass", "1234",
+            "--tokenprop", propsFile,
+            "--keyspec", keySpec,
+            "--keytype", keyType,
+            "-v", "3650",
+            "--policy", "null",
+            "-s", signatureAlgorithm);
+    }
+
+    /** The CA's own certificate, read back through the REST API. */
+    static X509Certificate caCertificate(String caName) throws Exception {
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "ca", "getcacert",
+            "--caname", caName, "-f", "/tmp/" + caName + ".pem");
+        org.testcontainers.containers.Container.ExecResult pem =
+            ejbca.execInContainer("cat", "/tmp/" + caName + ".pem");
+        return (X509Certificate) java.security.cert.CertificateFactory
+            .getInstance("X.509")
+            .generateCertificate(new java.io.ByteArrayInputStream(
+                pem.getStdout().getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
 
     private static ContainerState ejbcaContainer() {
         return COMPOSE.getContainerByServiceName("ejbca-1").orElseThrow(

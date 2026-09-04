@@ -21,6 +21,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         OPENSSL_VERSION: "3.6.0"
+        SOFTHSM_VERSION: "v0.4.4"
     depends_on:
       postgres:
         condition: service_healthy

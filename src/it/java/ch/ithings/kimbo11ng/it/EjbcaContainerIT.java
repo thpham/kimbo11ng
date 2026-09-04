@@ -72,6 +72,17 @@ class EjbcaContainerIT {
     @Container
     static final ComposeContainer COMPOSE = new ComposeContainer(
             new File("src/it/docker-compose.it.yml"))
+        // ComposeContainer runs `docker compose pull` before `up` unless told not to, and only
+        // falls back to local images when that pull *throws*. The compose file names
+        // ghcr.io/thpham/ejbca-ce:latest, which is published — so a successful pull silently
+        // replaces the image `just docker-build` just produced, and the suite then validates the
+        // last release instead of the working tree. Which of the two ran depended on whether a
+        // network call succeeded, and nothing in the output said which.
+        //
+        // Disabling it does not break a clean machine: `docker compose up` still pulls images
+        // that are absent (compose's own pull policy is "missing"), so postgres:16-alpine is
+        // fetched on first use. Only the unconditional pull goes away.
+        .withPull(false)
         .withExposedService("ejbca", 8443,
             Wait.forHealthcheck().withStartupTimeout(Duration.ofMinutes(6)))
         .withExposedService("postgres", 5432,

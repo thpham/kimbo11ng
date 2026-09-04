@@ -144,6 +144,22 @@ build-quick:
 test:
     cd {{module_dir}} && mvn clean verify
 
+# The integration suite runs against ghcr.io/thpham/ejbca-ce:latest as it exists in the local
+# daemon — src/it/docker-compose.it.yml has no build: block. So `just docker-build` first, or
+# you are testing whatever image happens to be there.
+#
+# Unit tests + build gates + integration tests (needs `just docker-build` first)
+it:
+    cd {{module_dir}} && mvn verify -Pit
+
+# Skips the unit suite and the build gates, so it is not a substitute for `just it` before
+# pushing — the gates are what keep coverage and SpotBugs honest. This is the iteration loop
+# for working on the integration tests themselves.
+#
+# Integration tests only, without the unit suite or the gates
+it-only:
+    cd {{module_dir}} && mvn -Pit test-compile failsafe:integration-test failsafe:verify
+
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 # Only needed when bumping openssl_version or softhsm_version, or to build the runtime image

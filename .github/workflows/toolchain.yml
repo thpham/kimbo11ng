@@ -76,7 +76,9 @@ jobs:
       - name: Record the digest
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          # Without stripping "sha256:" upload-artifact rejects the path for containing a colon.
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -118,7 +120,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           TAG="${IMAGE}:openssl${OPENSSL_VERSION}-softhsm${SOFTHSM_VERSION}"
-          docker buildx imagetools create -t "$TAG" $(printf "${IMAGE}@%s " *)
+          docker buildx imagetools create -t "$TAG" $(printf "${IMAGE}@sha256:%s " *)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Report the digest to pin

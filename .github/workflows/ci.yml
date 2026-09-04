@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# A second push to a branch makes the first run's result irrelevant. Without this they both
+# run to completion, and the pipeline is expensive enough that it matters. main is excluded:
+# its runs publish an image, so cancelling one halfway would leave a partial manifest list.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   # ─── Versions (single source of truth) ────────────────────────────────────
   EJBCA_VERSION: "9.3.7"
@@ -20,9 +27,10 @@ env:
   JAVA_DISTRIBUTION: "temurin"
 
   # ─── Docker ───────────────────────────────────────────────────────────────
+  # The platform list is not an env var any more: each architecture is built by its own
+  # matrix leg on a native runner, so the platform belongs to the leg. See the push job.
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/thpham/ejbca-ce
-  PLATFORMS: linux/amd64,linux/arm64
 
   # ─── Build artifacts ──────────────────────────────────────────────────────
   ARTIFACT: kimbo11ng-jar-with-dependencies.jar
@@ -49,6 +57,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/ejbca
+          # Exact match only — deliberately no restore-keys. `just extract-jars` skips any
+          # JAR already present by filename, and two of them carry no version in the name
+          # (cesecore-common.jar, installed under ${EJBCA_VERSION}). A partial restore from
+          # an older key would therefore be kept and reinstalled under the new version.
+          # A miss costs one ~1 GB image pull; a stale hit costs a wrong dependency.
           key: ejbca-jars-${{ env.EJBCA_VERSION }}
 
       # `just setup` = install-deps + build, and `build` runs `mvn clean verify`, so this
@@ -110,6 +123,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: deps/ejbca
+          # Exact match only — deliberately no restore-keys. `just extract-jars` skips any
+          # JAR already present by filename, and two of them carry no version in the name
+          # (cesecore-common.jar, installed under ${EJBCA_VERSION}). A partial restore from
+          # an older key would therefore be kept and reinstalled under the new version.
+          # A miss costs one ~1 GB image pull; a stale hit costs a wrong dependency.
           key: ejbca-jars-${{ env.EJBCA_VERSION }}
 
       - name: Install just
@@ -128,14 +146,32 @@ jobs:
           name: failsafe-reports
           path: target/failsafe-reports/
 
-  # ─── Push multi-arch image (only after tests pass) ──────────────────────────
+  # ─── Push one image per architecture, on a native runner ────────────────────
+  # Each leg pushes by digest only — no tags — and the merge job below assembles the
+  # manifest list. This replaces a single job that built both platforms with QEMU:
+  # the image compiles OpenSSL and SoftHSMv3 from source, and CPU-bound compilation
+  # under emulation took 95 minutes where the native amd64 build takes 7.
+  #
+  # arm64 runs on a GitHub-hosted arm64 runner, which is free because this repository
+  # is public. If that ever changes, the fallback is QEMU on ubuntu-latest — correct,
+  # just slow again.
   push:
     needs: test
-    runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,8 +182,63 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: target/
 
-      - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No tags here on purpose: a tag would name this single-platform image, and the
+      # last leg to finish would win. push-by-digest publishes the manifest without a
+      # tag, leaving the merge job to point the tags at the list.
+      - name: Build and push by digest (${{ matrix.platform }})
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          # The filename is the digest itself; the merge job only needs the names.
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+
+      # One artifact per leg: upload-artifact refuses two uploads under the same name.
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─── Assemble the multi-arch manifest list ──────────────────────────────────
+  merge:
+    needs: push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -169,16 +260,13 @@ jobs:
             type=raw,value=${{ env.EJBCA_VERSION }}
             type=sha,prefix=sha-
 
-      - name: Build and push (multi-arch)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          push: true
-          platforms: ${{ env.PLATFORMS }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@%s ' *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.meta.outputs.version }}"

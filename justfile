@@ -22,6 +22,11 @@ softhsm_version := "v0.28.1"
 # Update this list when EJBCA bumps dependency versions.
 ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 cryptotokens-impl-3.0.0.jar:com.keyfactor:cryptotokens-impl:3.0.0 jacknji11-1.3.1.jar:org.pkcs11:jacknji11:1.3.1 cesecore-common.jar:org.cesecore:cesecore-common:" + ejbca_version + " x509-common-util-5.3.5.jar:com.keyfactor:x509-common-util:5.3.5"
 
+# OpenSSL and SoftHSMv3 are compiled once into their own image rather than on every image
+# build — see docker/Dockerfile.toolchain. The tag encodes both versions, so bumping either
+# variable above names a different image instead of moving an existing tag.
+toolchain_image := "ghcr.io/thpham/ejbca-ce-toolchain:openssl" + openssl_version + "-softhsm" + softhsm_version
+
 # Build configuration
 module_dir := "."
 artifact   := "kimbo11ng-jar-with-dependencies.jar"
@@ -108,6 +113,7 @@ versions:
     echo "EJBCA:     {{ejbca_version}} ({{ejbca_image}})"
     echo "OpenSSL:   {{openssl_version}}"
     echo "SoftHSMv3: {{softhsm_version}} (pqctoday-org/pqctoday-hsm)"
+    echo "Toolchain: {{toolchain_image}}"
     echo "Artifact:  {{artifact}}"
     echo ""
     echo "Dependencies:"
@@ -136,17 +142,26 @@ test:
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
+# Only needed when bumping openssl_version or softhsm_version, or to build the runtime image
+# without pulling from GHCR — docker-build prefers a local image of this exact tag, so running
+# this is also the offline escape hatch. Takes several minutes; that is the whole reason it is
+# not part of docker-build.
+#
+# Compile the OpenSSL + SoftHSMv3 toolchain image locally (several minutes)
+toolchain-build:
+    docker build -f docker/Dockerfile.toolchain -t {{toolchain_image}} \
+        --build-arg OPENSSL_VERSION={{openssl_version}} \
+        --build-arg SOFTHSM_VERSION={{softhsm_version}} .
+
 # Build the Docker image (EJBCA + softhsmv3 + kimbo11ng)
 docker-build: build
     docker build -f docker/Dockerfile -t ghcr.io/thpham/ejbca-ce:latest \
-        --build-arg OPENSSL_VERSION={{openssl_version}} \
-        --build-arg SOFTHSM_VERSION={{softhsm_version}} .
+        --build-arg TOOLCHAIN={{toolchain_image}} .
 
 # Build Docker image without cache
 docker-build-nocache: build
     docker build -f docker/Dockerfile -t kimbo11ng-ejbca \
-        --build-arg OPENSSL_VERSION={{openssl_version}} \
-        --build-arg SOFTHSM_VERSION={{softhsm_version}} --no-cache .
+        --build-arg TOOLCHAIN={{toolchain_image}} --no-cache .
 
 # Start all services (EJBCA + MariaDB)
 up:

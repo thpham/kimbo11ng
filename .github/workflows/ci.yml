@@ -16,7 +16,8 @@ concurrency:
 env:
   # ─── Versions (single source of truth) ────────────────────────────────────
   EJBCA_VERSION: "9.3.7"
-  OPENSSL_VERSION: "3.6.0"
+  # OpenSSL and SoftHSMv3 versions live in .github/workflows/toolchain.yml and the justfile:
+  # they are inputs to the toolchain image, which this workflow only consumes.
   # The JDK that *builds*, not the one that runs. EJBCA 9.3.7 ships a Java 17 runtime and
   # pom.xml pins <maven.compiler.release>17</maven.compiler.release>, which is what keeps the
   # bytecode and the resolvable API surface compatible with it. The compiler itself has to be 21
@@ -107,8 +108,6 @@ jobs:
           file: docker/Dockerfile
           load: true
           tags: ${{ env.IMAGE }}:latest
-          build-args: |
-            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -203,8 +202,6 @@ jobs:
           file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            OPENSSL_VERSION=${{ env.OPENSSL_VERSION }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 

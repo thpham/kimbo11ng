@@ -78,10 +78,18 @@ mvn verify -Pit
 
 All versions are centralized in the `justfile`. Run `just versions` to display:
 
+OpenSSL and SoftHSMv3 are compiled from source, but not on every image build — they live in
+`ghcr.io/thpham/ejbca-ce-toolchain`, built by `docker/Dockerfile.toolchain` and consumed by
+`docker/Dockerfile`. Bumping either version means republishing that image
+(`gh workflow run toolchain.yml`, or `just toolchain-build` locally) and then pointing the
+`TOOLCHAIN` argument at the new digest. `just docker-build` prefers a local image of the
+matching tag, so `just toolchain-build` is also how to build with no access to GHCR.
+
 ```
 EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7)
 OpenSSL:   3.6.0
 SoftHSMv3: v0.28.1 (pqctoday-org/pqctoday-hsm)
+Toolchain: ghcr.io/thpham/ejbca-ce-toolchain:openssl3.6.0-softhsmv0.28.1
 Artifact:  kimbo11ng-jar-with-dependencies.jar
 
 Dependencies:

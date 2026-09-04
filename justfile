@@ -25,6 +25,10 @@ ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 c
 # OpenSSL and SoftHSMv3 are compiled once into their own image rather than on every image
 # build — see docker/Dockerfile.toolchain. The tag encodes both versions, so bumping either
 # variable above names a different image instead of moving an existing tag.
+#
+# docker-build passes this tag, while docker/Dockerfile defaults to the published digest.
+# The difference is deliberate: CI takes the digest and is reproducible, and a developer
+# takes the tag so that `just toolchain-build` is picked up without touching the Dockerfile.
 toolchain_image := "ghcr.io/thpham/ejbca-ce-toolchain:openssl" + openssl_version + "-softhsm" + softhsm_version
 
 # Build configuration

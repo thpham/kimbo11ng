@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry.KeyOp;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 
@@ -23,9 +24,9 @@ import java.util.Set;
  * Luna supports ML-DSA and ML-KEM but <b>not SLH-DSA</b>, so the twelve SLH-DSA rows are absent
  * here. Under the default profile the same twelve rows are excluded by the probe instead.
  *
- * <p><b>Constants.</b> All identical to v3.2: {@code CKK_ML_DSA} 0x4A, {@code CKK_ML_KEM} 0x49,
- * {@code CKM_ML_DSA_KEY_PAIR_GEN} 0x1C, {@code CKM_ML_DSA} 0x1D, {@code CKM_ML_KEM_KEY_PAIR_GEN}
- * 0x0F, {@code CKM_ML_KEM} 0x17, {@code CKA_PARAMETER_SET} 0x61D with {@code CKP_*} 1/2/3 per
+ * <p><b>Constants.</b> All identical to v3.2: {@code Pkcs11v32.CKK_ML_DSA} 0x4A, {@code Pkcs11v32.CKK_ML_KEM} 0x49,
+ * {@code Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN} 0x1C, {@code Pkcs11v32.CKM_ML_DSA} 0x1D, {@code Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN}
+ * 0x0F, {@code Pkcs11v32.CKM_ML_KEM} 0x17, {@code CKA_PARAMETER_SET} 0x61D with {@code CKP_*} 1/2/3 per
  * family. Luna adds one vendor mechanism, {@code CKM_EXTMU_ML_DSA} (0x80000175) for external-mu
  * signing, which kimbo11ng does not use; its proprietary surface for ML-KEM is the
  * {@code CA_EncapsulateKey}/{@code CA_DecapsulateKey} functions rather than different constants,
@@ -41,13 +42,7 @@ public final class ThalesLunaProfile extends AbstractTableProfile {
 
     // Firmware 7.9.0 uses the v3.2 values verbatim; they are repeated rather than imported so that
     // a future divergence is a one-line edit here and not a change to the v3.2 profile.
-    private static final long CKK_ML_DSA = 0x0000004AL;
-    private static final long CKK_ML_KEM = 0x00000049L;
 
-    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
-    private static final long CKM_ML_DSA = 0x0000001DL;
-    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
-    private static final long CKM_ML_KEM = 0x00000017L;
 
     private static final String SIG_ARC = "2.16.840.1.101.3.4.3.";
     private static final String KEM_ARC = "2.16.840.1.101.3.4.4.";
@@ -71,13 +66,13 @@ public final class ThalesLunaProfile extends AbstractTableProfile {
     }
 
     private static AlgorithmEntry mlDsa(String name, long ckp, String oid, int pubLen) {
-        return new AlgorithmEntry(name, PqcFamily.ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN,
-                CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+        return new AlgorithmEntry(name, PqcFamily.ML_DSA, Pkcs11v32.CKK_ML_DSA, Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN,
+                Pkcs11v32.CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
     }
 
     private static AlgorithmEntry mlKem(String name, long ckp, String oid, int pubLen) {
-        return new AlgorithmEntry(name, PqcFamily.ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
-                CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
+        return new AlgorithmEntry(name, PqcFamily.ML_KEM, Pkcs11v32.CKK_ML_KEM, Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN,
+                Pkcs11v32.CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
     }
 
     @Override
@@ -85,8 +80,34 @@ public final class ThalesLunaProfile extends AbstractTableProfile {
         return "thales-luna";
     }
 
+    /**
+     * The v3.2 pair alone, no {@code CKA_ENCRYPT}.
+     *
+     * <p>Luna's ML-KEM programming guide gives the generation templates explicitly:
+     * {@code CKA_ENCAPSULATE} on the public half and {@code CKA_DECAPSULATE} on the private one,
+     * both defaulting to true, alongside {@code CKA_CLASS}, {@code CKA_KEY_TYPE},
+     * {@code CKA_PARAMETER_SET}, {@code CKA_SENSITIVE} and {@code CKA_EXTRACTABLE}. Neither
+     * {@code CKA_ENCRYPT} nor {@code CKA_DECRYPT} appears in either list. Sending them anyway would
+     * be asking a token that models a KEM correctly to accept a claim about an operation ML-KEM
+     * does not have — the exact template a firmware entitled to answer
+     * {@code CKR_TEMPLATE_INCONSISTENT} would answer it to.
+     *
+     * <p>The cost, and it is real: EJBCA reads {@code CKA_DECRYPT} by number, so an ML-KEM key made
+     * on Luna will show no key usage in the admin UI. That is a reporting gap on an algorithm
+     * EJBCA CE has no path for anyway, and it is recoverable with
+     * {@code kimbo11ng.pqc.kemUsage=both} on a partition that turns out to accept the wider
+     * template. Unverified against hardware — there is none here — which is why it is a profile
+     * default rather than something hard-coded.
+     *
+     * <p>Retrieved 2026-09-05 from the Luna 7 SDK documentation, ML-KEM Programming Guide.
+     */
+    @Override
+    public KemUsage defaultKemUsage() {
+        return KemUsage.V32;
+    }
+
     @Override
     public long ckaParameterSet() {
-        return Pkcs11v32Profile.CKA_PARAMETER_SET;
+        return Pkcs11v32.CKA_PARAMETER_SET;
     }
 }

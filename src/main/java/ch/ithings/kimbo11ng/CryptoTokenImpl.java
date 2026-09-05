@@ -13,6 +13,7 @@ import ch.ithings.kimbo11ng.p11.SlotResolver;
 import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
+import ch.ithings.kimbo11ng.profile.KemUsage;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
@@ -669,7 +670,8 @@ public class CryptoTokenImpl {
 
     private void generatePqc(TokenRuntime current, byte[] label, byte[] keyId,
             AlgorithmEntry entry, String alias) throws Exception {
-        KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile());
+        KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile(),
+                current.kemUsage());
         // The entry is passed rather than re-derived from the token, so the OID recorded in the
         // SubjectPublicKeyInfo is the one the key was actually generated as.
         generateAndRegister(current, templates, keyId, entry.ckmKeyPairGen(), alias,
@@ -807,7 +809,13 @@ public class CryptoTokenImpl {
                 PublicKeyReader.STRICT_PUBLIC_KEY, "false"))
                 ? PublicKeyReader.Policy.STRICT
                 : PublicKeyReader.Policy.LENIENT;
-        TokenRuntime newRuntime = new TokenRuntime(slot, algorithms, backfill, policy);
+        // Parsed here rather than where the template is built, so a typo is a startup failure that
+        // names the property instead of a key silently generated with the other spelling.
+        // The profile's own answer unless the operator overrides it, so adding a vendor whose
+        // tokens want a different spelling stays a table change rather than a code change.
+        KemUsage kemUsage = KemUsage.parse(properties.getProperty(KemUsage.PROPERTY),
+                profile.defaultKemUsage());
+        TokenRuntime newRuntime = new TokenRuntime(slot, algorithms, backfill, policy, kemUsage);
         // The signing path can see that the HSM is gone but cannot act on it; clearing EJBCA's
         // keystore is what stops work being routed to a CA whose token is not answering, and what
         // lets autoActivate() log in again with the PIN EJBCA holds and we do not.

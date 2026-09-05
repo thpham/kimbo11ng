@@ -5,7 +5,9 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.KemUsage;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
 import ch.ithings.kimbo11ng.profile.PqcFamily;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
@@ -235,16 +237,70 @@ class KeyTemplatesTest {
 
         @ParameterizedTest
         @ValueSource(strings = {"ML-KEM-512", "ML-KEM-768", "ML-KEM-1024"})
-        @DisplayName("permits encrypt and decrypt for a KEM, and not signing")
+        @DisplayName("asks for both the v3.2 and the encryption usage attributes, and not signing")
         void kemAlgorithms(String keySpec) {
             AlgorithmEntry entry = profile.lookup(keySpec).orElseThrow();
             KeyTemplates.Pair pair = KeyTemplates.pqc(LABEL, KeyTemplates.newKeyId(), entry,
                     profile);
 
+            // What PKCS#11 v3.2 gates C_EncapsulateKey and C_DecapsulateKey on.
+            assertBoolean(pair.publicTemplate(), Pkcs11v32.CKA_ENCAPSULATE, true,
+                    "CKA_ENCAPSULATE");
+            assertBoolean(pair.privateTemplate(), Pkcs11v32.CKA_DECAPSULATE, true,
+                    "CKA_DECAPSULATE");
+            // And what EJBCA reads. It compares usage sets against {261} by number to decide the
+            // admin UI shows ENCRYPT, and branches testKeyPair on the same constant; it has never
+            // heard of 0x634. Correct-per-spec and invisible-to-the-CA is not an improvement.
             assertBoolean(pair.publicTemplate(), CKA.ENCRYPT, true, "CKA_ENCRYPT");
             assertBoolean(pair.privateTemplate(), CKA.DECRYPT, true, "CKA_DECRYPT");
+
             assertAbsent(pair.privateTemplate(), CKA.SIGN, "CKA_SIGN on an ML-KEM key");
             assertAbsent(pair.publicTemplate(), CKA.VERIFY, "CKA_VERIFY on an ML-KEM key");
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"ML-KEM-512", "ML-KEM-768", "ML-KEM-1024"})
+        @DisplayName("each kill-switch setting sends exactly the pair it names")
+        void kemUsageModes(String keySpec) {
+            AlgorithmEntry entry = profile.lookup(keySpec).orElseThrow();
+
+            KeyTemplates.Pair legacy = KeyTemplates.pqc(LABEL, KeyTemplates.newKeyId(), entry,
+                    profile, KemUsage.LEGACY);
+            assertBoolean(legacy.publicTemplate(), CKA.ENCRYPT, true, "CKA_ENCRYPT");
+            assertBoolean(legacy.privateTemplate(), CKA.DECRYPT, true, "CKA_DECRYPT");
+            assertAbsent(legacy.publicTemplate(), Pkcs11v32.CKA_ENCAPSULATE,
+                    "CKA_ENCAPSULATE under legacy");
+            assertAbsent(legacy.privateTemplate(), Pkcs11v32.CKA_DECAPSULATE,
+                    "CKA_DECAPSULATE under legacy");
+
+            KeyTemplates.Pair v32 = KeyTemplates.pqc(LABEL, KeyTemplates.newKeyId(), entry,
+                    profile, KemUsage.V32);
+            assertBoolean(v32.publicTemplate(), Pkcs11v32.CKA_ENCAPSULATE, true,
+                    "CKA_ENCAPSULATE");
+            assertBoolean(v32.privateTemplate(), Pkcs11v32.CKA_DECAPSULATE, true,
+                    "CKA_DECAPSULATE");
+            // The mode for a token that refuses CKA_ENCRYPT on a KEM key. It costs the EJBCA
+            // reporting above, which is why it is not the default.
+            assertAbsent(v32.publicTemplate(), CKA.ENCRYPT, "CKA_ENCRYPT under v32");
+            assertAbsent(v32.privateTemplate(), CKA.DECRYPT, "CKA_DECRYPT under v32");
+        }
+
+        @Test
+        @DisplayName("the kill-switch defaults to both and refuses a value it does not understand")
+        void kemUsageProperty() {
+            // Unset, blank and absent all mean the default: an operator who has never heard of
+            // this property gets a key that both a v3.2 token and EJBCA understand.
+            assertEquals(KemUsage.BOTH, KemUsage.parse(null, KemUsage.BOTH));
+            assertEquals(KemUsage.BOTH, KemUsage.parse("  ", KemUsage.BOTH));
+            assertEquals(KemUsage.V32, KemUsage.parse("v32", KemUsage.BOTH));
+            assertEquals(KemUsage.LEGACY, KemUsage.parse(" LEGACY ", KemUsage.BOTH));
+
+            // Not silently defaulted. A typo here would otherwise generate every ML-KEM key with
+            // a spelling the operator did not choose, and say nothing about it.
+            IllegalArgumentException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class, () -> KemUsage.parse("v3.2", KemUsage.BOTH));
+            assertTrue(refused.getMessage().contains(KemUsage.PROPERTY),
+                    refused.getMessage());
         }
 
         @Test

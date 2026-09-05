@@ -7,6 +7,7 @@ package ch.ithings.kimbo11ng.cli;
 import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
@@ -49,6 +50,10 @@ final class ObjectCommands {
             CKA.TOKEN, CKA.PRIVATE, CKA.MODIFIABLE,
             CKA.SENSITIVE, CKA.ALWAYS_SENSITIVE, CKA.EXTRACTABLE, CKA.NEVER_EXTRACTABLE,
             CKA.SIGN, CKA.VERIFY, CKA.ENCRYPT, CKA.DECRYPT, CKA.WRAP, CKA.UNWRAP, CKA.DERIVE,
+            // The KEM usage attributes. Listed because they are the ones that say what an ML-KEM
+            // key is actually for, and because they are what kimbo11ng now asks for at generation
+            // — a command whose job is to show what is on the token should show what was written.
+            Pkcs11v32.CKA_ENCAPSULATE, Pkcs11v32.CKA_DECAPSULATE,
             CKA.MODULUS_BITS, CKA.VALUE_LEN,
     };
 
@@ -166,7 +171,7 @@ final class ObjectCommands {
             if (rendered != null) {
                 // jacknji11's L2S drops the CKA_ prefix; the specification's own spelling is what
                 // an operator will be reading the vendor documentation against.
-                lines.add("  " + InfoCommands.pad("CKA_" + CKA.L2S(type), 24) + " " + rendered);
+                lines.add("  " + InfoCommands.pad(attributeName(type), 24) + " " + rendered);
             }
         }
         // The heading only once every read has come back. Printed first, it appears above nothing
@@ -359,6 +364,26 @@ final class ObjectCommands {
 
     private static long orZero(Long value) {
         return value == null ? 0L : value;
+    }
+
+    /**
+     * The attribute's own name, including the two v3.2 ones jacknji11 has no constant for.
+     *
+     * <p>Same shape as {@link #keyTypeName}: {@code L2S} first, our own table only where it has
+     * nothing to say. Without it {@code CKA_ENCAPSULATE} would print as its {@code L2S}
+     * placeholder, which reads as a malfunction rather than as an attribute this build is younger
+     * than.
+     */
+    private static String attributeName(long type) {
+        if (type == Pkcs11v32.CKA_ENCAPSULATE) {
+            return "CKA_ENCAPSULATE";
+        }
+        if (type == Pkcs11v32.CKA_DECAPSULATE) {
+            return "CKA_DECAPSULATE";
+        }
+        // jacknji11's L2S drops the CKA_ prefix; the specification's own spelling is what an
+        // operator will be reading the vendor documentation against.
+        return "CKA_" + CKA.L2S(type);
     }
 
     /**

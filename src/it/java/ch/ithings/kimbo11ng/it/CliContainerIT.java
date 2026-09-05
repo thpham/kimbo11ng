@@ -229,8 +229,44 @@ class CliContainerIT {
         assertTrue(out.contains("ML-DSA-65"), out);
     }
 
+    /**
+     * The PKCS#11 v3.2 KEM usage attributes, on a key a real token made.
+     *
+     * <p>Only reachable here. The unit tests can prove the template carries {@code CKA_ENCAPSULATE}
+     * and the conformance kit can prove it matches the declared operations, but neither can prove
+     * a token accepts the template — and "SoftHSMv3 tolerated the old spelling and quietly fixed
+     * it up" is precisely how the wrong attributes survived this long without anyone noticing.
+     *
+     * <p>Both branches of the kill-switch, because a switch nothing exercises is a switch that is
+     * broken when it is finally needed, and it would be needed on hardware nobody could test on.
+     */
     @Test
     @Order(7)
+    @DisplayName("an ML-KEM key is generated with the v3.2 encapsulation attributes")
+    void mlKemUsesEncapsulationAttributes() throws Exception {
+        ok(onToken("generatekeypair", "--alias", "itkem", "--key-spec", "ML-KEM-768"));
+        String out = ok(onToken("showobjectattributes", "--alias", "itkem"));
+        assertTrue(out.contains("CKA_ENCAPSULATE"), out);
+        assertTrue(out.contains("CKA_DECAPSULATE"), out);
+
+        // The switch, on the same token. SoftHSMv3 adds the complementary pair itself whichever
+        // spelling it is asked for, so what this proves is that the template is accepted — which
+        // is the only thing that could differ on stricter firmware.
+        ok(onToken("generatekeypair", "--alias", "itkemlegacy", "--key-spec", "ML-KEM-768",
+                "--property", "kimbo11ng.pqc.kemUsage=legacy"));
+        String legacy = ok(onToken("showobjectattributes", "--alias", "itkemlegacy"));
+        assertTrue(legacy.contains("CKA_ENCRYPT"), legacy);
+        assertTrue(legacy.contains("CKA_DECRYPT"), legacy);
+
+        // A typo in the property is a refusal that names it, not a key generated the other way.
+        Container.ExecResult bad = onToken("listkeypairs", "--property",
+                "kimbo11ng.pqc.kemUsage=v3.2");
+        assertNotEquals(0, bad.getExitCode(), bad.getStdout());
+        assertTrue(bad.getStderr().contains("kimbo11ng.pqc.kemUsage"), bad.getStderr());
+    }
+
+    @Test
+    @Order(8)
     @DisplayName("testkeypair produces a real ML-DSA signature and verifies it")
     void testKeyPair() throws Exception {
         String out = ok(onToken("testkeypair", "--alias", "itmldsa"));
@@ -241,7 +277,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     @DisplayName("the key is sensitive, unextractable, and named as ML-DSA")
     void objectAttributes() throws Exception {
         String out = ok(onToken("showobjectattributes", "--alias", "itmldsa"));
@@ -255,7 +291,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     @DisplayName("listobjects shows both halves with a shared CKA_ID")
     void listObjects() throws Exception {
         String out = ok(onToken("listobjects"));
@@ -265,7 +301,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     @DisplayName("signperformancetest measures throughput on the token")
     void signPerformanceTest() throws Exception {
         String out = ok(onToken("signperformancetest", "--alias", "itmldsa",
@@ -275,7 +311,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     @DisplayName("a wrong PIN fails the command cleanly, with no stack trace")
     void wrongPin() throws Exception {
         Container.ExecResult result = cli("listkeypairs", "--slot-ref", "SLOT_LABEL",
@@ -287,7 +323,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     @DisplayName("deleteobject removes both halves")
     void deleteObject() throws Exception {
         ok(onToken("deleteobject", "--alias", "itmldsa"));

@@ -8,6 +8,7 @@ import ch.ithings.kimbo11ng.p11.Pkcs11Module;
 import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
+import ch.ithings.kimbo11ng.profile.KemUsage;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.SecretKeyType;
 import org.pkcs11.jacknji11.CK_INFO;
@@ -194,7 +195,8 @@ final class InfoCommands {
                         field(out, "Profile", algorithms.profile().name() + "  ("
                                 + algorithms.supported().size() + " of " + total
                                 + " post-quantum algorithms usable)");
-                        printKeyAlgorithms(out, algorithms, capabilities);
+                        printKeyAlgorithms(out, algorithms, capabilities,
+                                handle.token().getProvider().runtime().kemUsage());
                         printServices(out, handle.token().getProvider());
                         if (!algorithms.excluded().isEmpty()) {
                             section(out, "Post-quantum algorithms this token cannot do");
@@ -233,7 +235,7 @@ final class InfoCommands {
      * reports what generation will actually accept rather than a second opinion about it.
      */
     private static void printKeyAlgorithms(PrintStream out, AlgorithmSupport algorithms,
-            TokenCapabilities capabilities) throws java.io.IOException {
+            TokenCapabilities capabilities, KemUsage kemUsage) throws java.io.IOException {
         section(out, "Key algorithms this crypto token can use on this HSM");
         if (!capabilities.probed()) {
             out.println("  (unknown: " + capabilities.unprobedReason() + ")");
@@ -273,14 +275,7 @@ final class InfoCommands {
                     .collect(Collectors.joining(", "));
             algorithmRow(out, notes, entry.canonicalName(), entry.family().jcaName(),
                     entry.ckmKeyPairGen(), "ok", ops,
-                    entry.canSign() ? ""
-                            : "Requested on the token as CKA_ENCRYPT and CKA_DECRYPT, not as the"
-                                    + " CKA_ENCAPSULATE (0x633) and CKA_DECAPSULATE (0x634) that"
-                                    + " PKCS#11 v3.2 defines for a KEM — jacknji11 1.3.1 predates"
-                                    + " both, along with C_EncapsulateKey. SoftHSMv3 sets the"
-                                    + " correct pair itself regardless, so showobjectattributes"
-                                    + " will show all four; a stricter token may not be so"
-                                    + " forgiving about being asked for the wrong two.");
+                    entry.canSign() ? "" : kemNote(kemUsage));
         }
 
         for (SecretKeyType type : SecretKeyType.all()) {
@@ -422,6 +417,39 @@ final class InfoCommands {
                     + " services list below."));
         }
         row(out, name, family, ckm, status, ops.isEmpty() ? "—" : ops, String.join("", markers));
+    }
+
+    /**
+     * What an ML-KEM key will actually be generated with, on this token, right now.
+     *
+     * <p>Read from the runtime rather than described in general terms, because the answer differs
+     * by profile — Luna's own documentation gives templates with no {@code CKA_ENCRYPT} in them —
+     * and a footnote that described the default would be wrong on exactly the token whose operator
+     * most needs to know.
+     */
+    private static String kemNote(KemUsage kemUsage) {
+        StringBuilder note = new StringBuilder("Generated with ");
+        if (kemUsage.sendsV32()) {
+            note.append("CKA_ENCAPSULATE (0x633) and CKA_DECAPSULATE (0x634), which PKCS#11 v3.2"
+                    + " defines for a KEM");
+        }
+        if (kemUsage.sendsV32() && kemUsage.sendsEncryption()) {
+            note.append(", and also with ");
+        }
+        if (kemUsage.sendsEncryption()) {
+            note.append("CKA_ENCRYPT and CKA_DECRYPT, which is what EJBCA reads to report a key"
+                    + " usage at all");
+        }
+        note.append(" (").append(KemUsage.PROPERTY).append('=')
+                .append(kemUsage.name().toLowerCase(java.util.Locale.ROOT)).append(").");
+        if (!kemUsage.sendsEncryption()) {
+            note.append(" EJBCA compares key usages against CKA_DECRYPT by number and knows"
+                    + " nothing of 0x634, so it will show no usage for these keys; set the"
+                    + " property to 'both' if this token accepts the wider template.");
+        }
+        note.append(" No signing service is registered either way — a KEM has no signature to"
+                + " make.");
+        return note.toString();
     }
 
     /**

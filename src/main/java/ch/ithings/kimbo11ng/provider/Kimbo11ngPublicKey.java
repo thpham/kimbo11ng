@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.bouncycastle.asn1.ASN1Encodable;
 import org.bouncycastle.asn1.ASN1InputStream;
@@ -21,64 +22,45 @@ import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CryptokiE;
 
 import java.math.BigInteger;
+import java.security.InvalidKeyException;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.spec.RSAPublicKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 
 /**
- * Utility class for constructing PublicKey objects from PKCS#11 object attributes.
+ * Builds {@link PublicKey} objects from PKCS#11 object attributes.
+ *
+ * <p>The result must be a real BouncyCastle key, never an opaque wrapper: EJBCA's
+ * {@code AlgorithmTools.getSignatureAlgorithms} decides what a key can sign with using
+ * {@code instanceof MLDSAKey} / {@code SLHDSAKey} / {@code MLKEMKey}, and returns an empty list
+ * for anything else. A key it cannot recognise is a key no CA can use, so failing loudly here is
+ * strictly better than handing back something that fails later as "no valid signing algorithm".
  */
-public class Kimbo11ngPublicKey {
+public final class Kimbo11ngPublicKey {
 
     private static final Logger log = Logger.getLogger(Kimbo11ngPublicKey.class);
-
-    // NIST PQC OIDs (PKCS#11 v3.2 / NIST FIPS)
-    // ML-DSA (FIPS 204)
-    private static final ASN1ObjectIdentifier OID_ML_DSA_44 = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.17");
-    private static final ASN1ObjectIdentifier OID_ML_DSA_65 = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.18");
-    private static final ASN1ObjectIdentifier OID_ML_DSA_87 = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.19");
-    // ML-KEM (FIPS 203)
-    private static final ASN1ObjectIdentifier OID_ML_KEM_512  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.4.1");
-    private static final ASN1ObjectIdentifier OID_ML_KEM_768  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.4.2");
-    private static final ASN1ObjectIdentifier OID_ML_KEM_1024 = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.4.3");
-    // SLH-DSA (FIPS 205) — OIDs per NIST: SHA2 group (.20-.25), SHAKE group (.26-.31)
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_128S  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.20");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_128F  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.21");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_192S  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.22");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_192F  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.23");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_256S  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.24");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHA2_256F  = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.25");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_128S = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.26");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_128F = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.27");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_192S = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.28");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_192F = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.29");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_256S = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.30");
-    private static final ASN1ObjectIdentifier OID_SLH_DSA_SHAKE_256F = new ASN1ObjectIdentifier("2.16.840.1.101.3.4.3.31");
 
     private Kimbo11ngPublicKey() {
     }
 
-    /**
-     * Read an RSA public key from a PKCS#11 object handle.
-     */
+    /** Read an RSA public key from {@code CKA_MODULUS} and {@code CKA_PUBLIC_EXPONENT}. */
     public static PublicKey readRsaPublicKey(CryptokiE ce, long session, long handle)
             throws Exception {
         CKA[] attrs = ce.GetAttributeValue(session, handle, CKA.MODULUS, CKA.PUBLIC_EXPONENT);
-        byte[] modBytes = attrs[0].getValue();
-        byte[] expBytes = attrs[1].getValue();
-
-        BigInteger modulus = new BigInteger(1, modBytes);
-        BigInteger publicExponent = new BigInteger(1, expBytes);
-
+        BigInteger modulus = new BigInteger(1, attrs[0].getValue());
+        BigInteger publicExponent = new BigInteger(1, attrs[1].getValue());
         KeyFactory kf = KeyFactory.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
         return kf.generatePublic(new RSAPublicKeySpec(modulus, publicExponent));
     }
 
     /**
-     * Read an EC public key from a PKCS#11 object handle.
-     * CKA_EC_PARAMS contains DER-encoded OID.
-     * CKA_EC_POINT contains DER-encoded uncompressed point (04 || X || Y).
+     * Read an EC public key from {@code CKA_EC_PARAMS} and {@code CKA_EC_POINT}.
+     *
+     * <p>TODO(phase-4): the OCTET STRING unwrap below is unsound. Byte 0 is {@code 0x04} both as
+     * the DER tag and as the uncompressed-point prefix, so for a module that reports a raw point
+     * this misreads X[0] as a length; measured at 23.2% failure over 2,000 P-256 keys. Phase 4
+     * replaces it with a parse-and-consume check plus a field-size assertion.
      */
     public static PublicKey readEcPublicKey(CryptokiE ce, long session, long handle)
             throws Exception {
@@ -86,186 +68,128 @@ public class Kimbo11ngPublicKey {
         byte[] ecParamsBytes = attrs[0].getValue();
         byte[] ecPointBytes = attrs[1].getValue();
 
-        // Parse OID from DER-encoded EC_PARAMS
         ASN1ObjectIdentifier oid;
         try (ASN1InputStream ais = new ASN1InputStream(ecParamsBytes)) {
             oid = (ASN1ObjectIdentifier) ais.readObject();
         }
-
-        // Get named curve parameters
         ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec(oid.getId());
         if (spec == null) {
-            throw new IllegalArgumentException("Unknown EC curve OID: " + oid.getId());
+            throw new InvalidKeyException("Unknown EC curve OID: " + oid.getId());
         }
 
-        // EC_POINT may be wrapped in an OCTET STRING (DER encoding per PKCS#11 spec)
         byte[] pointBytes = ecPointBytes;
-        if (ecPointBytes.length > 0 && ecPointBytes[0] == 0x04 &&
-                ecPointBytes[1] != 0x04) {
-            // Might be wrapped in DER OCTET STRING - try to unwrap
+        if (ecPointBytes.length > 1 && ecPointBytes[0] == 0x04 && ecPointBytes[1] != 0x04) {
             try (ASN1InputStream ais = new ASN1InputStream(ecPointBytes)) {
                 ASN1Encodable obj = ais.readObject();
-                if (obj instanceof DEROctetString) {
-                    pointBytes = ((DEROctetString) obj).getOctets();
-                } else if (obj instanceof ASN1OctetString) {
-                    pointBytes = ((ASN1OctetString) obj).getOctets();
+                if (obj instanceof DEROctetString der) {
+                    pointBytes = der.getOctets();
+                } else if (obj instanceof ASN1OctetString octets) {
+                    pointBytes = octets.getOctets();
                 }
             } catch (Exception e) {
-                // Not wrapped, use as-is
                 pointBytes = ecPointBytes;
             }
         }
 
-        // Decode the EC point
         ECPoint point = spec.getCurve().decodePoint(pointBytes);
-        ECPublicKeySpec pubSpec = new ECPublicKeySpec(point, spec);
-
         KeyFactory kf = KeyFactory.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
-        return kf.generatePublic(pubSpec);
+        return kf.generatePublic(new ECPublicKeySpec(point, spec));
     }
 
     /**
-     * Read a PQC public key (ML-DSA, ML-KEM) from a PKCS#11 object handle.
-     * CKA_VALUE holds raw key bytes; we wrap them in SubjectPublicKeyInfo using the
-     * correct NIST OID derived from CKA_PARAMETER_SET so EJBCA's KeyTools can hash them.
+     * Read a post-quantum public key, using {@code entry} for the algorithm and OID.
      *
-     * @param keySpec human-readable spec string like "ML-DSA-65" or "ML-KEM" (for enumeration path)
+     * <p>The OID is taken from the resolved {@link AlgorithmEntry} rather than guessed from the
+     * token's parameter-set attribute, so a token that does not report that attribute cannot cause
+     * a key to be labelled as a different parameter set than it is.
+     *
+     * @param entry the algorithm this key was generated as, already resolved by the caller
      */
     public static PublicKey readPqcPublicKey(CryptokiE ce, long session, long handle,
-            String keySpec) throws Exception {
+            AlgorithmEntry entry) throws Exception {
         CKA valueAttr = ce.GetAttributeValue(session, handle, CKA.VALUE);
         byte[] keyBytes = valueAttr.getValue();
         if (keyBytes == null || keyBytes.length == 0) {
-            throw new IllegalStateException("CKA_VALUE is empty for PQC public key handle " + handle);
+            throw new InvalidKeyException("CKA_VALUE is empty for " + entry.canonicalName()
+                    + " public key (handle " + handle + ")");
         }
 
-        if (log.isDebugEnabled()) {
-            log.debug("readPqcPublicKey: keySpec=" + keySpec + " handle=" + handle +
-                    " valueLen=" + keyBytes.length + " firstByte=0x" + String.format("%02X", keyBytes[0]));
-        }
-
-        // Try X509-encoded first — OpenSSL 3.6 may already produce SubjectPublicKeyInfo
-        if (isSpki(keyBytes)) {
-            try {
-                SubjectPublicKeyInfo spki = SubjectPublicKeyInfo.getInstance(keyBytes);
-                ASN1ObjectIdentifier spkiOid = spki.getAlgorithm().getAlgorithm();
-                String jcaAlg = spkiAlgorithm(spkiOid);
-                if (log.isDebugEnabled()) {
-                    log.debug("readPqcPublicKey: SPKI detected, OID=" + spkiOid.getId() + " jcaAlg=" + jcaAlg);
-                }
-                if (jcaAlg != null) {
-                    KeyFactory kf = KeyFactory.getInstance(jcaAlg, BouncyCastleProvider.PROVIDER_NAME);
-                    return kf.generatePublic(new X509EncodedKeySpec(keyBytes));
-                }
-                // Unknown OID but valid SPKI — return opaque wrapper
-                return new RawPqcPublicKey(keySpec, keyBytes);
-            } catch (Exception e) {
-                log.debug("SPKI parse/KeyFactory failed for " + keySpec + ": " + e.getMessage());
-            }
-        }
-
-        // Raw bytes: determine OID from CKA_PARAMETER_SET + algorithm family
-        long paramSet = 0L;
-        try {
-            CKA psAttr = ce.GetAttributeValue(session, handle, 0x0000061DL); // CKA_PARAMETER_SET
-            Long psVal = psAttr.getValueLong();
-            if (psVal != null) paramSet = psVal;
-        } catch (Exception e) {
-            log.debug("Could not read CKA_PARAMETER_SET: " + e.getMessage());
-        }
-
-        String normalized = keySpec.toUpperCase().replace("-", "").replace("_", "");
-        ASN1ObjectIdentifier oid;
-        String jcaAlg;
-        if (normalized.startsWith("MLDSA")) {
-            jcaAlg = "ML-DSA";
-            if (paramSet == 1L)      oid = OID_ML_DSA_44;
-            else if (paramSet == 3L) oid = OID_ML_DSA_87;
-            else                     oid = OID_ML_DSA_65; // default / paramSet==2
-        } else if (normalized.startsWith("MLKEM")) {
-            jcaAlg = "ML-KEM";
-            if (paramSet == 1L)      oid = OID_ML_KEM_512;
-            else if (paramSet == 3L) oid = OID_ML_KEM_1024;
-            else                     oid = OID_ML_KEM_768; // default / paramSet==2
-        } else if (normalized.startsWith("SLHDSA")) {
-            jcaAlg = "SLH-DSA";
-            // CKP_SLH_DSA values (1-12) from pkcs11t.h → NIST OIDs
-            if (paramSet == 1L)       oid = OID_SLH_DSA_SHA2_128S;   // CKP_SLH_DSA_SHA2_128S
-            else if (paramSet == 2L)  oid = OID_SLH_DSA_SHAKE_128S;  // CKP_SLH_DSA_SHAKE_128S
-            else if (paramSet == 3L)  oid = OID_SLH_DSA_SHA2_128F;   // CKP_SLH_DSA_SHA2_128F
-            else if (paramSet == 4L)  oid = OID_SLH_DSA_SHAKE_128F;  // CKP_SLH_DSA_SHAKE_128F
-            else if (paramSet == 5L)  oid = OID_SLH_DSA_SHA2_192S;   // CKP_SLH_DSA_SHA2_192S
-            else if (paramSet == 6L)  oid = OID_SLH_DSA_SHAKE_192S;  // CKP_SLH_DSA_SHAKE_192S
-            else if (paramSet == 7L)  oid = OID_SLH_DSA_SHA2_192F;   // CKP_SLH_DSA_SHA2_192F
-            else if (paramSet == 8L)  oid = OID_SLH_DSA_SHAKE_192F;  // CKP_SLH_DSA_SHAKE_192F
-            else if (paramSet == 9L)  oid = OID_SLH_DSA_SHA2_256S;   // CKP_SLH_DSA_SHA2_256S
-            else if (paramSet == 10L) oid = OID_SLH_DSA_SHAKE_256S;  // CKP_SLH_DSA_SHAKE_256S
-            else if (paramSet == 11L) oid = OID_SLH_DSA_SHA2_256F;   // CKP_SLH_DSA_SHA2_256F
-            else if (paramSet == 12L) oid = OID_SLH_DSA_SHAKE_256F;  // CKP_SLH_DSA_SHAKE_256F
-            else                      oid = OID_SLH_DSA_SHA2_128S;   // default
+        byte[] spkiBytes;
+        if (looksLikeSpki(keyBytes)) {
+            SubjectPublicKeyInfo spki = SubjectPublicKeyInfo.getInstance(keyBytes);
+            requireOidMatches(spki, entry);
+            requireLengthMatches(spki.getPublicKeyData().getOctets().length, entry);
+            spkiBytes = keyBytes;
         } else {
-            return new RawPqcPublicKey(keySpec, keyBytes);
+            requireLengthMatches(keyBytes.length, entry);
+            spkiBytes = new SubjectPublicKeyInfo(new AlgorithmIdentifier(entry.oid()), keyBytes)
+                    .getEncoded();
         }
 
-        // Wrap raw bytes into SubjectPublicKeyInfo
-        SubjectPublicKeyInfo spki = new SubjectPublicKeyInfo(
-                new AlgorithmIdentifier(oid), keyBytes);
-        byte[] spkiBytes = spki.getEncoded();
-
+        String jcaName = entry.family().jcaName();
         try {
-            KeyFactory kf = KeyFactory.getInstance(jcaAlg, BouncyCastleProvider.PROVIDER_NAME);
+            KeyFactory kf = KeyFactory.getInstance(jcaName, BouncyCastleProvider.PROVIDER_NAME);
             return kf.generatePublic(new X509EncodedKeySpec(spkiBytes));
         } catch (Exception e) {
-            log.debug("KeyFactory for " + jcaAlg + " unavailable, using opaque key: " + e.getMessage());
-            return new RawPqcPublicKey(keySpec, spkiBytes);
+            // No opaque fallback on purpose: EJBCA cannot sign with a key it does not recognise,
+            // so a wrapper would only defer this failure to certificate issuance.
+            throw new InvalidKeyException("BouncyCastle could not materialise a " + jcaName
+                    + " public key for " + entry.canonicalName() + " (OID " + entry.oid().getId()
+                    + ", " + keyBytes.length + " bytes of CKA_VALUE). The deployed BouncyCastle may"
+                    + " predate this algorithm.", e);
         }
-    }
-
-    /** True if bytes look like a DER SEQUENCE (SubjectPublicKeyInfo). */
-    private static boolean isSpki(byte[] b) {
-        return b != null && b.length > 2 && b[0] == 0x30;
-    }
-
-    /** Map known PQC OIDs to JCA algorithm names. */
-    private static String spkiAlgorithm(ASN1ObjectIdentifier oid) {
-        String id = oid.getId();
-        if (id.startsWith("2.16.840.1.101.3.4.4."))  return "ML-KEM";  // .1/.2/.3
-        // Under 2.16.840.1.101.3.4.3: ML-DSA=.17-.19, SLH-DSA=.20-.31
-        if (id.startsWith("2.16.840.1.101.3.4.3.")) {
-            String suffix = id.substring("2.16.840.1.101.3.4.3.".length());
-            try {
-                int n = Integer.parseInt(suffix);
-                if (n >= 17 && n <= 19) return "ML-DSA";
-                if (n >= 20 && n <= 31) return "SLH-DSA";
-            } catch (NumberFormatException e) { /* fall through */ }
-        }
-        return null;
     }
 
     /**
-     * Opaque wrapper for PQC public keys when the JCA provider doesn't support the algorithm.
-     * {@code encoded} is always SubjectPublicKeyInfo-format so EJBCA can hash it for SubjectKeyId.
+     * Rejects key material whose length does not match the parameter set it is being labelled as.
+     *
+     * <p>This is the only check there is. Measured against the deployed BouncyCastle: 1312 bytes of
+     * ML-DSA-44 material presented under the ML-DSA-87 OID is accepted without complaint, and the
+     * resulting key reports {@code getParameterSpec().getName() == "ML-DSA-87"}. EJBCA would then
+     * write that OID into the certificate's SubjectPublicKeyInfo, and the mislabelling would only
+     * ever surface as signatures no relying party can verify.
+     *
+     * <p>FIPS 203 and 204 give every ML-KEM and ML-DSA parameter set a distinct public-key length,
+     * so for those this resolves the parameter set outright. FIPS 205 gives SLH-DSA four variants
+     * per length (s/f × SHA2/SHAKE), so there it confirms the security level and no more —
+     * ML-DSA-44 read as ML-DSA-87 is caught; SLH-DSA-SHA2-128S read as SLH-DSA-SHAKE-128F is not.
      */
-    public static final class RawPqcPublicKey implements PublicKey {
-        private static final long serialVersionUID = 1L;
-
-        private final String keySpec;
-        private final byte[] encoded;
-
-        public RawPqcPublicKey(String keySpec, byte[] encoded) {
-            this.keySpec = keySpec;
-            this.encoded = encoded;
+    private static void requireLengthMatches(int actual, AlgorithmEntry entry)
+            throws InvalidKeyException {
+        if (actual != entry.publicKeyLength()) {
+            throw new InvalidKeyException("Refusing to label a " + actual + "-byte public key as "
+                    + entry.canonicalName() + ", whose public key is " + entry.publicKeyLength()
+                    + " bytes (" + entry.family().jcaName() + ", OID " + entry.oid().getId()
+                    + "). The token holds a key of a different parameter set than the one"
+                    + " requested; issuing a certificate for it would state the wrong algorithm.");
         }
+    }
 
-        @Override public String getAlgorithm() {
-            String n = keySpec.toUpperCase().replace("-","").replace("_","");
-            if (n.startsWith("MLDSA"))  return "ML-DSA";
-            if (n.startsWith("MLKEM"))  return "ML-KEM";
-            if (n.startsWith("SLHDSA")) return "SLH-DSA";
-            return keySpec;
+    /** Rejects a token-supplied SubjectPublicKeyInfo that names a different algorithm. */
+    private static void requireOidMatches(SubjectPublicKeyInfo spki, AlgorithmEntry entry)
+            throws InvalidKeyException {
+        ASN1ObjectIdentifier actual = spki.getAlgorithm().getAlgorithm();
+        if (!entry.oid().equals(actual)) {
+            throw new InvalidKeyException("The token reports this key as OID " + actual.getId()
+                    + " but it was resolved as " + entry.canonicalName() + " (OID "
+                    + entry.oid().getId() + "). Refusing to guess which is right.");
         }
-        @Override public String getFormat() { return "X.509"; }
-        @Override public byte[] getEncoded() { return encoded; }
-        @Override public String toString() { return getAlgorithm() + "/" + keySpec + "[" + encoded.length + " bytes]"; }
+    }
+
+    /** True if the bytes parse as a DER SEQUENCE, i.e. are already a SubjectPublicKeyInfo. */
+    private static boolean looksLikeSpki(byte[] b) {
+        if (b.length <= 2 || b[0] != 0x30) {
+            return false;
+        }
+        try {
+            SubjectPublicKeyInfo.getInstance(b);
+            return true;
+        } catch (Exception e) {
+            if (log.isDebugEnabled()) {
+                log.debug("CKA_VALUE starts as a SEQUENCE but is not a SubjectPublicKeyInfo; "
+                        + "treating it as raw key material: " + e.getMessage());
+            }
+            return false;
+        }
     }
 }

@@ -6,6 +6,7 @@ package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
 import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
+import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +27,8 @@ import java.security.interfaces.RSAPublicKey;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -140,12 +143,44 @@ class CryptokiDeviceTest {
 
     private byte[] signWithProvider(String algorithm, long privateHandle, String keyAlgorithm,
             byte[] data) throws Exception {
-        Kimbo11ngProvider provider = new Kimbo11ngProvider(device);
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(device, new Pkcs11v32Profile()));
         Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(privateHandle, keyAlgorithm, "test", device);
         Signature signer = Signature.getInstance(algorithm, provider);
         signer.initSign(key);
         signer.update(data);
         return signer.sign();
+    }
+
+    @Test
+    @DisplayName("returns the same provider instance for a slot across re-initialisation")
+    void providerIsStableAcrossReinit() {
+        // EJBCA registers the provider in java.security.Security under its name and only adds a
+        // name once, so a second instance would leave the first registered and pointing at a
+        // closed device. The facade must therefore be reused and merely re-pointed.
+        TokenRuntime first = new TokenRuntime(device, new Pkcs11v32Profile());
+        Kimbo11ngProvider a = Kimbo11ngProvider.forToken(first);
+
+        TokenRuntime second = new TokenRuntime(device, new Pkcs11v32Profile());
+        Kimbo11ngProvider b = Kimbo11ngProvider.forToken(second);
+
+        assertSame(a, b, "one provider instance per (library, slot)");
+        assertSame(second, b.runtime(), "the runtime behind it must be the newest one");
+    }
+
+    @Test
+    @DisplayName("registers a Signature service for every signing algorithm in the profile")
+    void registersProfileSignatureServices() {
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(device, new Pkcs11v32Profile()));
+        // 3 ML-DSA + 12 SLH-DSA sign; the 3 ML-KEM parameter sets must not appear.
+        for (String algorithm : new String[] {"ML-DSA-44", "ML-DSA-65", "ML-DSA-87",
+                "SLH-DSA-SHA2-128S", "SLH-DSA-SHAKE-256F", "SHA256withRSA", "SHA256withECDSA"}) {
+            assertNotNull(provider.getService("Signature", algorithm),
+                    () -> "missing Signature service for " + algorithm);
+        }
+        assertNull(provider.getService("Signature", "ML-KEM-768"),
+                "ML-KEM is key establishment; registering it as a Signature would be wrong");
     }
 
     /** @return {@code {publicHandle, privateHandle}} */

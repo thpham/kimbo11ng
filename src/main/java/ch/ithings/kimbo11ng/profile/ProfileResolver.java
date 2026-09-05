@@ -4,18 +4,19 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
-import ch.ithings.kimbo11ng.provider.CryptokiDevice;
 import org.apache.log4j.Logger;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
+import java.util.ServiceLoader;
 
 /**
- * Resolves which PqcMechanismProfile to use for a given HSM.
+ * Selects the {@link PqcMechanismProfile} for a token.
  *
- * Resolution order:
- * 1. Explicit property: {@code kimbo11ng.pqc.profile=pkcs11v32|thales-luna|<FQCN>}
- * 2. Auto-detection via C_GetMechanismList (future)
- * 3. Default: Pkcs11v32Profile
+ * <p>Profiles are discovered with {@link ServiceLoader}, so a vendor can ship one in its own jar
+ * and select it by name. This replaces an earlier {@code Class.forName} on the property value,
+ * which would instantiate any class named in configuration.
  */
 public final class ProfileResolver {
 
@@ -26,54 +27,52 @@ public final class ProfileResolver {
     private ProfileResolver() {
     }
 
-    /**
-     * Resolve the PQC mechanism profile from configuration and/or device probing.
-     *
-     * @param properties crypto token properties (may contain kimbo11ng.pqc.profile)
-     * @param device     the initialized CryptokiDevice (for future auto-detection)
-     * @return the resolved profile, never null
-     */
-    public static PqcMechanismProfile resolve(Properties properties, CryptokiDevice device) {
-        String profileName = properties != null ? properties.getProperty(PROFILE_PROPERTY) : null;
-
-        if (profileName != null && !profileName.isEmpty()) {
-            PqcMechanismProfile profile = fromName(profileName.trim());
-            if (profile != null) {
-                log.info("Using PQC mechanism profile: " + profile + " (from property)");
-                return profile;
-            }
-            log.warn("Unknown PQC profile '" + profileName + "', falling back to Pkcs11v32Profile");
+    /** Every profile on the classpath. */
+    public static List<PqcMechanismProfile> available() {
+        List<PqcMechanismProfile> found = new ArrayList<>();
+        for (PqcMechanismProfile profile : ServiceLoader.load(PqcMechanismProfile.class,
+                ProfileResolver.class.getClassLoader())) {
+            found.add(profile);
         }
-
-        // Future: probe device.getCe().GetMechanismList() for known PQC CKM values
-        // and auto-select vendor profile based on which mechanisms are present.
-
-        PqcMechanismProfile defaultProfile = new Pkcs11v32Profile();
-        if (log.isDebugEnabled()) {
-            log.debug("Using default PQC mechanism profile: " + defaultProfile);
+        if (found.isEmpty()) {
+            // A jar repackaged without META-INF/services would otherwise leave the token with no
+            // PQC support at all, which is worth stating loudly rather than discovering later.
+            log.warn("No PqcMechanismProfile found via ServiceLoader; falling back to the built-in "
+                    + "PKCS#11 v3.2 profile. Check META-INF/services in the deployed jar.");
+            found.add(new Pkcs11v32Profile());
         }
-        return defaultProfile;
+        return found;
     }
 
-    private static PqcMechanismProfile fromName(String name) {
-        switch (name.toLowerCase()) {
-            case "pkcs11v32":
-            case "pkcs11-v32":
-            case "standard":
-                return new Pkcs11v32Profile();
-            case "thales-luna":
-            case "thales":
-            case "luna":
-                return new ThalesLunaProfile();
-            default:
-                // Try as FQCN
-                try {
-                    Class<?> clazz = Class.forName(name);
-                    return (PqcMechanismProfile) clazz.getDeclaredConstructor().newInstance();
-                } catch (Exception e) {
-                    log.warn("Could not load PQC profile class: " + name + ": " + e.getMessage());
-                    return null;
+    /**
+     * Resolve from configuration.
+     *
+     * @param properties token properties, optionally carrying {@value #PROFILE_PROPERTY}
+     * @return the resolved profile, never {@code null}
+     */
+    public static PqcMechanismProfile resolve(Properties properties) {
+        String requested = properties == null ? null : properties.getProperty(PROFILE_PROPERTY);
+        List<PqcMechanismProfile> profiles = available();
+
+        if (requested != null && !requested.isBlank()) {
+            String wanted = requested.trim();
+            for (PqcMechanismProfile profile : profiles) {
+                if (profile.name().equalsIgnoreCase(wanted)) {
+                    log.info("Using PQC mechanism profile '" + profile.name() + "' (from "
+                            + PROFILE_PROPERTY + ")");
+                    return profile;
                 }
+            }
+            List<String> names = profiles.stream().map(PqcMechanismProfile::name).toList();
+            log.warn("Unknown PQC profile '" + wanted + "'; available profiles are " + names
+                    + ". Falling back to the PKCS#11 v3.2 profile.");
         }
+
+        for (PqcMechanismProfile profile : profiles) {
+            if (profile instanceof Pkcs11v32Profile) {
+                return profile;
+            }
+        }
+        return new Pkcs11v32Profile();
     }
 }

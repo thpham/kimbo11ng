@@ -4,6 +4,9 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKK;
@@ -13,8 +16,8 @@ import org.pkcs11.jacknji11.CryptokiE;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.Key;
-import java.security.KeyStore;
 import java.security.KeyStoreSpi;
 import java.security.PublicKey;
 import java.security.UnrecoverableKeyException;
@@ -22,26 +25,33 @@ import java.security.cert.Certificate;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * KeyStoreSpi backed by a PKCS#11 device via JackNJI11.
+ * KeyStore over a PKCS#11 token.
+ *
+ * <p>Key algorithms are resolved through the profile's algorithm table rather than a hardcoded
+ * set of {@code CKK} values, so a token using vendor key types is read correctly.
+ *
+ * <p>The maps are concurrent because EJBCA generates keys on one thread and signs on others.
  */
-public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
+public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     private static final Logger log = Logger.getLogger(Kimbo11ngKeyStoreSpi.class);
 
-    private final CryptokiDevice device;
-    private final Map<String, Kimbo11ngPrivateKey> privateKeys = new HashMap<>();
-    private final Map<String, PublicKey> publicKeys = new HashMap<>();
+    private final TokenRuntime runtime;
+    private final Map<String, Kimbo11ngPrivateKey> privateKeys = new ConcurrentHashMap<>();
+    private final Map<String, PublicKey> publicKeys = new ConcurrentHashMap<>();
 
-    // Holds the last generated key pair handles for setKeyEntry labeling
-    private long lastGeneratedPrivHandle = -1;
-    private long lastGeneratedPubHandle = -1;
+    public Kimbo11ngKeyStoreSpi(TokenRuntime runtime) {
+        this.runtime = runtime;
+    }
 
-    public Kimbo11ngKeyStoreSpi(CryptokiDevice device) {
-        this.device = device;
+    private CryptokiDevice device() {
+        return runtime.device();
     }
 
     @Override
@@ -51,110 +61,100 @@ public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public Certificate[] engineGetCertificateChain(String alias) {
+        // EJBCA keeps issued certificates in its database, not on the token.
         return null;
     }
 
     @Override
     public Certificate engineGetCertificate(String alias) {
-        // Try to find certificate on HSM by label
-        try {
-            long session = device.getOrOpenSession();
-            CryptokiE ce = device.getCe();
-            long[] handles = ce.FindObjects(session,
-                    new CKA(CKA.CLASS, CKO.CERTIFICATE),
-                    new CKA(CKA.LABEL, alias.getBytes("UTF-8")));
-            if (handles != null && handles.length > 0) {
-                log.debug("Certificate found for alias " + alias + " but not returning cert object");
-            }
-        } catch (Exception e) {
-            log.debug("No certificate for alias " + alias + ": " + e.getMessage());
-        }
+        // Previously this searched the token and discarded the result, costing a round trip for
+        // nothing. TODO(phase-3): parse CKA_VALUE into an X509Certificate when one is present.
         return null;
     }
 
     @Override
     public Date engineGetCreationDate(String alias) {
-        return new Date();
+        // TODO(phase-3): read CKA_START_DATE. Returning 'now' was worse than returning nothing.
+        return null;
     }
 
     @Override
     public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) {
-        if (key instanceof Kimbo11ngPrivateKey) {
-            Kimbo11ngPrivateKey p11Key = (Kimbo11ngPrivateKey) key;
-            try {
-                long session = device.getOrOpenSession();
-                CryptokiE ce = device.getCe();
-                byte[] labelBytes = alias.getBytes("UTF-8");
+        if (!(key instanceof Kimbo11ngPrivateKey p11Key)) {
+            return;
+        }
+        try {
+            long session = device().getOrOpenSession();
+            CryptokiE ce = device().getCe();
+            byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
 
-                // Set label on private key
-                ce.SetAttributeValue(session, p11Key.getObjectHandle(),
-                        new CKA(CKA.LABEL, labelBytes));
+            ce.SetAttributeValue(session, p11Key.getObjectHandle(), new CKA(CKA.LABEL, labelBytes));
 
-                // Label the corresponding public key if we have its handle
-                if (lastGeneratedPrivHandle == p11Key.getObjectHandle() && lastGeneratedPubHandle >= 0) {
-                    ce.SetAttributeValue(session, lastGeneratedPubHandle,
-                            new CKA(CKA.LABEL, labelBytes));
+            // Relabel the matching public key, located by the shared CKA_ID written at
+            // generation. Previously this relied on the provider remembering the last generated
+            // handle pair, which was wrong under concurrent generation.
+            byte[] keyId = readKeyId(ce, session, p11Key.getObjectHandle());
+            if (keyId != null) {
+                long[] pubHandles = ce.FindObjects(session,
+                        new CKA(CKA.CLASS, CKO.PUBLIC_KEY), new CKA(CKA.ID, keyId));
+                if (pubHandles != null) {
+                    for (long handle : pubHandles) {
+                        ce.SetAttributeValue(session, handle, new CKA(CKA.LABEL, labelBytes));
+                    }
                 }
-
-                // Re-register with new alias
-                Kimbo11ngPrivateKey relabeled = new Kimbo11ngPrivateKey(
-                        p11Key.getObjectHandle(), p11Key.getAlgorithm(), alias, device);
-                privateKeys.put(alias, relabeled);
-
-                if (log.isDebugEnabled()) {
-                    log.debug("Labeled key on HSM with alias: " + alias);
-                }
-            } catch (Exception e) {
-                log.error("Failed to set key entry label: " + e.getMessage(), e);
             }
+
+            privateKeys.put(alias, new Kimbo11ngPrivateKey(p11Key.getObjectHandle(),
+                    p11Key.getAlgorithm(), alias, device(), p11Key.entry().orElse(null)));
+        } catch (Exception e) {
+            log.error("Failed to label key entry '" + alias + "': " + e.getMessage(), e);
+        }
+    }
+
+    private static byte[] readKeyId(CryptokiE ce, long session, long handle) {
+        try {
+            return ce.GetAttributeValue(session, handle, CKA.ID).getValue();
+        } catch (Exception e) {
+            if (log.isDebugEnabled()) {
+                log.debug("No CKA_ID on handle " + handle + ": " + e.getMessage());
+            }
+            return null;
         }
     }
 
     @Override
     public void engineSetKeyEntry(String alias, byte[] key, Certificate[] chain) {
-        throw new UnsupportedOperationException("Cannot set raw key bytes on PKCS#11 token");
+        throw new UnsupportedOperationException("Cannot set raw key bytes on a PKCS#11 token");
     }
 
     @Override
     public void engineSetCertificateEntry(String alias, Certificate cert) {
-        log.debug("engineSetCertificateEntry called for alias " + alias + " - ignoring");
+        if (log.isDebugEnabled()) {
+            log.debug("engineSetCertificateEntry ignored for alias " + alias);
+        }
     }
 
     @Override
     public void engineDeleteEntry(String alias) {
         try {
-            long session = device.getOrOpenSession();
-            CryptokiE ce = device.getCe();
-            byte[] labelBytes = alias.getBytes("UTF-8");
-
-            // Find and delete private key
-            long[] privHandles = ce.FindObjects(session,
-                    new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-                    new CKA(CKA.LABEL, labelBytes));
-            if (privHandles != null) {
-                for (long h : privHandles) {
-                    ce.DestroyObject(session, h);
+            long session = device().getOrOpenSession();
+            CryptokiE ce = device().getCe();
+            byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
+            // TODO(phase-3): scope deletion by CKA_ID so unrelated objects sharing a label
+            // survive, and remove certificate objects too.
+            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY}) {
+                long[] handles = ce.FindObjects(session,
+                        new CKA(CKA.CLASS, objectClass), new CKA(CKA.LABEL, labelBytes));
+                if (handles != null) {
+                    for (long handle : handles) {
+                        ce.DestroyObject(session, handle);
+                    }
                 }
             }
-
-            // Find and delete public key
-            long[] pubHandles = ce.FindObjects(session,
-                    new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-                    new CKA(CKA.LABEL, labelBytes));
-            if (pubHandles != null) {
-                for (long h : pubHandles) {
-                    ce.DestroyObject(session, h);
-                }
-            }
-
             privateKeys.remove(alias);
             publicKeys.remove(alias);
-
-            if (log.isDebugEnabled()) {
-                log.debug("Deleted key entry: " + alias);
-            }
         } catch (Exception e) {
-            log.error("Failed to delete entry " + alias + ": " + e.getMessage(), e);
+            log.error("Failed to delete entry '" + alias + "': " + e.getMessage(), e);
         }
     }
 
@@ -190,7 +190,7 @@ public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public void engineStore(OutputStream stream, char[] password) {
-        // HSM manages persistence - no-op
+        // The token is the store.
     }
 
     @Override
@@ -198,34 +198,34 @@ public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         privateKeys.clear();
         publicKeys.clear();
 
-        if (!device.isLoggedIn()) {
-            if (password != null && password.length > 0) {
-                try {
-                    device.login(password);
-                } catch (Exception e) {
-                    throw new IOException("Failed to login to PKCS#11 token: " + e.getMessage(), e);
+        if (!device().isLoggedIn()) {
+            if (password == null || password.length == 0) {
+                if (log.isDebugEnabled()) {
+                    log.debug("engineLoad without a PIN on a logged-out token; no keys enumerated");
                 }
-            } else {
-                log.debug("engineLoad called without password and not logged in - skipping key enumeration");
                 return;
             }
+            try {
+                device().login(password);
+            } catch (Exception e) {
+                throw new IOException("Failed to log in to the PKCS#11 token: "
+                        + e.getMessage(), e);
+            }
         }
-
         try {
             enumerateKeys();
         } catch (Exception e) {
-            throw new IOException("Failed to enumerate keys on PKCS#11 token: " + e.getMessage(), e);
+            throw new IOException("Failed to enumerate keys on the PKCS#11 token: "
+                    + e.getMessage(), e);
         }
     }
 
     private void enumerateKeys() throws Exception {
-        long session = device.getOrOpenSession();
-        CryptokiE ce = device.getCe();
+        long session = device().getOrOpenSession();
+        CryptokiE ce = device().getCe();
+        PqcMechanismProfile profile = runtime.profile();
 
-        // Find all private keys
-        long[] privHandles = ce.FindObjects(session,
-                new CKA(CKA.CLASS, CKO.PRIVATE_KEY));
-
+        long[] privHandles = ce.FindObjects(session, new CKA(CKA.CLASS, CKO.PRIVATE_KEY));
         if (privHandles == null) {
             return;
         }
@@ -234,58 +234,42 @@ public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             try {
                 CKA[] attrs = ce.GetAttributeValue(session, handle, CKA.LABEL, CKA.KEY_TYPE);
                 byte[] labelBytes = attrs[0].getValue();
-                Long keyTypeLong = attrs[1].getValueLong();
-                long keyType = (keyTypeLong != null) ? keyTypeLong : 0L;
+                Long keyTypeBoxed = CkULong.typeCode(attrs[1]);
+                if (keyTypeBoxed == null) {
+                    log.warn("Skipping key handle " + handle + ": no CKA_KEY_TYPE");
+                    continue;
+                }
+                long keyType = keyTypeBoxed;
+                String alias = labelBytes != null
+                        ? new String(labelBytes, StandardCharsets.UTF_8).trim()
+                        : "key-" + handle;
 
-                String alias = (labelBytes != null) ? new String(labelBytes, "UTF-8").trim() : "key-" + handle;
+                Optional<AlgorithmEntry> entry = Optional.empty();
                 String algorithm;
                 if (keyType == CKK.RSA) {
                     algorithm = "RSA";
                 } else if (keyType == CKK.EC) {
                     algorithm = "EC";
-                } else if (keyType == 0x4AL) {   // CKK_ML_DSA (PKCS#11 v3.2)
-                    algorithm = "ML-DSA";
-                } else if (keyType == 0x49L) {   // CKK_ML_KEM (PKCS#11 v3.2)
-                    algorithm = "ML-KEM";
-                } else if (keyType == 0x4BL) {   // CKK_SLH_DSA (PKCS#11 v3.2)
-                    algorithm = "SLH-DSA";
                 } else {
-                    algorithm = "Unknown";
-                }
-
-                Kimbo11ngPrivateKey privKey = new Kimbo11ngPrivateKey(handle, algorithm, alias, device);
-                privateKeys.put(alias, privKey);
-
-                // Try to find matching public key
-                try {
-                    long[] pubHandles = ce.FindObjects(session,
-                            new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-                            new CKA(CKA.LABEL, (labelBytes != null) ? labelBytes : new byte[0]));
-                    if (pubHandles != null && pubHandles.length > 0) {
-                        PublicKey pubKey;
-                        if (keyType == CKK.RSA) {
-                            pubKey = Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubHandles[0]);
-                        } else if (keyType == CKK.EC) {
-                            pubKey = Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubHandles[0]);
-                        } else if (keyType == 0x4AL) {   // CKK_ML_DSA
-                            pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubHandles[0], "ML-DSA");
-                        } else if (keyType == 0x49L) {   // CKK_ML_KEM
-                            pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubHandles[0], "ML-KEM");
-                        } else if (keyType == 0x4BL) {   // CKK_SLH_DSA
-                            pubKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubHandles[0], "SLH-DSA");
-                        } else {
-                            pubKey = null;
-                        }
-                        if (pubKey != null) {
-                            publicKeys.put(alias, pubKey);
-                        }
+                    entry = profile.lookupByKeyType(keyType,
+                            readParameterSet(ce, session, handle, profile));
+                    if (entry.isEmpty()) {
+                        log.warn("Skipping key '" + alias + "' (handle " + handle
+                                + "): profile " + profile.name() + " does not describe CKK 0x"
+                                + Long.toHexString(keyType)
+                                + ". It cannot be used without knowing its algorithm.");
+                        continue;
                     }
-                } catch (Exception e) {
-                    log.debug("Could not read public key for alias " + alias + ": " + e.getMessage());
+                    algorithm = entry.get().family().jcaName();
                 }
+
+                privateKeys.put(alias, new Kimbo11ngPrivateKey(handle, algorithm, alias,
+                        device(), entry.orElse(null)));
+                readMatchingPublicKey(ce, session, alias, labelBytes, keyType, entry)
+                        .ifPresent(pub -> publicKeys.put(alias, pub));
 
                 if (log.isDebugEnabled()) {
-                    log.debug("Loaded key: alias=" + alias + " algorithm=" + algorithm);
+                    log.debug("Loaded key alias=" + alias + " algorithm=" + algorithm);
                 }
             } catch (Exception e) {
                 log.warn("Failed to process key handle " + handle + ": " + e.getMessage());
@@ -293,35 +277,64 @@ public class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         }
     }
 
-    public void setLastGeneratedHandles(long privHandle, long pubHandle) {
-        this.lastGeneratedPrivHandle = privHandle;
-        this.lastGeneratedPubHandle = pubHandle;
+    private static OptionalLong readParameterSet(CryptokiE ce, long session, long handle,
+            PqcMechanismProfile profile) {
+        try {
+            Long value = CkULong.typeCode(
+                    ce.GetAttributeValue(session, handle, profile.ckaParameterSet()));
+            return value == null ? OptionalLong.empty() : OptionalLong.of(value);
+        } catch (Exception e) {
+            // Expected on tokens that encode the parameter set in the mechanism instead.
+            if (log.isDebugEnabled()) {
+                log.debug("No parameter-set attribute on handle " + handle + ": " + e.getMessage());
+            }
+            return OptionalLong.empty();
+        }
     }
 
-    public Map<String, Kimbo11ngPrivateKey> getPrivateKeys() {
-        return privateKeys;
+    private Optional<PublicKey> readMatchingPublicKey(CryptokiE ce, long session, String alias,
+            byte[] labelBytes, long keyType, Optional<AlgorithmEntry> entry) {
+        try {
+            long[] pubHandles = ce.FindObjects(session, new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
+                    new CKA(CKA.LABEL, labelBytes != null ? labelBytes : new byte[0]));
+            if (pubHandles == null || pubHandles.length == 0) {
+                return Optional.empty();
+            }
+            long pubHandle = pubHandles[0];
+            if (keyType == CKK.RSA) {
+                return Optional.of(Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubHandle));
+            }
+            if (keyType == CKK.EC) {
+                return Optional.of(Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubHandle));
+            }
+            if (entry.isPresent()) {
+                return Optional.of(
+                        Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubHandle, entry.get()));
+            }
+            return Optional.empty();
+        } catch (Exception e) {
+            log.warn("Could not read the public key for alias '" + alias + "': " + e.getMessage());
+            return Optional.empty();
+        }
     }
 
-    public Map<String, PublicKey> getPublicKeys() {
-        return publicKeys;
+    /** Registers a freshly generated pair without a full re-enumeration. */
+    public void registerGeneratedKeyPair(String alias, long privHandle, String algorithm,
+            AlgorithmEntry entry, PublicKey publicKey) {
+        privateKeys.put(alias,
+                new Kimbo11ngPrivateKey(privHandle, algorithm, alias, device(), entry));
+        if (publicKey != null) {
+            publicKeys.put(alias, publicKey);
+        }
     }
 
     public PublicKey getPublicKey(String alias) {
         return publicKeys.get(alias);
     }
 
-    /**
-     * Registers a newly generated key pair directly (bypasses engineLoad enumeration).
-     */
-    public void registerGeneratedKeyPair(String alias, long privHandle, String algorithm,
-            PublicKey pubKey) {
-        Kimbo11ngPrivateKey privKey = new Kimbo11ngPrivateKey(privHandle, algorithm, alias, device);
-        privateKeys.put(alias, privKey);
-        if (pubKey != null) {
-            publicKeys.put(alias, pubKey);
-        }
-        if (log.isDebugEnabled()) {
-            log.debug("Registered generated key pair with alias: " + alias);
-        }
+    /** Drops cached keys; used when the token is deactivated. */
+    public void clear() {
+        privateKeys.clear();
+        publicKeys.clear();
     }
 }

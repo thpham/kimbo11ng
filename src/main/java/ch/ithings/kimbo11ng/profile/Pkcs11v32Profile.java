@@ -4,161 +4,102 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
-import org.pkcs11.jacknji11.CKK;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry.KeyOp;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 
-import java.security.InvalidAlgorithmParameterException;
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /**
- * Default PQC mechanism profile using standard PKCS#11 v3.2 constants.
- * Compatible with softhsmv3 and any HSM implementing the OASIS PKCS#11 v3.2 specification.
+ * Post-quantum algorithms as described by OASIS PKCS#11 v3.2. Works with softhsmv3 and any token
+ * that implements the specification as written.
+ *
+ * <p>Every constant below is hand-entered: jacknji11 1.3.1 predates v3.2 and defines none of these
+ * in {@code CKA}, {@code CKK} or {@code CKM}. They are therefore assumptions until a token
+ * confirms them, which is what the capability probe added in a later phase is for.
  */
-public class Pkcs11v32Profile implements PqcMechanismProfile {
+public final class Pkcs11v32Profile extends AbstractTableProfile {
 
-    // CKM mechanism constants (PKCS#11 v3.2)
-    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
-    private static final long CKM_ML_DSA              = 0x0000001DL;
-    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
-    private static final long CKM_ML_KEM              = 0x00000017L;
+    /** Attribute id for the parameter set (PKCS#11 v3.2). */
+    public static final long CKA_PARAMETER_SET = 0x0000061DL;
 
-    // CKM mechanism constants for SLH-DSA (PKCS#11 v3.2)
-    private static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002DL;
-    private static final long CKM_SLH_DSA              = 0x0000002EL;
-
-    // CKK key type constants
-    private static final long CKK_ML_DSA  = 0x0000004AL;
-    private static final long CKK_ML_KEM  = 0x00000049L;
+    // Key types
+    private static final long CKK_ML_DSA = 0x0000004AL;
+    private static final long CKK_ML_KEM = 0x00000049L;
     private static final long CKK_SLH_DSA = 0x0000004BL;
 
-    // CKA attribute for parameter set
-    private static final long CKA_PARAMETER_SET = 0x0000061DL;
+    // Mechanisms
+    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
+    private static final long CKM_ML_DSA = 0x0000001DL;
+    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
+    private static final long CKM_ML_KEM = 0x00000017L;
+    private static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002DL;
+    private static final long CKM_SLH_DSA = 0x0000002EL;
 
-    // ML-DSA parameter sets (FIPS 204)
-    private static final long CKP_ML_DSA_44 = 1L;
-    private static final long CKP_ML_DSA_65 = 2L;
-    private static final long CKP_ML_DSA_87 = 3L;
+    // NIST OID arcs
+    private static final String SIG_ARC = "2.16.840.1.101.3.4.3.";
+    private static final String KEM_ARC = "2.16.840.1.101.3.4.4.";
 
-    // ML-KEM parameter sets (FIPS 203)
-    private static final long CKP_ML_KEM_512  = 1L;
-    private static final long CKP_ML_KEM_768  = 2L;
-    private static final long CKP_ML_KEM_1024 = 3L;
+    private static final Set<KeyOp> SIGNING = Set.of(KeyOp.SIGN, KeyOp.VERIFY);
+    private static final Set<KeyOp> KEM = Set.of(KeyOp.ENCAPSULATE, KeyOp.DECAPSULATE);
 
-    // SLH-DSA parameter sets (FIPS 205)
-    private static final long CKP_SLH_DSA_SHA2_128S  =  1L;
-    private static final long CKP_SLH_DSA_SHAKE_128S =  2L;
-    private static final long CKP_SLH_DSA_SHA2_128F  =  3L;
-    private static final long CKP_SLH_DSA_SHAKE_128F =  4L;
-    private static final long CKP_SLH_DSA_SHA2_192S  =  5L;
-    private static final long CKP_SLH_DSA_SHAKE_192S =  6L;
-    private static final long CKP_SLH_DSA_SHA2_192F  =  7L;
-    private static final long CKP_SLH_DSA_SHAKE_192F =  8L;
-    private static final long CKP_SLH_DSA_SHA2_256S  =  9L;
-    private static final long CKP_SLH_DSA_SHAKE_256S = 10L;
-    private static final long CKP_SLH_DSA_SHA2_256F  = 11L;
-    private static final long CKP_SLH_DSA_SHAKE_256F = 12L;
+    public Pkcs11v32Profile() {
+        super(table());
+    }
 
-    @Override public long ckmMlDsaKeyPairGen()  { return CKM_ML_DSA_KEY_PAIR_GEN; }
-    @Override public long ckmMlKemKeyPairGen()  { return CKM_ML_KEM_KEY_PAIR_GEN; }
-    @Override public long ckmMlDsa()            { return CKM_ML_DSA; }
-    @Override public long ckmMlKem()            { return CKM_ML_KEM; }
-    @Override public long ckkMlDsa()            { return CKK_ML_DSA; }
-    @Override public long ckkMlKem()            { return CKK_ML_KEM; }
-    @Override public long ckaParameterSet()     { return CKA_PARAMETER_SET; }
-    @Override public long ckmSlhDsaKeyPairGen() { return CKM_SLH_DSA_KEY_PAIR_GEN; }
-    @Override public long ckmSlhDsa()           { return CKM_SLH_DSA; }
-    @Override public long ckkSlhDsa()           { return CKK_SLH_DSA; }
+    private static List<AlgorithmEntry> table() {
+        return List.of(
+            // ---- ML-DSA (FIPS 204). Public key 1312 / 1952 / 2592 bytes. ----
+            mlDsa("ML-DSA-44", 1L, SIG_ARC + "17", 1312),
+            mlDsa("ML-DSA-65", 2L, SIG_ARC + "18", 1952),
+            mlDsa("ML-DSA-87", 3L, SIG_ARC + "19", 2592),
 
-    @Override
-    public long resolveMlDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        String normalized = keySpec.toUpperCase().replace("-", "").replace("_", "");
-        if (normalized.endsWith("44")) return CKP_ML_DSA_44;
-        if (normalized.endsWith("65")) return CKP_ML_DSA_65;
-        if (normalized.endsWith("87")) return CKP_ML_DSA_87;
-        throw new InvalidAlgorithmParameterException(
-                "Unknown ML-DSA parameter set in: " + keySpec + " (expected ML-DSA-44, ML-DSA-65, or ML-DSA-87)");
+            // ---- ML-KEM (FIPS 203). Public key 800 / 1184 / 1568 bytes. ----
+            mlKem("ML-KEM-512",  1L, KEM_ARC + "1", 800),
+            mlKem("ML-KEM-768",  2L, KEM_ARC + "2", 1184),
+            mlKem("ML-KEM-1024", 3L, KEM_ARC + "3", 1568),
+
+            // ---- SLH-DSA (FIPS 205). Public key is 2n bytes: 32 / 48 / 64. ----
+            // CKP values run s-before-f and SHA2-before-SHAKE within each level; the NIST OID arc
+            // groups all SHA2 variants (.20-.25) before all SHAKE ones (.26-.31). The two orders
+            // do not line up, which is exactly the sort of mismatch a table makes safe.
+            slhDsa("SLH-DSA-SHA2-128S",   1L, SIG_ARC + "20", 32),
+            slhDsa("SLH-DSA-SHAKE-128S",  2L, SIG_ARC + "26", 32),
+            slhDsa("SLH-DSA-SHA2-128F",   3L, SIG_ARC + "21", 32),
+            slhDsa("SLH-DSA-SHAKE-128F",  4L, SIG_ARC + "27", 32),
+            slhDsa("SLH-DSA-SHA2-192S",   5L, SIG_ARC + "22", 48),
+            slhDsa("SLH-DSA-SHAKE-192S",  6L, SIG_ARC + "28", 48),
+            slhDsa("SLH-DSA-SHA2-192F",   7L, SIG_ARC + "23", 48),
+            slhDsa("SLH-DSA-SHAKE-192F",  8L, SIG_ARC + "29", 48),
+            slhDsa("SLH-DSA-SHA2-256S",   9L, SIG_ARC + "24", 64),
+            slhDsa("SLH-DSA-SHAKE-256S", 10L, SIG_ARC + "30", 64),
+            slhDsa("SLH-DSA-SHA2-256F",  11L, SIG_ARC + "25", 64),
+            slhDsa("SLH-DSA-SHAKE-256F", 12L, SIG_ARC + "31", 64));
+    }
+
+    private static AlgorithmEntry mlDsa(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN,
+                CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+    }
+
+    private static AlgorithmEntry mlKem(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
+                CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
+    }
+
+    private static AlgorithmEntry slhDsa(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.SLH_DSA, CKK_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+                CKM_SLH_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
     }
 
     @Override
-    public long resolveMlKemParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        String normalized = keySpec.toUpperCase().replace("-", "").replace("_", "");
-        if (normalized.endsWith("512"))  return CKP_ML_KEM_512;
-        if (normalized.endsWith("768"))  return CKP_ML_KEM_768;
-        if (normalized.endsWith("1024")) return CKP_ML_KEM_1024;
-        throw new InvalidAlgorithmParameterException(
-                "Unknown ML-KEM parameter set in: " + keySpec + " (expected ML-KEM-512, ML-KEM-768, or ML-KEM-1024)");
+    public String name() {
+        return "pkcs11v32";
     }
 
     @Override
-    public long resolveSlhDsaParamSet(String keySpec) throws InvalidAlgorithmParameterException {
-        // Normalize: "SLH-DSA-SHA2-128S" -> "SLHDSASHA2128S", "SLH-DSA-SHAKE-128F" -> "SLHDSASHAKE128F"
-        String normalized = keySpec.toUpperCase().replace("-", "").replace("_", "");
-        if (normalized.endsWith("SHA2128S"))  return CKP_SLH_DSA_SHA2_128S;
-        if (normalized.endsWith("SHAKE128S")) return CKP_SLH_DSA_SHAKE_128S;
-        if (normalized.endsWith("SHA2128F"))  return CKP_SLH_DSA_SHA2_128F;
-        if (normalized.endsWith("SHAKE128F")) return CKP_SLH_DSA_SHAKE_128F;
-        if (normalized.endsWith("SHA2192S"))  return CKP_SLH_DSA_SHA2_192S;
-        if (normalized.endsWith("SHAKE192S")) return CKP_SLH_DSA_SHAKE_192S;
-        if (normalized.endsWith("SHA2192F"))  return CKP_SLH_DSA_SHA2_192F;
-        if (normalized.endsWith("SHAKE192F")) return CKP_SLH_DSA_SHAKE_192F;
-        if (normalized.endsWith("SHA2256S"))  return CKP_SLH_DSA_SHA2_256S;
-        if (normalized.endsWith("SHAKE256S")) return CKP_SLH_DSA_SHAKE_256S;
-        if (normalized.endsWith("SHA2256F"))  return CKP_SLH_DSA_SHA2_256F;
-        if (normalized.endsWith("SHAKE256F")) return CKP_SLH_DSA_SHAKE_256F;
-        throw new InvalidAlgorithmParameterException(
-                "Unknown SLH-DSA parameter set in: " + keySpec +
-                " (expected e.g. SLH-DSA-SHA2-128S, SLH-DSA-SHAKE-256F)");
-    }
-
-    @Override
-    public String algorithmForKeyType(long ckk) {
-        if (ckk == CKK.RSA)     return "RSA";
-        if (ckk == CKK.EC)      return "EC";
-        if (ckk == CKK_ML_DSA)  return "ML-DSA";
-        if (ckk == CKK_ML_KEM)  return "ML-KEM";
-        if (ckk == CKK_SLH_DSA) return "SLH-DSA";
-        return null;
-    }
-
-    @Override
-    public String keySpecForParams(long ckk, long paramSet) {
-        if (ckk == CKK_ML_DSA) {
-            if (paramSet == CKP_ML_DSA_44) return "ML-DSA-44";
-            if (paramSet == CKP_ML_DSA_87) return "ML-DSA-87";
-            return "ML-DSA-65"; // default
-        }
-        if (ckk == CKK_ML_KEM) {
-            if (paramSet == CKP_ML_KEM_512)  return "ML-KEM-512";
-            if (paramSet == CKP_ML_KEM_1024) return "ML-KEM-1024";
-            return "ML-KEM-768"; // default
-        }
-        if (ckk == CKK_SLH_DSA) {
-            if (paramSet == CKP_SLH_DSA_SHA2_128S)  return "SLH-DSA-SHA2-128S";
-            if (paramSet == CKP_SLH_DSA_SHAKE_128S) return "SLH-DSA-SHAKE-128S";
-            if (paramSet == CKP_SLH_DSA_SHA2_128F)  return "SLH-DSA-SHA2-128F";
-            if (paramSet == CKP_SLH_DSA_SHAKE_128F) return "SLH-DSA-SHAKE-128F";
-            if (paramSet == CKP_SLH_DSA_SHA2_192S)  return "SLH-DSA-SHA2-192S";
-            if (paramSet == CKP_SLH_DSA_SHAKE_192S) return "SLH-DSA-SHAKE-192S";
-            if (paramSet == CKP_SLH_DSA_SHA2_192F)  return "SLH-DSA-SHA2-192F";
-            if (paramSet == CKP_SLH_DSA_SHAKE_192F) return "SLH-DSA-SHAKE-192F";
-            if (paramSet == CKP_SLH_DSA_SHA2_256S)  return "SLH-DSA-SHA2-256S";
-            if (paramSet == CKP_SLH_DSA_SHAKE_256S) return "SLH-DSA-SHAKE-256S";
-            if (paramSet == CKP_SLH_DSA_SHA2_256F)  return "SLH-DSA-SHA2-256F";
-            if (paramSet == CKP_SLH_DSA_SHAKE_256F) return "SLH-DSA-SHAKE-256F";
-            return "SLH-DSA-SHA2-128S"; // default
-        }
-        return null;
-    }
-
-    @Override
-    public boolean supports(String keySpec) {
-        if (keySpec == null) return false;
-        String upper = keySpec.toUpperCase();
-        return upper.startsWith("ML-DSA")  || upper.startsWith("MLDSA")  ||
-               upper.startsWith("ML-KEM")  || upper.startsWith("MLKEM")  ||
-               upper.startsWith("SLH-DSA") || upper.startsWith("SLHDSA");
-    }
-
-    @Override
-    public String toString() {
-        return "Pkcs11v32Profile (OASIS PKCS#11 v3.2)";
+    public long ckaParameterSet() {
+        return CKA_PARAMETER_SET;
     }
 }

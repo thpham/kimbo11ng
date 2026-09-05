@@ -15,22 +15,14 @@
 -->
 <FindBugsFilter>
 
-    <!-- ===== scheduled: phase 1 (algorithm registry + provider facade) ===== -->
+    <!-- ===== scheduled: phase 3 (durable key identity) ===== -->
 
-    <!-- The provider hands out its live KeyStoreSpi so CryptoTokenImpl can register generated
-         keys. Phase 1 replaces this with an AtomicReference<TokenRuntime>; phase 3 removes the
-         registration hand-off entirely in favour of CKA_ID lookup. -->
+    <!-- The runtime publishes the live KeyStoreSpi so CryptoTokenImpl can register generated keys
+         with it. Phase 3 removes the registration hand-off entirely: keys are then resolved from
+         the token by CKA_ID, so nothing needs to reach into the SPI's maps. -->
     <Match>
-        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngProvider"/>
+        <Class name="ch.ithings.kimbo11ng.provider.TokenRuntime"/>
         <Bug pattern="EI_EXPOSE_REP"/>
-    </Match>
-
-    <!-- RawPqcPublicKey neither copies nor clones its encoding. Phase 1 deletes the class:
-         EJBCA's AlgorithmTools resolves signature algorithms with instanceof MLDSAKey /
-         SLHDSAKey, so an opaque key can never be signed with. -->
-    <Match>
-        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey$RawPqcPublicKey"/>
-        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 
     <!-- ===== scheduled: phase 2 (module lifecycle + session pool) ===== -->
@@ -72,6 +64,17 @@
     </Match>
 
     <!-- ===== permanent, justified ===== -->
+
+    <!-- AbstractTableProfile validates its algorithm table in the constructor and throws if two
+         entries share a name or are indistinguishable on the token. That throw IS the safety
+         property: it is what stops a profile that would label a key with the wrong OID from ever
+         existing. The finalizer attack the detector warns about needs an attacker-supplied
+         subclass overriding finalize(); every subclass is final, in this jar, and named in our own
+         META-INF/services descriptor, so a partially constructed profile is unreachable. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.profile.AbstractTableProfile"/>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
 
     <!-- The PKCS#11 library path is the operator-configured 'sharedLibrary' token property. An
          administrator naming the shared object to load is the feature, not untrusted input;

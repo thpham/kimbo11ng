@@ -6,6 +6,8 @@ package ch.ithings.kimbo11ng.fake;
 
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.pkcs11.jacknji11.CKA;
@@ -21,6 +23,7 @@ import org.pkcs11.jacknji11.CK_SESSION_INFO;
 import org.pkcs11.jacknji11.CK_TOKEN_INFO;
 import org.pkcs11.jacknji11.LongRef;
 import org.pkcs11.jacknji11.NativePointer;
+import org.pkcs11.jacknji11.ULong;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -114,6 +117,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
     // ---- fault-injection knobs (0.3) ----
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
     private final Set<Long> omittedAttributes = new HashSet<>();
+    private final Set<Long> emptyAttributes = new HashSet<>();
+    private String pqcSpkiOid;
     private final Set<Long> readOnlyAttributes = new HashSet<>();
     private final Map<Long, Long> vendorMechanisms = new HashMap<>();
     private final Set<Long> extraMechanisms = new HashSet<>();
@@ -142,6 +147,32 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** Hide an attribute entirely, as a vendor that does not implement it would. */
     public FakeToken omitAttribute(long cka) {
         omittedAttributes.add(cka);
+        return this;
+    }
+
+    /**
+     * Report an attribute as present but zero-length. Distinct from {@link #omitAttribute}: the
+     * call succeeds and the caller gets an empty array rather than an error, which is how some
+     * modules answer for an attribute they store but have not populated.
+     */
+    public FakeToken emptyAttribute(long cka) {
+        emptyAttributes.add(cka);
+        return this;
+    }
+
+    /**
+     * Wrap the {@code CKA_VALUE} of subsequently generated post-quantum public keys in a
+     * {@code SubjectPublicKeyInfo} carrying {@code oid}, instead of reporting raw key material.
+     *
+     * <p>PKCS#11 v3.2 does not settle which of the two a token reports, and implementations
+     * differ, so the reader has to handle both without configuration. The OID is a parameter
+     * rather than derived here on purpose: the fake holds no algorithm table of its own, so it
+     * cannot mask a mistake in the profile's.
+     *
+     * @param oid dotted OID, or {@code null} to go back to raw material
+     */
+    public FakeToken pqcSpkiOid(String oid) {
+        this.pqcSpkiOid = oid;
         return this;
     }
 
@@ -482,6 +513,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         long rv = CKR.OK;
         for (CKA cka : template) {
             byte[] value = omittedAttributes.contains(cka.type) ? null : attrs.get(cka.type);
+            if (value != null && emptyAttributes.contains(cka.type)) {
+                value = new byte[0];
+            }
             if (value == null) {
                 cka.ulValueLen = -1;
                 rv = CKR.ATTRIBUTE_TYPE_INVALID;
@@ -618,6 +652,14 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
         Map<Long, byte[]> pub = toMap(pubTemplate);
         Map<Long, byte[]> priv = toMap(privTemplate);
+        // For CKM_EC_KEY_PAIR_GEN the curve is an input to the public template only; the token
+        // derives the private key's copy. Supplying it on the private template sets a read-only
+        // attribute, and SoftHSMv3 fails the whole generation with CKR_ATTRIBUTE_READ_ONLY. The
+        // fake used to accept it, so a template that no real token would take passed the unit
+        // suite and only failed against an HSM.
+        if (ckm == CKM.EC_KEY_PAIR_GEN && priv.containsKey(CKA.EC_PARAMS)) {
+            return CKR.ATTRIBUTE_READ_ONLY;
+        }
         try {
             if (ckm == CKM.RSA_PKCS_KEY_PAIR_GEN) {
                 generateRsa(pub, priv);
@@ -699,10 +741,27 @@ public final class FakeToken extends UnsupportedNativeProvider {
         }
         byte[] material = new byte[size];
         RANDOM.nextBytes(material);
-        pub.put(CKA.VALUE, material);
-        pub.put(CKA.KEY_TYPE, encodeLong(ckk));
-        priv.put(CKA.KEY_TYPE, encodeLong(ckk));
+        pub.put(CKA.VALUE, publicValue(material));
+        // putIfAbsent, not put: PKCS#11 validates CKA_KEY_TYPE from the template rather than
+        // overwriting it, so a vendor profile's own key type must survive generation.
+        pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
+        priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
         priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Applies the {@link #pqcSpkiOid} knob to freshly generated public-key material. */
+    private byte[] publicValue(byte[] material) {
+        if (pqcSpkiOid == null) {
+            return material;
+        }
+        try {
+            return new SubjectPublicKeyInfo(
+                    new AlgorithmIdentifier(new ASN1ObjectIdentifier(pqcSpkiOid)), material)
+                    .getEncoded();
+        } catch (IOException e) {
+            throw new IllegalStateException("cannot encode a SubjectPublicKeyInfo for OID "
+                    + pqcSpkiOid, e);
+        }
     }
 
     private void generateSlhDsa(Map<Long, byte[]> pub, Map<Long, byte[]> priv) {
@@ -716,9 +775,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         int size = paramSet <= 4 ? 32 : (paramSet <= 8 ? 48 : 64);
         byte[] material = new byte[size];
         RANDOM.nextBytes(material);
-        pub.put(CKA.VALUE, material);
-        pub.put(CKA.KEY_TYPE, encodeLong(CKK_SLH_DSA));
-        priv.put(CKA.KEY_TYPE, encodeLong(CKK_SLH_DSA));
+        pub.put(CKA.VALUE, publicValue(material));
+        pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(CKK_SLH_DSA));
+        priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(CKK_SLH_DSA));
         priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
     }
 
@@ -864,20 +923,21 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     /** CK_ULONG is little-endian on every platform kimbo11ng targets. */
+    /**
+     * A {@code CK_ULONG} in the token's native width and byte order.
+     *
+     * <p>Delegated to the binding's own codec rather than fixed at 8 bytes: {@code CK_ULONG} is 4
+     * bytes on some builds and 8 on others, and {@code CKA.getValueLong()} rejects any value whose
+     * length is not exactly {@code ULong.ULONG_SIZE}. A fake that hard-codes the width produces
+     * attributes the caller cannot read at all — which is precisely what a token with a mismatched
+     * library does, and not what these tests are for.
+     */
     private static byte[] encodeLong(long value) {
-        byte[] out = new byte[8];
-        for (int i = 0; i < 8; i++) {
-            out[i] = (byte) (value >>> (8 * i));
-        }
-        return out;
+        return ULong.ulong2b(value);
     }
 
     private static long decodeLong(byte[] bytes) {
-        long value = 0;
-        for (int i = Math.min(8, bytes.length) - 1; i >= 0; i--) {
-            value = (value << 8) | (bytes[i] & 0xFFL);
-        }
-        return value;
+        return ULong.b2ulong(bytes) & 0xFFFF_FFFFL;
     }
 
     /** Big-endian magnitude with no sign byte, which is how PKCS#11 carries big integers. */

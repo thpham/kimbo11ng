@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phase 0 complete. Phases 1–8 not started.            |
+| **Status** | Phases 0–1 complete. Phases 2–8 not started.        |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -105,9 +105,12 @@ it — and the `@SuppressWarnings` sites in `Kimbo11ngProvider`, `Pkcs11NgCrypto
 
 ---
 
-## Phase 1 — Algorithm registry and provider facade
+## Phase 1 — Algorithm registry and provider facade ✅
 
 _The Luna enabler. Needs Phase 0._
+
+**Landed.** 149 unit tests and the 18-test `EjbcaContainerIT` green; coverage floor raised from
+LINE 0.25 / BRANCH 0.30 to 0.45 / 0.35.
 
 - **1.1** `AlgorithmEntry` record: canonical name, family, `ckkKeyType`, `ckmKeyPairGen`, `ckmOperation`,
   `OptionalLong ckpParameterSet`, NIST OID, FIPS public-key length, ops, JCA names.
@@ -121,9 +124,48 @@ _The Luna enabler. Needs Phase 0._
 - **1.6** `enumerateKeys` uses `lookupByKeyType`; **delete `RawPqcPublicKey`**.
 - **1.7** `ProfileResolver` → `ServiceLoader`; drop `Class.forName` on config strings.
 
-**Gate** — table-completeness test over every `AlgorithmConstants.KEYALGORITHM_*` we advertise · a
-fake profile with shifted CKMs signs and enumerates correctly · provider identity stable across 10
-init/reset cycles.
+**Gate** — met, except as noted in 1.5 below.
+
+### What the implementation changed, and why
+
+Four things came out of building this that the plan did not anticipate. Each is a decision, not an
+oversight.
+
+**RSA-PSS was not implemented (1.5).** Everything else in 1.5 landed: the 15 static SPI subclasses
+are gone and services are registered from the profile table. PSS needs a correctly encoded
+`CK_RSA_PKCS_PSS_PARAMS`, and the only way to know an encoding is right is to sign with it and have
+a relying party verify — which needs IT coverage that does not exist yet. Untested signature code in
+a CA is worse than absent, so `SHA{256,384,512}withRSAandMGF1` is deferred with its IT to phase 7.
+Nothing regressed: PSS was not supported before either.
+
+**`CkULong` — vendor constants read back negative.** JackNJI11 1.3.1 decodes `CK_ULONG` with
+`int`-typed shifts, so every value with bit 31 set is sign-extended (measured: `0x80000100` reads
+back as `0xFFFFFFFF80000100`, and anything ≥ 2³² truncates to zero). Nothing has noticed because every
+*standard* CKK/CKM/CKA is below `0x80000000` — but `CKK_VENDOR_DEFINED`, `CKM_VENDOR_DEFINED` and
+`CKA_VENDOR_DEFINED` are all exactly `0x80000000`, so **every** vendor-defined constant is affected.
+A Luna table written with the vendor's own constants would never match what the token reports, and
+every such key would be skipped at enumeration as "profile does not describe CKK". Fixed at the read
+boundary before the first vendor table exists rather than after.
+
+**Public-key length validation was pulled forward from 4.2.** Measured against the deployed
+BouncyCastle: 1312 bytes of ML-DSA-44 material presented under the ML-DSA-87 OID is accepted without
+complaint, and the resulting key reports itself as ML-DSA-87. EJBCA would write that OID into the
+certificate. Since no component downstream catches this, the check cannot wait for phase 4 — it is
+the only defence against the exact failure this whole review was about. Phase 4 still owns the
+`kimbo11ng.strict.publickey` policy split and the EC point decoder.
+
+**The keystore cache refresh had to stay.** `BaseCryptoToken.setKeyStore` wraps our KeyStore in a
+`CachingKeyStoreWrapper` whose alias list is built once. EJBCA populates it through
+`KeyStore.setKeyEntry`, which a key generated on the token never goes through, so `ca init` fails
+with "No key with alias" for a key that demonstrably exists. Dropping the phase-0 cache-bust broke
+the IT; it is restored, still marked `TODO(phase-3)`, because resolving keys by `CKA_ID` on demand
+is what actually removes the need for it.
+
+**One template bug the fake had been hiding.** `CKA_EC_PARAMS` was being sent on the EC *private*
+key generation template. For `CKM_EC_KEY_PAIR_GEN` the curve is an input to the public template
+only and the token derives the private copy, so this sets a read-only attribute: SoftHSMv3 answers
+`CKR_ATTRIBUTE_READ_ONLY` and fails the whole generation. The fake accepted it, so the unit suite
+passed a template no real token would take. The fake now enforces the rule.
 
 ## Phase 2 — Module lifecycle and session pool
 

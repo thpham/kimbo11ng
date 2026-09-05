@@ -1,0 +1,4 @@
+# PQC mechanism profiles discovered by ProfileResolver.
+# A vendor profile may instead ship in its own jar with its own copy of this file.
+ch.ithings.kimbo11ng.profile.Pkcs11v32Profile
+ch.ithings.kimbo11ng.profile.ThalesLunaProfile

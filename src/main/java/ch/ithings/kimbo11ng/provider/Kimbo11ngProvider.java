@@ -4,255 +4,153 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
+import org.pkcs11.jacknji11.CKM;
 
 import java.security.Provider;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * JCA Security Provider backed by PKCS#11 JNA bindings.
- * Registered per-slot, providing KeyStore, Signature, and KeyPairGenerator services.
+ * JCA provider for one PKCS#11 slot.
+ *
+ * <p>Exactly one instance exists per (library, slot) for the life of the JVM, and re-initialising
+ * a token swaps its {@link TokenRuntime} rather than creating a new provider — see
+ * {@link TokenRuntime} for why that is required rather than merely tidy.
+ *
+ * <p>Signature services are registered from the profile's algorithm table, so a vendor profile
+ * automatically gets the right set of algorithms and the right mechanism behind each one.
+ *
+ * <p>{@code final} on purpose: {@code putService} is called from the constructor, which would be a
+ * {@code this}-escape if the class could be subclassed.
  */
-public class Kimbo11ngProvider extends Provider {
+public final class Kimbo11ngProvider extends Provider {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
     private static final Logger log = Logger.getLogger(Kimbo11ngProvider.class);
 
-    // Provider is Serializable, but a live PKCS#11 device and its keystore state are not:
-    // a deserialized provider would hold handles into a session that no longer exists.
-    private final transient CryptokiDevice device;
-    private transient Kimbo11ngKeyStoreSpi keyStoreSpi;
+    private static final ConcurrentMap<String, Kimbo11ngProvider> INSTANCES =
+            new ConcurrentHashMap<>();
 
-    // Track last generated key pair handles for setKeyEntry labeling
-    private long lastGeneratedPrivHandle = -1;
-    private long lastGeneratedPubHandle = -1;
+    /** RSA and ECDSA services: {@code {jcaName, CKM, isEcdsa}}. Standard across tokens. */
+    private static final List<Object[]> CLASSICAL_SIGNATURES = List.of(
+            new Object[] {"SHA1withRSA",     CKM.SHA1_RSA_PKCS,   false},
+            new Object[] {"SHA256withRSA",   CKM.SHA256_RSA_PKCS, false},
+            new Object[] {"SHA384withRSA",   CKM.SHA384_RSA_PKCS, false},
+            new Object[] {"SHA512withRSA",   CKM.SHA512_RSA_PKCS, false},
+            new Object[] {"SHA1withECDSA",   CKM.ECDSA,           true},
+            new Object[] {"SHA256withECDSA", CKM.ECDSA_SHA256,    true},
+            new Object[] {"SHA384withECDSA", CKM.ECDSA_SHA384,    true},
+            new Object[] {"SHA512withECDSA", CKM.ECDSA_SHA512,    true});
 
-    // TODO(phase-1): the provider becomes a stable facade holding an AtomicReference<TokenRuntime>
-    // and registers its services from the algorithm table, which removes this escape.
-    @SuppressWarnings("this-escape")
-    public Kimbo11ngProvider(CryptokiDevice device) {
-        super("Kimbo11ng-" + device.getLibraryName() + "-slot" + device.getSlotId(),
-                "1.0",
-                "Kimbo11ng PKCS#11 Provider for " + device.getLibPath() + " slot " + device.getSlotId());
-        this.device = device;
-        registerServices();
+    private final transient AtomicReference<TokenRuntime> runtime = new AtomicReference<>();
+
+    /**
+     * The provider for this runtime's slot, creating it on first use and otherwise re-pointing the
+     * existing one. The returned instance's name is stable, which is what EJBCA relies on.
+     */
+    public static Kimbo11ngProvider forToken(TokenRuntime newRuntime) {
+        String name = nameFor(newRuntime);
+        Kimbo11ngProvider provider = INSTANCES.computeIfAbsent(name,
+                n -> new Kimbo11ngProvider(n, newRuntime));
+        TokenRuntime previous = provider.runtime.getAndSet(newRuntime);
+        if (previous != null && previous != newRuntime && log.isDebugEnabled()) {
+            log.debug("Re-pointed provider " + name + " from " + previous + " to " + newRuntime);
+        }
+        return provider;
     }
 
-    private void registerServices() {
-        final Kimbo11ngProvider self = this;
+    private static String nameFor(TokenRuntime runtime) {
+        return "Kimbo11ng-" + runtime.device().getLibraryName()
+                + "-slot" + runtime.device().getSlotId();
+    }
 
-        // KeyStore
-        putService(new Provider.Service(this, "KeyStore", "PKCS11",
+    private Kimbo11ngProvider(String name, TokenRuntime initialRuntime) {
+        super(name, "1.0", "kimbo11ng PKCS#11 provider for "
+                + initialRuntime.device().getLibPath()
+                + " slot " + initialRuntime.device().getSlotId());
+        this.runtime.set(initialRuntime);
+        registerServices(initialRuntime);
+    }
+
+    /** The current runtime. Never null after construction. */
+    public TokenRuntime runtime() {
+        return runtime.get();
+    }
+
+    public CryptokiDevice getDevice() {
+        return runtime.get().device();
+    }
+
+    public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
+        return runtime.get().keyStoreSpi();
+    }
+
+    private void registerServices(TokenRuntime initialRuntime) {
+        putService(new Service(this, "KeyStore", "PKCS11",
                 Kimbo11ngKeyStoreSpi.class.getName(), null, null) {
             @Override
             public Object newInstance(Object constructorParameter) {
-                keyStoreSpi = new Kimbo11ngKeyStoreSpi(device);
-                return keyStoreSpi;
+                TokenRuntime current = runtime.get();
+                Kimbo11ngKeyStoreSpi spi = new Kimbo11ngKeyStoreSpi(current);
+                current.adoptKeyStoreSpi(spi);
+                return spi;
             }
         });
 
-        // Signature algorithms - RSA
-        putService(new Provider.Service(this, "Signature", "SHA1withRSA",
-                Kimbo11ngSignatureSpi.SHA1withRSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA1withRSA();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA256withRSA",
-                Kimbo11ngSignatureSpi.SHA256withRSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA256withRSA();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA384withRSA",
-                Kimbo11ngSignatureSpi.SHA384withRSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA384withRSA();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA512withRSA",
-                Kimbo11ngSignatureSpi.SHA512withRSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA512withRSA();
-            }
-        });
+        for (Object[] row : CLASSICAL_SIGNATURES) {
+            String jcaName = (String) row[0];
+            long mechanism = (Long) row[1];
+            boolean isEcdsa = (Boolean) row[2];
+            putService(new Service(this, "Signature", jcaName,
+                    Kimbo11ngSignatureSpi.class.getName(), null, null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return Kimbo11ngSignatureSpi.fixed(mechanism, isEcdsa);
+                }
+            });
+        }
 
-        // Signature algorithms - ECDSA
-        putService(new Provider.Service(this, "Signature", "SHA1withECDSA",
-                Kimbo11ngSignatureSpi.SHA1withECDSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA1withECDSA();
+        // One signature service per signing algorithm the profile describes. The mechanism is
+        // resolved from the key at init, so nothing here needs to know it.
+        int registered = 0;
+        for (AlgorithmEntry entry : initialRuntime.profile().entries()) {
+            if (!entry.canSign()) {
+                continue;
             }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA256withECDSA",
-                Kimbo11ngSignatureSpi.SHA256withECDSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA256withECDSA();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA384withECDSA",
-                Kimbo11ngSignatureSpi.SHA384withECDSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA384withECDSA();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SHA512withECDSA",
-                Kimbo11ngSignatureSpi.SHA512withECDSA.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SHA512withECDSA();
-            }
-        });
+            putService(new Service(this, "Signature", entry.canonicalName(),
+                    Kimbo11ngSignatureSpi.class.getName(), null, null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return Kimbo11ngSignatureSpi.fromKeyEntry();
+                }
+            });
+            registered++;
+        }
 
-        // Signature algorithms - ML-DSA (FIPS 204)
-        putService(new Provider.Service(this, "Signature", "ML-DSA-44",
-                Kimbo11ngSignatureSpi.MLDSA44.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.MLDSA44();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "ML-DSA-65",
-                Kimbo11ngSignatureSpi.MLDSA65.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.MLDSA65();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "ML-DSA-87",
-                Kimbo11ngSignatureSpi.MLDSA87.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.MLDSA87();
-            }
-        });
-
-        // Signature algorithms - SLH-DSA (FIPS 205)
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-128S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_128S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_128S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-128S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_128S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_128S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-128F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_128F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_128F();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-128F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_128F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_128F();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-192S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_192S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_192S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-192S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_192S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_192S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-192F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_192F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_192F();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-192F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_192F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_192F();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-256S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_256S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_256S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-256S",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_256S.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_256S();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHA2-256F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHA2_256F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHA2_256F();
-            }
-        });
-        putService(new Provider.Service(this, "Signature", "SLH-DSA-SHAKE-256F",
-                Kimbo11ngSignatureSpi.SLHDSA_SHAKE_256F.class.getName(), null, null) {
-            @Override
-            public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngSignatureSpi.SLHDSA_SHAKE_256F();
-            }
-        });
-
-        // KeyPairGenerator
-        putService(new Provider.Service(this, "KeyPairGenerator", "RSA",
+        putService(new Service(this, "KeyPairGenerator", "RSA",
                 Kimbo11ngKeyPairGeneratorSpi.RSA.class.getName(), null, null) {
             @Override
             public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngKeyPairGeneratorSpi.RSA(device, self);
+                return new Kimbo11ngKeyPairGeneratorSpi.RSA(runtime.get().device());
             }
         });
-        putService(new Provider.Service(this, "KeyPairGenerator", "EC",
+        putService(new Service(this, "KeyPairGenerator", "EC",
                 Kimbo11ngKeyPairGeneratorSpi.EC.class.getName(), null, null) {
             @Override
             public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngKeyPairGeneratorSpi.EC(device, self);
+                return new Kimbo11ngKeyPairGeneratorSpi.EC(runtime.get().device());
             }
         });
 
         if (log.isDebugEnabled()) {
-            log.debug("Registered Kimbo11ngProvider: " + getName());
-        }
-    }
-
-    public CryptokiDevice getDevice() {
-        return device;
-    }
-
-    public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
-        return keyStoreSpi;
-    }
-
-    public void setLastGeneratedHandles(long privHandle, long pubHandle) {
-        this.lastGeneratedPrivHandle = privHandle;
-        this.lastGeneratedPubHandle = pubHandle;
-        if (keyStoreSpi != null) {
-            keyStoreSpi.setLastGeneratedHandles(privHandle, pubHandle);
+            log.debug("Registered provider " + getName() + " with "
+                    + CLASSICAL_SIGNATURES.size() + " classical and " + registered
+                    + " post-quantum signature services from profile "
+                    + initialRuntime.profile().name());
         }
     }
 }

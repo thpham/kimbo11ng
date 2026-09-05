@@ -4,10 +4,10 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
-import org.apache.log4j.Logger;
-import org.bouncycastle.asn1.ASN1EncodableVector;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.ASN1EncodableVector;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CryptokiE;
 
@@ -21,51 +21,89 @@ import java.security.SignatureException;
 import java.security.SignatureSpi;
 
 /**
- * SignatureSpi implementation using JackNJI11 PKCS#11 backend.
+ * Signing through PKCS#11.
+ *
+ * <p>The mechanism is supplied by a {@link MechanismResolver} rather than hardcoded per algorithm.
+ * For RSA and ECDSA it follows from the requested digest, which is a property of the JCA service
+ * name and is standard across tokens. For ML-DSA and SLH-DSA it comes from the key's
+ * {@link AlgorithmEntry}, so a vendor profile that shifts the signing mechanism is honoured — the
+ * previous fixed constants meant such a profile would generate keys correctly and then sign with
+ * the wrong mechanism.
+ *
+ * <p>One instance serves one signing operation; the JCA contract allows reuse after
+ * {@code engineSign}, and the buffer is reset accordingly.
  */
-public abstract class Kimbo11ngSignatureSpi extends SignatureSpi {
+public class Kimbo11ngSignatureSpi extends SignatureSpi {
 
-    private static final Logger log = Logger.getLogger(Kimbo11ngSignatureSpi.class);
-
-    private final long ckMechanism;
-    private final boolean isEc;
-
-    private CryptokiDevice device;
-    private Kimbo11ngPrivateKey signingKey;
-    private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-
-    protected Kimbo11ngSignatureSpi(long ckMechanism) {
-        this(ckMechanism, false);
+    /** Chooses the PKCS#11 mechanism for a given key. */
+    public interface MechanismResolver {
+        long resolve(Kimbo11ngPrivateKey key) throws InvalidKeyException;
     }
 
-    protected Kimbo11ngSignatureSpi(long ckMechanism, boolean isEc) {
-        this.ckMechanism = ckMechanism;
-        this.isEc = isEc;
+    private final MechanismResolver resolver;
+    private final boolean ecdsaDerEncoding;
+
+    private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    private CryptokiDevice device;
+    private Kimbo11ngPrivateKey signingKey;
+    private long mechanism = -1;
+
+    private Kimbo11ngSignatureSpi(MechanismResolver resolver, boolean ecdsaDerEncoding) {
+        this.resolver = resolver;
+        this.ecdsaDerEncoding = ecdsaDerEncoding;
+    }
+
+    /** RSA and ECDSA: the digest fixes the mechanism. */
+    public static Kimbo11ngSignatureSpi fixed(long ckMechanism, boolean ecdsaDerEncoding) {
+        return new Kimbo11ngSignatureSpi(key -> ckMechanism, ecdsaDerEncoding);
+    }
+
+    /** ML-DSA and SLH-DSA: the key's algorithm row fixes the mechanism. */
+    public static Kimbo11ngSignatureSpi fromKeyEntry() {
+        return new Kimbo11ngSignatureSpi(key -> {
+            AlgorithmEntry entry = key.entry().orElseThrow(() -> new InvalidKeyException(
+                    "Key " + key.getAlias() + " carries no algorithm entry, so its PKCS#11 signing"
+                    + " mechanism is unknown. Post-quantum keys must be created through the "
+                    + "algorithm registry."));
+            if (!entry.canSign()) {
+                throw new InvalidKeyException(entry.canonicalName()
+                        + " is a key-encapsulation algorithm and cannot sign.");
+            }
+            return entry.ckmOperation();
+        }, false);
     }
 
     @Override
     protected void engineInitSign(PrivateKey privateKey) throws InvalidKeyException {
-        if (!(privateKey instanceof Kimbo11ngPrivateKey)) {
-            throw new InvalidKeyException("Key must be a Kimbo11ngPrivateKey, got: " +
-                    privateKey.getClass().getName());
+        if (!(privateKey instanceof Kimbo11ngPrivateKey p11Key)) {
+            throw new InvalidKeyException("Key must be a Kimbo11ngPrivateKey, got: "
+                    + privateKey.getClass().getName());
         }
-        signingKey = (Kimbo11ngPrivateKey) privateKey;
-        device = signingKey.getDevice();
+        if (p11Key.getDevice() == null) {
+            throw new InvalidKeyException("Key " + p11Key.getAlias()
+                    + " has no device; it was probably deserialized.");
+        }
+        mechanism = resolver.resolve(p11Key);
+        signingKey = p11Key;
+        device = p11Key.getDevice();
         buffer.reset();
     }
 
     @Override
     protected void engineInitVerify(PublicKey publicKey) throws InvalidKeyException {
-        throw new InvalidKeyException("Verification not supported by Kimbo11ngSignatureSpi");
+        // EJBCA verifies with BouncyCastle (KeyTools.testKey resolves the provider from the public
+        // key's algorithm), so this provider is never asked to verify.
+        throw new InvalidKeyException("Verification is not supported by this provider; verify with "
+                + "the public key through BouncyCastle instead.");
     }
 
     @Override
-    protected void engineUpdate(byte b) throws SignatureException {
+    protected void engineUpdate(byte b) {
         buffer.write(b);
     }
 
     @Override
-    protected void engineUpdate(byte[] b, int off, int len) throws SignatureException {
+    protected void engineUpdate(byte[] b, int off, int len) {
         buffer.write(b, off, len);
     }
 
@@ -74,169 +112,63 @@ public abstract class Kimbo11ngSignatureSpi extends SignatureSpi {
         if (signingKey == null) {
             throw new SignatureException("Not initialized for signing");
         }
+        byte[] data = buffer.toByteArray();
+        buffer.reset();
         try {
             long session = device.getOrOpenSession();
             CryptokiE ce = device.getCe();
-            byte[] data = buffer.toByteArray();
-            buffer.reset();
-
+            // TODO(phase-2): the device still exposes one shared session, so the mutual exclusion
+            // has to live here. A borrowed session lease replaces this and allows real parallelism.
             synchronized (device) {
-                ce.SignInit(session, new org.pkcs11.jacknji11.CKM(ckMechanism), signingKey.getObjectHandle());
+                ce.SignInit(session, new CKM(mechanism), signingKey.getObjectHandle());
                 byte[] rawSig = ce.Sign(session, data);
-
-                if (isEc) {
-                    return convertRawEcdsaToDer(rawSig);
-                }
-                return rawSig;
+                return ecdsaDerEncoding ? convertRawEcdsaToDer(rawSig) : rawSig;
             }
         } catch (Exception e) {
-            throw new SignatureException("PKCS#11 signing failed: " + e.getMessage(), e);
+            throw new SignatureException("PKCS#11 signing failed with mechanism 0x"
+                    + Long.toHexString(mechanism) + " for key " + signingKey.getAlias()
+                    + ": " + e.getMessage(), e);
         }
     }
 
     @Override
     protected boolean engineVerify(byte[] sigBytes) throws SignatureException {
-        throw new SignatureException("Verification not supported by Kimbo11ngSignatureSpi");
+        throw new SignatureException("Verification is not supported by this provider");
     }
 
     @Override
     @SuppressWarnings("deprecation")
-    protected void engineSetParameter(String param, Object value) throws InvalidParameterException {
-        throw new InvalidParameterException("setParameter not supported");
+    protected void engineSetParameter(String param, Object value) {
+        throw new InvalidParameterException("setParameter is not supported");
     }
 
     @Override
     @SuppressWarnings("deprecation")
-    protected Object engineGetParameter(String param) throws InvalidParameterException {
-        throw new InvalidParameterException("getParameter not supported");
+    protected Object engineGetParameter(String param) {
+        throw new InvalidParameterException("getParameter is not supported");
     }
 
     /**
-     * Convert raw PKCS#11 ECDSA signature (r || s) to DER-encoded ASN.1 SEQUENCE { INTEGER r, INTEGER s }.
+     * PKCS#11 returns ECDSA as the bare {@code r || s} pair; X.509 needs
+     * {@code SEQUENCE { INTEGER r, INTEGER s }}.
      */
-    private static byte[] convertRawEcdsaToDer(byte[] rawSig) throws SignatureException {
+    static byte[] convertRawEcdsaToDer(byte[] rawSig) throws SignatureException {
         if (rawSig == null || rawSig.length == 0 || rawSig.length % 2 != 0) {
-            throw new SignatureException("Invalid raw ECDSA signature length: " +
-                    (rawSig != null ? rawSig.length : 0));
+            throw new SignatureException("Invalid raw ECDSA signature length: "
+                    + (rawSig == null ? "null" : rawSig.length)
+                    + " (expected an even number of bytes, r||s)");
         }
         int half = rawSig.length / 2;
-        byte[] rBytes = new byte[half];
-        byte[] sBytes = new byte[half];
-        System.arraycopy(rawSig, 0, rBytes, 0, half);
-        System.arraycopy(rawSig, half, sBytes, 0, half);
-
-        BigInteger r = new BigInteger(1, rBytes);
-        BigInteger s = new BigInteger(1, sBytes);
-
+        BigInteger r = new BigInteger(1, rawSig, 0, half);
+        BigInteger s = new BigInteger(1, rawSig, half, half);
         try {
             ASN1EncodableVector v = new ASN1EncodableVector();
             v.add(new ASN1Integer(r));
             v.add(new ASN1Integer(s));
             return new DERSequence(v).getEncoded();
         } catch (Exception e) {
-            throw new SignatureException("Failed to DER-encode ECDSA signature: " + e.getMessage(), e);
+            throw new SignatureException("Failed to DER-encode ECDSA signature: "
+                    + e.getMessage(), e);
         }
-    }
-
-    // ---- Inner subclasses for each algorithm ----
-
-    public static class SHA1withRSA extends Kimbo11ngSignatureSpi {
-        public SHA1withRSA() { super(CKM.SHA1_RSA_PKCS); }
-    }
-
-    public static class SHA256withRSA extends Kimbo11ngSignatureSpi {
-        public SHA256withRSA() { super(CKM.SHA256_RSA_PKCS); }
-    }
-
-    public static class SHA384withRSA extends Kimbo11ngSignatureSpi {
-        public SHA384withRSA() { super(CKM.SHA384_RSA_PKCS); }
-    }
-
-    public static class SHA512withRSA extends Kimbo11ngSignatureSpi {
-        public SHA512withRSA() { super(CKM.SHA512_RSA_PKCS); }
-    }
-
-    public static class SHA1withECDSA extends Kimbo11ngSignatureSpi {
-        public SHA1withECDSA() { super(CKM.ECDSA, true); }
-    }
-
-    public static class SHA256withECDSA extends Kimbo11ngSignatureSpi {
-        public SHA256withECDSA() { super(CKM.ECDSA_SHA256, true); }
-    }
-
-    public static class SHA384withECDSA extends Kimbo11ngSignatureSpi {
-        public SHA384withECDSA() { super(CKM.ECDSA_SHA384, true); }
-    }
-
-    public static class SHA512withECDSA extends Kimbo11ngSignatureSpi {
-        public SHA512withECDSA() { super(CKM.ECDSA_SHA512, true); }
-    }
-
-    // ML-DSA (FIPS 204) — pure signature, no pre-hashing
-    // CKM_ML_DSA = 0x1D (PKCS#11 v3.2)
-    private static final long CKM_ML_DSA = 0x0000001DL;
-
-    public static class MLDSA44 extends Kimbo11ngSignatureSpi {
-        public MLDSA44() { super(CKM_ML_DSA); }
-    }
-
-    public static class MLDSA65 extends Kimbo11ngSignatureSpi {
-        public MLDSA65() { super(CKM_ML_DSA); }
-    }
-
-    public static class MLDSA87 extends Kimbo11ngSignatureSpi {
-        public MLDSA87() { super(CKM_ML_DSA); }
-    }
-
-    // SLH-DSA (FIPS 205) — pure signature, no pre-hashing
-    // CKM_SLH_DSA = 0x2E (PKCS#11 v3.2)
-    private static final long CKM_SLH_DSA = 0x0000002EL;
-
-    public static class SLHDSA_SHA2_128S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_128S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_128S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_128S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHA2_128F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_128F() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_128F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_128F() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHA2_192S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_192S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_192S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_192S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHA2_192F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_192F() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_192F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_192F() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHA2_256S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_256S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_256S extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_256S() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHA2_256F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHA2_256F() { super(CKM_SLH_DSA); }
-    }
-
-    public static class SLHDSA_SHAKE_256F extends Kimbo11ngSignatureSpi {
-        public SLHDSA_SHAKE_256F() { super(CKM_SLH_DSA); }
     }
 }

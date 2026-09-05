@@ -112,8 +112,23 @@ this image, single-threaded:
 | ML-DSA-65 | 3001 (2 threads) | 0.67 ms |
 | SLH-DSA-SHA2-128S | 7.25 | 140 ms |
 
-Outside the container, `cli/kimbo11ng-cli.sh` takes its classpath from `KIMBO11NG_CLASSPATH`,
-`EJBCA_HOME`, or a checkout's `target/`. `just cli` runs it from the build tree.
+`kimbo11ng-cli <command> --help` is the option reference, and it is generated from the same
+declaration list the parser validates against, so the two cannot drift. Four options are common to
+every command that opens a slot — `--lib-file`, `--slot-ref`, `--slot`, `--property` — and
+`--password` is added by the ones that log in. A PIN given as `--password` is visible in `ps`; omit
+it and the tool prompts.
+
+The launcher reads four variables, none of them required inside the image:
+
+| Variable | Effect |
+| --- | --- |
+| `KIMBO11NG_LIB_FILE` | Supplies `--lib-file` when the command line omits it. Set by `environment-hsm` in the image, so `--lib-file` is only ever typed on a host or to override the discovered module. |
+| `KIMBO11NG_CLASSPATH` | Names the classpath outright; nothing else is guessed. |
+| `EJBCA_HOME` | An EJBCA install elsewhere on the machine, whose jars the CLI then runs against — so the tool and the CA cannot disagree about what the token supports. |
+| `LUNA_CRYPTOKI` | Read from `environment-hsm`: when a Thales Luna client is side-mounted its module wins over SoftHSMv3, the same order `init-hsm.sh` applies. |
+
+Failing all of those, `cli/kimbo11ng-cli.sh` falls back to a checkout's `target/`. `just cli` runs it
+from the build tree, `just cli-token` inside the running container.
 
 Not implemented: the Utimaco CP5 key-authorisation commands (`initializekey`, `authorizekey`,
 `unblockkey`, `backupobject`, `restoreobject`) — vendor extensions with no hardware here to develop
@@ -182,9 +197,16 @@ mvn verify -Pit
 | Recipe                    | Description                                                                 |
 | ------------------------- | --------------------------------------------------------------------------- |
 | `just setup`              | Extract EJBCA JARs + install to Maven + build                               |
-| `just build`              | Build the fat JAR                                                           |
+| `just build`              | Build the fat JAR, gates included (`mvn clean verify`)                      |
+| `just build-quick`        | Package with no clean, tests or gates — for `just deploy` iteration only    |
+| `just test`               | Unit tests + every build gate, no Docker needed                             |
+| `just it`                 | The above plus the integration suite — run `just docker-build` first        |
+| `just it-only`            | Integration tests alone, skipping the unit suite and the gates              |
+| `just cli`                | Run the command-line tool from the build tree                               |
+| `just cli-token`          | Run it inside the container, against the SoftHSMv3 slot                     |
 | `just deploy`             | Hot-reload JAR into running EJBCA container                                 |
 | `just docker-build`       | Build Docker image (EJBCA + softhsmv3 + kimbo11ng)                          |
+| `just toolchain-build`    | Compile the OpenSSL + SoftHSMv3 base image locally (minutes; offline path)  |
 | `just up` / `just down`   | Start / stop services                                                       |
 | `just create-token`       | Provision TestHSM as Pkcs11NgCryptoToken (idempotent)                       |
 | `just luna-up`            | Start the stack with a side-mounted Thales Luna client (optional)           |

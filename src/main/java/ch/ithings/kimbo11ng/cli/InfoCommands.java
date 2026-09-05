@@ -41,7 +41,7 @@ final class InfoCommands {
     private static Command listSlots() {
         return Command.of("listslots",
                 "Lists the slots the library reports, with the label of each token present.",
-                List.of(Opt.arg("lib-file", "<path>", "PKCS#11 shared library. Required.")),
+                List.of(Opt.libFile()),
                 (env, args) -> {
                     Pkcs11Module module = TokenHandle.library(env, args);
                     long[] withToken = module.slotList();
@@ -78,7 +78,7 @@ final class InfoCommands {
     private static Command showInfo() {
         return Command.of("showinfo",
                 "Prints the library's own description of itself: Cryptoki version, vendor, build.",
-                List.of(Opt.arg("lib-file", "<path>", "PKCS#11 shared library. Required.")),
+                List.of(Opt.libFile()),
                 (env, args) -> {
                     CK_INFO info = TokenHandle.library(env, args).ce().GetInfo();
                     PrintStream out = env.out();

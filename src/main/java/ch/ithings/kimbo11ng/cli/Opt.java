@@ -37,10 +37,24 @@ record Opt(String name, String argName, String help, boolean repeatable) {
         return argName != null;
     }
 
+    /**
+     * The library path, which every level of {@link TokenHandle} needs.
+     *
+     * <p>Declared here rather than spelled out at each use because the two library-level commands
+     * once carried their own copy of this text, and it drifted from {@link #slot()}'s the first
+     * time that one was reworded — the same defect this record exists to prevent between the parser
+     * and the help.
+     */
+    static Opt libFile() {
+        return arg("lib-file", "<path>", "PKCS#11 shared library. Required, but the launcher "
+                + "supplies it from KIMBO11NG_LIB_FILE, so inside the image it is only typed to "
+                + "override the module discovered there.");
+    }
+
     /** The options every command that opens a slot accepts. */
     static List<Opt> slot() {
         return List.of(
-                arg("lib-file", "<path>", "PKCS#11 shared library. Required."),
+                libFile(),
                 arg("slot-ref", "<type>", "How --slot is interpreted: SLOT_NUMBER, SLOT_INDEX or "
                         + "SLOT_LABEL. Default SLOT_INDEX, which is what the crypto token defaults "
                         + "to."),

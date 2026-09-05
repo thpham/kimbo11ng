@@ -14,7 +14,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -112,6 +114,33 @@ class CliTest {
         assertEquals(Main.OK, Main.run(new String[] {"generatekeypair", "--help"}, env));
         assertTrue(stdout().contains("--key-spec"), stdout());
         assertTrue(stdout().contains("--alias"), stdout());
+    }
+
+    @Test
+    @DisplayName("every option carries help, and the token-wide ones read the same everywhere")
+    void everyOptionIsDocumented() {
+        // --alias and --key-spec are deliberately excluded: they name a different thing in each
+        // command ("alias to test", "alias for the new key"), and one shared wording would be
+        // vaguer than five specific ones. The options below are the same option every time, so a
+        // difference between two of them can only be drift — which is exactly what happened
+        // between the library-level commands and Opt.slot() before this test existed.
+        List<String> tokenWide = List.of("lib-file", "slot-ref", "slot", "property", "password");
+        Map<String, String> helpByOption = new HashMap<>();
+        for (Command command : Main.commands().values()) {
+            for (Opt option : command.options()) {
+                assertFalse(option.help().isBlank(),
+                        command.name() + " --" + option.name() + " has no help text");
+                if (!tokenWide.contains(option.name())) {
+                    continue;
+                }
+                String seen = helpByOption.putIfAbsent(option.name(), option.help());
+                assertTrue(seen == null || seen.equals(option.help()),
+                        "--" + option.name() + " is described two ways, one of them in "
+                                + command.name());
+            }
+        }
+        assertEquals(tokenWide.size(), helpByOption.size(),
+                "a token-wide option vanished from every command: " + helpByOption.keySet());
     }
 
     @Test

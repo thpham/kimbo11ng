@@ -22,10 +22,13 @@ import org.pkcs11.jacknji11.CKR;
 import org.pkcs11.jacknji11.CKS;
 import org.pkcs11.jacknji11.CKU;
 import org.pkcs11.jacknji11.CK_C_INITIALIZE_ARGS;
+import org.pkcs11.jacknji11.CK_INFO;
 import org.pkcs11.jacknji11.CK_MECHANISM_INFO;
 import org.pkcs11.jacknji11.CK_NOTIFY;
 import org.pkcs11.jacknji11.CK_SESSION_INFO;
+import org.pkcs11.jacknji11.CK_SLOT_INFO;
 import org.pkcs11.jacknji11.CK_TOKEN_INFO;
+import org.pkcs11.jacknji11.CK_VERSION;
 import org.pkcs11.jacknji11.LongRef;
 import org.pkcs11.jacknji11.NativePointer;
 import org.pkcs11.jacknji11.ULong;
@@ -421,6 +424,59 @@ public final class FakeToken extends UnsupportedNativeProvider {
         sessions.clear();
         loggedIn = false;
         return CKR.OK;
+    }
+
+    /**
+     * Library-level identity, which the CLI's {@code showinfo} reports before any slot is chosen.
+     *
+     * <p>Ungated on purpose: {@code C_GetInfo} describes the loaded {@code .so}, not the token, so
+     * it keeps answering when the HSM behind it has gone away. That asymmetry is exactly what makes
+     * the command useful for telling "the library did not load" from "the token is not there".
+     */
+    @Override
+    public synchronized long C_GetInfo(CK_INFO info) {
+        if (!initialized) {
+            return CKR.CRYPTOKI_NOT_INITIALIZED;
+        }
+        info.cryptokiVersion = version((byte) 3, (byte) 0);
+        info.manufacturerID = padded("kimbo11ng", 32);
+        info.libraryDescription = padded("FakeToken", 32);
+        info.libraryVersion = version((byte) 1, (byte) 0);
+        info.flags = 0;
+        return CKR.OK;
+    }
+
+    @Override
+    public synchronized long C_GetSlotInfo(long slot, CK_SLOT_INFO info) {
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
+        if (slot != slotId) {
+            return CKR.SLOT_ID_INVALID;
+        }
+        info.slotDescription = padded("FakeToken slot", 64);
+        info.manufacturerID = padded("kimbo11ng", 32);
+        info.flags = CK_SLOT_INFO.CKF_TOKEN_PRESENT;
+        info.hardwareVersion = version((byte) 1, (byte) 0);
+        info.firmwareVersion = version((byte) 1, (byte) 0);
+        return CKR.OK;
+    }
+
+    private static CK_VERSION version(byte major, byte minor) {
+        CK_VERSION version = new CK_VERSION();
+        version.major = major;
+        version.minor = minor;
+        return version;
+    }
+
+    /** A fixed-width, space-padded PKCS#11 string field. */
+    private static byte[] padded(String text, int width) {
+        byte[] field = new byte[width];
+        Arrays.fill(field, (byte) ' ');
+        byte[] source = text.getBytes(StandardCharsets.UTF_8);
+        System.arraycopy(source, 0, field, 0, Math.min(source.length, width));
+        return field;
     }
 
     @Override

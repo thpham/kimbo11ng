@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.p11;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
+import com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException;
 import com.keyfactor.util.keys.token.CryptoTokenOfflineException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,26 @@ class SessionPoolTest {
         CryptokiE ce = new CryptokiE(new Cryptoki(token));
         ce.Initialize();
         return new SessionPool(ce, 0L, config, clock);
+    }
+
+    @Test
+    @DisplayName("refuses an absent PIN without spending an attempt on the token")
+    void refusesAnAbsentPin() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+
+        // Both shapes an absent credential arrives in: EJBCA holding no auth code, and an operator
+        // aborting the CLI's prompt. Pins.encodeUtf8 turns either into an empty byte array, and an
+        // empty C_Login is not free — most tokens count it as a failed attempt, and a few in a row
+        // lock the user PIN. The assertion that matters is the call count, not the exception.
+        assertThrows(CryptoTokenAuthenticationFailedException.class, () -> pool.login(null));
+        assertThrows(CryptoTokenAuthenticationFailedException.class,
+                () -> pool.login(new char[0]));
+        assertEquals(0, token.loginCalls(),
+                "an absent PIN must never reach C_Login, or it costs a real attempt");
+
+        // And the guard does not stand in the way of a real credential.
+        pool.login("1234".toCharArray());
+        assertEquals(1, token.loginCalls());
     }
 
     @Test

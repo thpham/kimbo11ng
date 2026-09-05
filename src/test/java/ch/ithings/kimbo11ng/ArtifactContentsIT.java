@@ -9,7 +9,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -19,6 +21,8 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -41,11 +45,13 @@ import static org.junit.jupiter.api.Assertions.fail;
 class ArtifactContentsIT {
 
     private static Path artifact;
+    private static Path basedir;
     private static List<String> entries;
 
     @BeforeAll
     static void locateAndReadArtifact() throws IOException {
         Path target = Paths.get(System.getProperty("kimbo11ng.targetDir", "target"));
+        basedir = target.toAbsolutePath().getParent();
         try (DirectoryStream<Path> jars =
                 Files.newDirectoryStream(target, "*-jar-with-dependencies.jar")) {
             for (Path jar : jars) {
@@ -120,5 +126,37 @@ class ArtifactContentsIT {
                 "The PKCS11SlotListWrapperFactory service file is missing; EJBCA's Pkcs11SlotLabel "
                         + "would fall back to SunP11SlotListWrapperFactory.");
         assertNotNull(artifact);
+    }
+
+    /** The line in the launcher that names the jar it expects the build to have left in target/. */
+    private static final Pattern LAUNCHER_GLOB =
+            Pattern.compile("^\\s*for candidate in \"\\$repo\"/target/(\\S+); do\\s*$",
+                    Pattern.MULTILINE);
+
+    @Test
+    @DisplayName("carries the name cli/kimbo11ng-cli.sh expects in a build tree")
+    void launcherFindsTheBuiltArtifact() throws IOException {
+        // With no EJBCA install to borrow a classpath from, the launcher builds one out of target/.
+        // It used to look there for a "kimbo11ng.jar" the build has never written - the name was
+        // spelled once in the pom's finalName, once in the justfile's `artifact`, and a third time,
+        // wrongly, in the script - so that branch was dead and `just cli` never ran outside a
+        // container. The script now matches the suffix the jar-with-dependencies descriptor
+        // appends; this asserts that what it matches on is still what the build produces, since
+        // nothing else in the build would notice if the two drifted apart again.
+        Path launcher = basedir.resolve("cli").resolve("kimbo11ng-cli.sh");
+        assertTrue(Files.isRegularFile(launcher), () -> "Missing launcher " + launcher);
+        String script = new String(Files.readAllBytes(launcher), StandardCharsets.UTF_8);
+        Matcher m = LAUNCHER_GLOB.matcher(script);
+        assertTrue(m.find(),
+                () -> launcher + " no longer selects the build-tree jar with a `for candidate in "
+                        + "\"$repo\"/target/<glob>; do` loop, so this guard cannot see which name "
+                        + "it expects. Restore the loop or re-point this test at whatever replaced "
+                        + "it - do not delete the guard.");
+        String glob = m.group(1);
+        assertTrue(FileSystems.getDefault().getPathMatcher("glob:" + glob)
+                        .matches(artifact.getFileName()),
+                () -> "The launcher looks for target/" + glob + " but the build produced "
+                        + artifact.getFileName() + ". Outside a container that mismatch leaves the "
+                        + "CLI with no classpath at all. Fix the glob in " + launcher + ".");
     }
 }

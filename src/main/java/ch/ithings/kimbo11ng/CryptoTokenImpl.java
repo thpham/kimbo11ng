@@ -9,6 +9,7 @@ import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.Pkcs11Module;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
 import ch.ithings.kimbo11ng.p11.SessionLease;
+import ch.ithings.kimbo11ng.p11.SlotResolver;
 import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
@@ -842,32 +843,10 @@ public class CryptoTokenImpl {
         // Through the registry, so this shares one C_Initialize with the slot-list wrapper EJBCA
         // asks for separately. Previously resolving a slot and then opening it initialized the
         // same library two or three times.
-        Pkcs11Module module = modules.get(libPath);
-        long[] slots = module.slotList();
-        if (slots == null || slots.length == 0) {
-            throw new NoSuchSlotException("No slots found in library: " + libPath);
-        }
-        if (labelType == Pkcs11SlotLabelType.SLOT_NUMBER) {
-            return Long.parseLong(labelValue);
-        }
-        if (labelType == Pkcs11SlotLabelType.SLOT_INDEX) {
-            int index = Integer.parseInt(labelValue);
-            if (index < 0 || index >= slots.length) {
-                throw new NoSuchSlotException("Slot index " + index + " out of range (0-"
-                        + (slots.length - 1) + ")");
-            }
-            return slots[index];
-        }
-        if (labelType == Pkcs11SlotLabelType.SLOT_LABEL) {
-            for (long slotId : slots) {
-                char[] label = module.tokenLabel(slotId);
-                if (label != null && new String(label).trim().equals(labelValue.trim())) {
-                    return slotId;
-                }
-            }
-            throw new NoSuchSlotException("No slot found with label: " + labelValue);
-        }
-        return slots[0];
+        //
+        // The resolution itself lives in SlotResolver because the CLI has to reach the same answer;
+        // see that class for why a second implementation would be a hazard rather than a duplicate.
+        return SlotResolver.resolve(modules.get(libPath), labelType, labelValue);
     }
 
     /** Strips an optional {@code EC} prefix EJBCA sometimes prepends to a curve name. */

@@ -8,6 +8,7 @@ import ch.ithings.kimbo11ng.CryptoTokenImpl;
 import ch.ithings.kimbo11ng.fake.FakeToken;
 import ch.ithings.kimbo11ng.fake.TestBridge;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
+import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.pkcs11.jacknji11.CKA;
 
 import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
@@ -218,6 +220,50 @@ public abstract class ProfileConformanceKit {
         } else {
             assertTrue(entry.canSign(), entry.canonicalName() + " is a signature algorithm");
         }
+    }
+
+    /**
+     * The declared operations and the generation template say the same thing.
+     *
+     * <p>Two descriptions of one fact, and they had already diverged in what they were used for:
+     * the CLI's capability table reads {@code ops()} while generation reads the template, so an
+     * entry declaring {@code SIGN} whose template asked for {@code CKA_ENCRYPT} would advertise a
+     * signing key and create an encryption one. Asserted for every profile rather than for
+     * pkcs11v32 alone, because a vendor profile is exactly where the two would be filled in by
+     * different hands.
+     *
+     * <p>{@code ENCAPSULATE} and {@code DECAPSULATE} map onto {@code CKA_ENCRYPT} and
+     * {@code CKA_DECRYPT} here, and that mapping is the reason this test spells the pairs out
+     * rather than comparing names: PKCS#11 v3.2 gives a KEM its own {@code CKA_ENCAPSULATE}
+     * (0x633) and {@code CKA_DECAPSULATE} (0x634), which jacknji11 1.3.1 does not define, so
+     * {@code KeyTemplates} expresses encapsulation through the encryption attributes. Measured
+     * against SoftHSMv3, which accepts that and then sets the correct pair itself. If the
+     * templates ever move to the v3.2 attributes, this is the test that has to be updated with
+     * them, deliberately.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("everyEntry")
+    @DisplayName("declares the operations its generation template actually asks for")
+    void opsMatchTheGenerationTemplate(AlgorithmEntry entry) {
+        byte[] sample = "sample".getBytes(StandardCharsets.UTF_8);
+        KeyTemplates.Pair pair = KeyTemplates.pqc(sample, sample, entry, profile());
+        boolean sign = entry.ops().contains(AlgorithmEntry.KeyOp.SIGN);
+        assertEquals(sign, isSet(pair.privateTemplate(), CKA.SIGN),
+                entry.canonicalName() + ": CKA_SIGN on the private template must match ops()");
+        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.VERIFY),
+                isSet(pair.publicTemplate(), CKA.VERIFY),
+                entry.canonicalName() + ": CKA_VERIFY on the public template must match ops()");
+        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.ENCAPSULATE),
+                isSet(pair.publicTemplate(), CKA.ENCRYPT),
+                entry.canonicalName() + ": ENCAPSULATE is requested as CKA_ENCRYPT");
+        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.DECAPSULATE),
+                isSet(pair.privateTemplate(), CKA.DECRYPT),
+                entry.canonicalName() + ": DECAPSULATE is requested as CKA_DECRYPT");
+    }
+
+    private static boolean isSet(java.util.List<CKA> template, long type) {
+        return template.stream()
+                .anyMatch(a -> a.type == type && Boolean.TRUE.equals(a.getValueBool()));
     }
 
     @ParameterizedTest(name = "{0}")

@@ -218,9 +218,24 @@ public final class SessionPool {
      * in to the same slot already — and is not an error.
      *
      * @param pin zeroed by the caller; this method copies nothing that outlives it
+     * @throws CryptoTokenAuthenticationFailedException if {@code pin} is absent or empty, without
+     *         contacting the token — see below
      */
     public void login(char[] pin)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
+        // An absent credential is refused here rather than sent on. Pins.encodeUtf8 turns null into
+        // an empty array, and C_Login with an empty PIN is not a no-op: most tokens count it as a
+        // failed authentication attempt, and a handful of those in a row lock the user PIN. Both
+        // callers can produce one — the CLI when an operator aborts the prompt, and
+        // CryptoTokenImpl.activate when EJBCA holds no auth code — so the guard belongs at the one
+        // place they share. A token with CKF_PROTECTED_AUTHENTICATION_PATH would legitimately log
+        // in with no PIN, but nothing in this project supports one, and adding that support is
+        // where this check would need revisiting.
+        if (pin == null || pin.length == 0) {
+            throw new CryptoTokenAuthenticationFailedException("No PIN was supplied for slot "
+                    + slotId + ". Refusing to send an empty credential to the token, because it"
+                    + " would count as a failed attempt against the user PIN.");
+        }
         byte[] pinBytes = Pins.encodeUtf8(pin);
         try {
             try {

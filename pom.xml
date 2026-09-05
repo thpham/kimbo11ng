@@ -307,6 +307,15 @@
                     <archive>
                         <manifest>
                             <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                            <!-- The CLI entry point. Note that despite the assembly's name this
+                                 jar bundles nothing: every dependency is 'provided', because the
+                                 jar's first job is to be dropped into ejbca.ear/lib where all of
+                                 them already exist. So 'java -jar' alone will not run - the
+                                 classpath comes from an EJBCA install, which is what
+                                 cli/kimbo11ng-cli.sh assembles. Declaring Main-Class anyway means
+                                 'java -cp ... ch.ithings...cli.Main' and the script agree on one
+                                 entry point rather than two spellings of it. -->
+                            <mainClass>ch.ithings.kimbo11ng.cli.Main</mainClass>
                         </manifest>
                     </archive>
                 </configuration>

@@ -460,6 +460,67 @@ class EjbcaContainerIT {
         return apiClient;
     }
 
+    // ─── The extension point everything else rests on ─────────────────────────
+
+    /** Where the Dockerfile drops our jar, and the class name EJBCA looks for inside it. */
+    private static final String EAR_LIB = "/opt/keyfactor/ejbca/dist/ejbca.ear/lib";
+    private static final String HOOK_CLASS =
+            "org/cesecore/keys/token/p11ng/cryptotoken/Pkcs11NgCryptoToken.class";
+    /**
+     * The SoftHSM token PIN. Passed for completeness only: {@code provisionTestHsmToken} stores an
+     * auto-activation PIN, so EJBCA answers "the supplied PIN was ignored" either way.
+     */
+    private static final String SOFTHSM_PIN = "1234";
+
+    /**
+     * Checks the one thing every other test in this file silently assumes: that this EJBCA build
+     * can still find and construct our crypto token type.
+     *
+     * <p>It adds no coverage — the hook is already proved by everything below working. What it adds
+     * is a name for the failure. EJBCA CE ships <em>no</em> {@code p11ng} package of its own: the
+     * only trace of it in a stock image is the class-name string inside {@code CryptoTokenFactory},
+     * which {@code createCryptoToken} feeds to a plain {@code Class.forName} and which returns
+     * {@code null} on failure. So if that registration is ever removed or licence-gated, this jar
+     * stops being reachable and the symptom surfaces much later as "no such token", "CA creation
+     * failed" or "no valid signing algorithm found" — messages that all point at our code rather
+     * than at the missing hook.
+     *
+     * <p>That is not hypothetical. ejbca.org states that as of EJBCA 9.6.2 all use of HSM Crypto
+     * Tokens requires Enterprise Edition. No CE 9.6.2 exists yet, so this passes today; the point
+     * is that the first run against a newer CE should say which brick was pulled out.
+     */
+    @Test
+    @Order(0)
+    void ejbcaCanStillConstructOurCryptoTokenType() throws Exception {
+        ContainerState ejbca = ejbcaContainer();
+
+        // 1. Our jar is deployed and still carries the fully-qualified name EJBCA looks up. Guards
+        //    the mistakes on our side of the contract: a failed deploy, or a package rename.
+        //
+        //    grep straight at the jar rather than unzip, because the EJBCA image has neither
+        //    unzip nor jar nor python3. Zip keeps entry names uncompressed in the local header and
+        //    again in the central directory, so a plain byte search finds them — which is also why
+        //    this asserts "present" rather than an exact count.
+        org.testcontainers.containers.Container.ExecResult deployed = ejbca.execInContainer(
+                "sh", "-c", "grep -q '" + HOOK_CLASS + "' " + EAR_LIB + "/kimbo11ng-*.jar");
+        assertEquals(0, deployed.getExitCode(),
+                "The kimbo11ng jar in " + EAR_LIB + " does not contain " + HOOK_CLASS
+                + ". EJBCA resolves that exact name reflectively, so nothing else here can work."
+                + "\nstdout: " + deployed.getStdout() + "\nstderr: " + deployed.getStderr());
+
+        // 2. EJBCA actually resolved it. Activation only reaches the token if CryptoTokenFactory
+        //    constructed one, so a clean activate is proof the reflective lookup succeeded.
+        org.testcontainers.containers.Container.ExecResult activated = ejbca.execInContainer(
+                "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "activate", "TestHSM", SOFTHSM_PIN);
+        assertEquals(0, activated.getExitCode(),
+                "EJBCA could not activate the TestHSM token, which means it could not construct"
+                + " org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken."
+                + " The p11ng extension point may have been removed or licence-gated in this EJBCA"
+                + " build — see the EJBCA 9.6.2 note in docs/JACKNJI11_PROVENANCE.md. Every other"
+                + " failure in this class is likely a consequence of this one."
+                + "\nstdout: " + activated.getStdout() + "\nstderr: " + activated.getStderr());
+    }
+
     // ─── REST API tests ───────────────────────────────────────────────────────
 
     @Test

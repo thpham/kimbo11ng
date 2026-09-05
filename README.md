@@ -144,7 +144,7 @@ Testcontainers:
 
 ```bash
 mvn verify               # 583 unit tests + 4 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 23 integration tests (~4 min)
+mvn verify -Pit          # + 24 integration tests (~4 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
@@ -193,7 +193,7 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 23 tests,
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 24 tests,
                                      #   HsmConformanceIT — real-hardware contract)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)

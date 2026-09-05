@@ -175,7 +175,7 @@ class CliObjectCommandsTest {
         // The old behaviour: a full table of "? - <blank> <blank>" rows and exit 0, which reads as
         // "the objects are there and carry no labels" — the opposite of what happened.
         assertFalse(stdout().contains("?"), stdout());
-        assertTrue(stderr().contains("CKR_SESSION_HANDLE_INVALID"), stderr());
+        assertTrue(stderr().contains("SESSION_HANDLE_INVALID"), stderr());
     }
 
     /**

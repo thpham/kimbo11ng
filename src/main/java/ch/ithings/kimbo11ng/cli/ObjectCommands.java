@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.cli;
 
+import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
@@ -12,6 +13,7 @@ import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKK;
 import org.pkcs11.jacknji11.CKO;
+import org.pkcs11.jacknji11.CKR;
 import org.pkcs11.jacknji11.CryptokiE;
 
 import java.io.PrintStream;
@@ -66,10 +68,10 @@ final class ObjectCommands {
                         out.println(row("HANDLE", "CLASS", "KEY TYPE", "LABEL", "ID"));
                         for (long object : objects) {
                             out.println(row(Long.toString(object),
-                                    className(ce, lease.session(), object),
-                                    keyType(ce, lease.session(), object),
-                                    string(ce, lease.session(), object, CKA.LABEL),
-                                    hex(ce, lease.session(), object, CKA.ID)));
+                                    className(ce, lease, object),
+                                    keyType(ce, lease, object),
+                                    string(ce, lease, object, CKA.LABEL),
+                                    hex(ce, lease, object, CKA.ID)));
                         }
                     }
                 });
@@ -136,7 +138,7 @@ final class ObjectCommands {
                         } else {
                             String alias = args.require("alias");
                             for (long object : ce.FindObjects(lease.session())) {
-                                if (alias.equals(string(ce, lease.session(), object, CKA.LABEL))) {
+                                if (alias.equals(string(ce, lease, object, CKA.LABEL))) {
                                     targets.add(object);
                                 }
                             }
@@ -150,21 +152,29 @@ final class ObjectCommands {
                             env.out().println();
                         }
                         for (long object : targets) {
-                            printAttributes(env.out(), ce, lease.session(), object);
+                            printAttributes(env.out(), ce, lease, object);
                         }
                     }
                 });
     }
 
-    private static void printAttributes(PrintStream out, CryptokiE ce, long session, long object) {
-        out.println("Object " + object);
+    private static void printAttributes(PrintStream out, CryptokiE ce, SessionLease lease,
+            long object) throws CliException {
+        List<String> lines = new ArrayList<>();
         for (long type : INTERESTING) {
-            String rendered = attribute(ce, session, object, type);
+            String rendered = attribute(ce, lease, object, type);
             if (rendered != null) {
                 // jacknji11's L2S drops the CKA_ prefix; the specification's own spelling is what
                 // an operator will be reading the vendor documentation against.
-                out.println("  " + InfoCommands.pad("CKA_" + CKA.L2S(type), 24) + " " + rendered);
+                lines.add("  " + InfoCommands.pad("CKA_" + CKA.L2S(type), 24) + " " + rendered);
             }
+        }
+        // The heading only once every read has come back. Printed first, it appears above nothing
+        // when the handle names no object, and a typo then looks exactly like a real object that
+        // happens to carry no attributes.
+        out.println("Object " + object);
+        for (String line : lines) {
+            out.println(line);
         }
         out.println();
     }
@@ -176,13 +186,26 @@ final class ObjectCommands {
      * an attribute an object does not carry fails the whole batch on most tokens, and a
      * {@code CKA_SENSITIVE} key legitimately refuses several of these. Failing per attribute is what
      * lets the rest of the object still be printed.
+     *
+     * @throws CliException if the read failed for a reason that is not "this object has no such
+     *                      attribute" — a handle that names nothing, or a session that has died
      */
-    private static String attribute(CryptokiE ce, long session, long object, long type) {
+    private static String attribute(CryptokiE ce, SessionLease lease, long object, long type)
+            throws CliException {
         CKA value;
         try {
-            value = ce.GetAttributeValue(session, object, type);
+            value = ce.GetAttributeValue(lease.session(), object, type);
         } catch (RuntimeException e) {
-            return null;
+            // CKR_ATTRIBUTE_TYPE_INVALID and CKR_ATTRIBUTE_SENSITIVE are not failures: PKCS#11
+            // v2.40 §5.7 says so explicitly, and a public key with no CKA_SENSITIVE is the normal
+            // case. Everything else is a statement about the object or the session, and reporting
+            // it as an absent attribute is what let a dead connection print as a slot full of
+            // unlabelled objects.
+            if (Pkcs11Errors.is(e, CKR.ATTRIBUTE_TYPE_INVALID)
+                    || Pkcs11Errors.is(e, CKR.ATTRIBUTE_SENSITIVE)) {
+                return null;
+            }
+            throw attributeFailure(e, lease, object, type);
         }
         if (value == null || !value.hasValue()) {
             return null;
@@ -207,6 +230,35 @@ final class ObjectCommands {
         return flag == null ? toHex(value.getValue()) : flag.toString();
     }
 
+    /**
+     * What to tell the operator about a {@code C_GetAttributeValue} that failed for real, and what
+     * to do with the session it failed on.
+     *
+     * <p>Classified through {@link Pkcs11Errors} rather than by inspecting the message, so a
+     * dropped Luna connection lands in the same bucket here as it does in the signing paths. A
+     * stale object handle leaves the session usable and the lease is kept; anything the classifier
+     * calls retryable or offline means the session or the device is the problem, and returning
+     * that session to the pool hands the next borrower a connection the token has already given up
+     * on.
+     */
+    private static CliException attributeFailure(RuntimeException cause, SessionLease lease,
+            long object, long type) {
+        if (Pkcs11Errors.is(cause, CKR.OBJECT_HANDLE_INVALID)) {
+            return new CliException("No object with handle " + object + " on the token"
+                    + " (CKR_OBJECT_HANDLE_INVALID). Handles are assigned per session and change"
+                    + " when the token is reinitialised — run listobjects to see the ones this"
+                    + " slot holds now.", cause);
+        }
+        Pkcs11Errors.Kind kind = Pkcs11Errors.classify(cause);
+        if (kind == Pkcs11Errors.Kind.RETRYABLE || kind == Pkcs11Errors.Kind.OFFLINE) {
+            lease.invalidate();
+        }
+        return new CliException("Reading CKA_" + CKA.L2S(type) + " from object " + object
+                + " failed" + Pkcs11Errors.describe(cause) + ". Nothing below this point was read,"
+                + " so treat the output above as incomplete rather than as the token's contents."
+                + " Check that the HSM is reachable and run the command again.", cause);
+    }
+
     private static Command deleteObject() {
         return Command.sessionLevel("deleteobject",
                 "Removes a key by alias, or raw objects by handle.",
@@ -224,8 +276,24 @@ final class ObjectCommands {
                     try (TokenHandle handle = TokenHandle.session(env, args)) {
                         if (args.has("alias")) {
                             String alias = args.require("alias");
+                            // Membership first. The key store SPI logs a warning and returns
+                            // normally for an alias it does not hold, and log4j is unconfigured in
+                            // this tool, so a mistyped alias would otherwise print a deletion that
+                            // never happened and exit 0 — the one answer an operator must not get
+                            // from a destructive command.
+                            if (!Collections.list(handle.keyStore().aliases()).contains(alias)) {
+                                throw new CliException("No key on the token under alias '" + alias
+                                        + "', so nothing was deleted. Run listkeypairs to see the"
+                                        + " aliases this slot publishes, or deleteobject --object"
+                                        + " <handle> to destroy a raw object that listobjects"
+                                        + " reports.");
+                            }
+                            boolean secret = handle.token().isSecretKey(alias);
                             handle.token().deleteEntry(alias);
-                            env.out().println("Deleted alias " + alias);
+                            env.out().println("Deleted alias " + alias + ": " + (secret
+                                    ? "the secret key object on the token."
+                                    : "the private key, its public half and any certificate"
+                                            + " carried under that alias."));
                             return;
                         }
                         try (SessionLease lease = handle.slot().borrow()) {
@@ -251,23 +319,27 @@ final class ObjectCommands {
                 + InfoCommands.pad(keyType, 18) + InfoCommands.pad(label, 30) + id;
     }
 
-    private static String className(CryptokiE ce, long session, long object) {
-        String rendered = attribute(ce, session, object, CKA.CLASS);
+    private static String className(CryptokiE ce, SessionLease lease, long object)
+            throws CliException {
+        String rendered = attribute(ce, lease, object, CKA.CLASS);
         return rendered == null ? "?" : rendered.toLowerCase(Locale.ROOT);
     }
 
-    private static String keyType(CryptokiE ce, long session, long object) {
-        String rendered = attribute(ce, session, object, CKA.KEY_TYPE);
+    private static String keyType(CryptokiE ce, SessionLease lease, long object)
+            throws CliException {
+        String rendered = attribute(ce, lease, object, CKA.KEY_TYPE);
         return rendered == null ? "-" : rendered;
     }
 
-    private static String string(CryptokiE ce, long session, long object, long type) {
-        String rendered = attribute(ce, session, object, type);
+    private static String string(CryptokiE ce, SessionLease lease, long object, long type)
+            throws CliException {
+        String rendered = attribute(ce, lease, object, type);
         return rendered == null ? "" : rendered;
     }
 
-    private static String hex(CryptokiE ce, long session, long object, long type) {
-        String rendered = attribute(ce, session, object, type);
+    private static String hex(CryptokiE ce, SessionLease lease, long object, long type)
+            throws CliException {
+        String rendered = attribute(ce, lease, object, type);
         return rendered == null ? "" : rendered;
     }
 

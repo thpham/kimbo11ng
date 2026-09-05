@@ -106,11 +106,55 @@ public final class Main {
      *
      * <p>Found by running the tool against real SoftHSMv3 rather than by reading it.
      *
-     * <p>Through EJBCA's own helper rather than {@code Security.addProvider}, so the provider set is
-     * assembled the same way and in the same order the CA assembles it.
+     * <p>Through EJBCA's own helper first, so the provider set is assembled the same way and in the
+     * same order the CA assembles it — but not <em>only</em> through it. That helper touches
+     * {@code CryptoProviderRegistry}, whose static initialiser runs a {@link java.util.ServiceLoader}
+     * over every {@code com.keyfactor.util.crypto.provider.CryptoProvider} on the classpath.
+     * cesecore-common declares one that needs {@code org.ejbca.cvc.CVCProvider}, and cert-cvc is
+     * not on a classpath assembled outside the application server. The loader then throws
+     * {@link java.util.ServiceConfigurationError} — an {@code Error}, so it sails past every
+     * {@code catch (Exception)} between here and {@code main}, and the tool dies on a stack trace
+     * before parsing its first argument.
+     *
+     * <p>That is the same shape of defect the review found in {@code Pkcs11Module}: a
+     * {@code LinkageError} crossing a boundary built for exceptions. The answer is the same. What
+     * this method actually has to guarantee is that BouncyCastle is registered, because that is
+     * where every post-quantum {@code KeyFactory} comes from; assembling the rest of EJBCA's
+     * provider set is a nicety that a standalone tool can do without.
      */
     private static void installCryptoProvider() {
-        com.keyfactor.util.CryptoProviderTools.installBCProviderIfNotAvailable();
+        try {
+            com.keyfactor.util.CryptoProviderTools.installBCProviderIfNotAvailable();
+            return;
+        } catch (Exception | LinkageError | java.util.ServiceConfigurationError e) {
+            // Nothing is logged here: log4j is normally unconfigured under the CLI, and the
+            // fallback below restores the only property that matters. If it too fails, the
+            // exception carries both causes to the operator.
+            installBouncyCastleDirectly(e);
+        }
+    }
+
+    /**
+     * The fallback: BouncyCastle alone, registered by hand.
+     *
+     * @param cause why EJBCA's own installer could not be used, kept so a failure here reports both
+     */
+    private static void installBouncyCastleDirectly(Throwable cause) {
+        if (java.security.Security.getProvider(
+                org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) != null) {
+            return;
+        }
+        try {
+            java.security.Security.addProvider(
+                    new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        } catch (Exception | LinkageError e) {
+            IllegalStateException failure = new IllegalStateException(
+                    "Could not register BouncyCastle, so no post-quantum algorithm can be read back"
+                            + " and every one of them would be reported as unsupported. Check that"
+                            + " bcprov is on the classpath.", e);
+            failure.addSuppressed(cause);
+            throw failure;
+        }
     }
 
     private static boolean isHelp(String token) {
@@ -124,7 +168,7 @@ public final class Main {
         String indent = "";
         while (current != null) {
             message.append(indent).append(current.getClass().getSimpleName()).append(": ")
-                    .append(current.getMessage() == null ? "(no message)" : current.getMessage());
+                    .append(shorten(current.getMessage()));
             Throwable next = current.getCause();
             if (next == current) {
                 break;
@@ -134,6 +178,33 @@ public final class Main {
         }
         return message.toString();
     }
+
+    /**
+     * How much of one cause's message is worth printing.
+     *
+     * <p>The commonest failure this tool reports is a PKCS#11 module that will not load, and JNA's
+     * message for that embeds the entire classpath — three kilobytes of jar paths, repeated once
+     * per nesting level, around the twenty characters that say which library and why. Printing it
+     * whole buries the answer in the noise, which on a diagnostic tool is its own defect.
+     *
+     * <p>Truncating rather than filtering, and generously: the useful part of every message in this
+     * chain is at the front, and a rule that tried to recognise JNA's phrasing would go stale the
+     * first time JNA reworded it.
+     */
+    private static String shorten(String message) {
+        if (message == null) {
+            return "(no message)";
+        }
+        String collapsed = message.strip();
+        if (collapsed.length() <= MAX_CAUSE_CHARS) {
+            return collapsed;
+        }
+        return collapsed.substring(0, MAX_CAUSE_CHARS) + "… (" + collapsed.length()
+                + " characters in all)";
+    }
+
+    /** Long enough for any CKR line and for JNA's "cannot load X" prefix; short of its classpath. */
+    private static final int MAX_CAUSE_CHARS = 320;
 
     static Map<String, Command> commands() {
         List<Command> all = new ArrayList<>();

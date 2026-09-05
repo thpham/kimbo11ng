@@ -73,17 +73,25 @@ final class TokenHandle implements AutoCloseable {
      * copy that outlives the call is the one PKCS#11 holds inside the token.
      */
     static TokenHandle session(CliEnv env, Args args) throws Exception {
+        // The slot is opened before the PIN is asked for, and deliberately: it is what validates
+        // --lib-file and --slot, and prompting an operator for a credential only to then tell them
+        // they mistyped the library path is the wrong order to fail in. The cost is that every
+        // failure from here on has to close the handle, since nothing else holds a reference to it.
         TokenHandle handle = slot(env, args);
-        char[] pin = env.pin(args);
+        char[] pin;
+        try {
+            pin = env.pin(args);
+        } catch (Exception e) {
+            handle.close();
+            throw e;
+        }
         try {
             handle.token.activate(pin);
         } catch (Exception e) {
             handle.close();
             throw e;
         } finally {
-            if (pin != null) {
-                Arrays.fill(pin, '\0');
-            }
+            Arrays.fill(pin, '\0');
         }
         return handle;
     }

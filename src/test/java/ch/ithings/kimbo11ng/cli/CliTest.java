@@ -420,6 +420,21 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("a runaway cause message is truncated, not printed whole")
+    void describeTruncatesLongCauses() {
+        // JNA's "native library not found" message embeds the whole classpath, once per nesting
+        // level. That is the message an operator sees for the commonest failure this tool reports —
+        // a PKCS#11 module that will not load — and printing it whole buries the one line that
+        // says which library and why.
+        String huge = "Native library (x.so) not found in resource path (" + "j".repeat(4000) + ")";
+        String described = Main.describe(new IllegalStateException(huge));
+        assertTrue(described.startsWith("IllegalStateException: Native library (x.so) not found"),
+                described);
+        assertTrue(described.contains("characters in all"), described);
+        assertTrue(described.length() < 500, "still " + described.length() + " characters");
+    }
+
+    @Test
     @DisplayName("the failure report carries the whole cause chain")
     void describeChainsCauses() {
         String described = Main.describe(

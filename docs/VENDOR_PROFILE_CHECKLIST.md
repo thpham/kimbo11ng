@@ -62,8 +62,8 @@ passes the kit unmodified.
 
 ```bash
 mvn verify -Pit \
-  -Dkimbo11ng.it.lib=/usr/safenet/lunaclient/lib/libCryptoki2_64.so \
-  -Dkimbo11ng.it.slot=0 \
+  -Dkimbo11ng.it.lib=/usr/local/luna/libs/64/libCryptoki2.so \
+  -Dkimbo11ng.it.slotType=SLOT_LABEL -Dkimbo11ng.it.slot=my-partition \
   -Dkimbo11ng.it.pin=userpin
 ```
 
@@ -72,7 +72,90 @@ Without `kimbo11ng.it.lib` it skips. The same assertions run on every build agai
 is the answer to everything the fake can only assume — above all, whether a post-quantum signature
 made on the HSM verifies with BouncyCastle.
 
-## 5. Divergence matrix: which fake knob simulates which real behaviour
+`slotType` defaults to `SLOT_INDEX`, which needs no prior knowledge of the token. Prefer
+`SLOT_LABEL` on hardware: a partition keeps its name across an appliance reboot, and slot numbering
+does not.
+
+### And cross-check against the vendor's own provider
+
+Where the vendor ships a JCA provider, add it and `LunaJspCrossCheckIT` runs too:
+
+```bash
+  -Dkimbo11ng.it.luna.jsp=/usr/local/luna/jsp/LunaProvider.jar
+```
+
+It does three things on the one partition: proves both stacks are addressing the same token, has
+Thales verify a signature kimbo11ng made, and — the one that matters — has `LunaProvider` generate
+a key which kimbo11ng then reads back, asserting the OID and public-key length the profile claims.
+**That last test is the only one in this repository that can falsify a vendor table**, because
+neither side of the comparison came from the table.
+
+It is also the answer to the first question Thales support asks. `LunaProvider.jar` is loaded from
+the given path through a `URLClassLoader` and used through standard JCA interfaces, so there is no
+build dependency on a jar nobody can download.
+
+## 5. Running EJBCA itself against the HSM
+
+Nothing Thales-owned ships in `ghcr.io/thpham/ejbca-ce`. The client is side-mounted, discovered at
+start-up by `docker/luna-discover.sh`, and absent by default:
+
+```bash
+export LUNA_HOST_DIR=/path/to/luna-minimal-10.9.2      # extracted tarball
+export LUNA_HOST_CONFIG=/path/to/luna-config           # Chrystoki.conf + certs
+just luna-up
+just luna-status                                       # what the container found
+LUNA_PARTITION=my-partition LUNA_PIN=userpin just create-luna-token
+```
+
+The container arms itself only when `$LUNA_CLIENT_DIR` (default `/usr/local/luna`) holds a
+`libCryptoki2*.so`. It then exports `ChrystokiConfigurationPath` and prepends the client's library
+directory to `LD_LIBRARY_PATH` — which is also how the JNI bridge behind the JSP provider is found,
+since HotSpot seeds `java.library.path` from `LD_LIBRARY_PATH`. `LunaProvider.jar` is linked into
+`clientToolBox/lib` for diagnostics and deliberately **not** onto EJBCA's EAR classpath: EJBCA CE
+9.3.7 has no crypto token that could use it (`CryptoTokenFactory` knows Soft, PKCS11, Pkcs11Ng,
+Azure, AWS KMS, Fortanix, Securosys and PrimeCAToken), so it would only add a JNI-loading jar that
+throws on deploy when the `.so` is absent.
+
+### The four things that actually bite
+
+1. **The NTLS client certificate is bound to a hostname.** `docker-compose.luna.yml` pins
+   `hostname:` for this reason; a generated container hostname means re-registering the client on
+   the appliance every run.
+2. **`ntls ipcheck` must be disabled on the appliance** when several clients share one source IP —
+   which is what a compose stack looks like from outside. Leave it enabled only if each container
+   has its own routable address.
+3. **`Chrystoki.conf`'s certificate and client-token paths must point at the in-container mount**,
+   not at wherever they were on the machine that registered the client. Thales's guidance is to
+   change those paths and nothing else in the file. Config and certs are always a runtime mount,
+   never baked.
+4. **`mvn verify -Pit` runs in the Maven JVM, not in the container.** The hardware tests therefore
+   need the client on the *host*, with `ChrystokiConfigurationPath` and `LD_LIBRARY_PATH` exported
+   in the shell before Maven starts. There is no macOS Luna client, so on a Mac the hardware run
+   has to happen inside a Linux container.
+
+### Registering a client on a Luna Network HSM
+
+From inside the container, with the client mounted (`lunacm` and `vtl` are on `PATH`):
+
+```bash
+vtl createCert -n <client-name>                      # writes into the mounted config dir
+scp <config>/<client-name>.pem admin@<hsm>:          # to the appliance
+scp admin@<hsm>:server.pem <config>/                 # and back
+vtl addServer -c <config>/server.pem -n <hsm-ip>
+# then on the appliance, in LunaSH:
+#   client register -client <client-name> -ip <container-ip>
+#   client assignPartition -client <client-name> -partition <partition>
+lunacm -e "slot list"                                # the partition should now appear
+```
+
+**DPoD Luna Cloud HSM skips all of it.** The `setup-<client>.zip` from the DPoD portal contains a
+`Chrystoki.conf` already bound to a partition plus the client certificates. Untar the Linux client
+inside it, point `LUNA_HOST_DIR` at the result and `LUNA_HOST_CONFIG` at its config directory, and
+none of the four notes above apply. Confirm PQC availability on your DPoD service first: ML-DSA and
+ML-KEM are documented for on-premises firmware 7.9.0, and DPoD does not necessarily track appliance
+firmware.
+
+## 6. Divergence matrix: which fake knob simulates which real behaviour
 
 The fake exists to make hardware behaviours reproducible without hardware. Each knob below was
 added because some token does the thing, and each is the reason a corresponding production path

@@ -1,8 +1,57 @@
 #!/bin/bash
 # Sourced by EJBCA's start.sh for HSM-specific environment setup.
 # Place this file under /opt/<dir>/environment-hsm so start.sh picks it up.
+#
+# start.sh sources the FIRST /opt/*/environment-hsm it finds and then breaks, so there is exactly
+# one of these and it has to cover every HSM the image supports. That is also why the Luna client
+# is mounted at /usr/local/luna rather than /opt/luna: /opt/luna would sort ahead of /opt/softhsm
+# and, if the mounted tree ever contained a file with this name, would shadow this script entirely.
+#
+# Do NOT set JAVA_OPTS_CUSTOM here. start.sh builds it further down behind `if [ -z ... ]`, so any
+# value set at this point silently skips the container-memory heap sizing.
 
-export SOFTHSM2_CONF=/etc/softhsmv3.conf
+# ---- SoftHSMv3: the built-in token, on unless explicitly disabled --------------------------------
+
+if [ "${SOFTHSM_ENABLED:-true}" = "true" ]; then
+    export SOFTHSM2_CONF=/etc/softhsmv3.conf
+    log "INFO" "SoftHSMv3 environment loaded. SOFTHSM2_CONF=${SOFTHSM2_CONF}"
+else
+    log "INFO" "SoftHSMv3 disabled by SOFTHSM_ENABLED=${SOFTHSM_ENABLED}."
+fi
+
 export LD_LIBRARY_PATH=/opt/openssl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-log "INFO" "SoftHSMv3 environment loaded. SOFTHSM2_CONF=${SOFTHSM2_CONF}"
+# ---- Thales Luna: only if a client tree has been mounted ----------------------------------------
+
+if [ -r /opt/keyfactor/bin/luna-discover.sh ]; then
+    source /opt/keyfactor/bin/luna-discover.sh
+    luna_discover
+
+    if [ "${LUNA_PRESENT}" = "1" ]; then
+        # Chrystoki.conf carries the appliance address and the paths to the client certificates, so
+        # it is always part of the runtime mount and never baked into the image.
+        export ChrystokiConfigurationPath="${LUNA_CHRYSTOKI_PATH:-${LUNA_CLIENT_DIR}/config}"
+
+        # One export covers three things: the Cryptoki library's own dependencies, and — because
+        # HotSpot seeds java.library.path from LD_LIBRARY_PATH — the JNI bridge behind the JSP
+        # provider, without touching JAVA_OPTS_CUSTOM.
+        export LD_LIBRARY_PATH="${LUNA_LIBDIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        if [ -n "${LUNA_JSP_LIBDIR}" ] && [ "${LUNA_JSP_LIBDIR}" != "${LUNA_LIBDIR}" ]; then
+            export LD_LIBRARY_PATH="${LUNA_JSP_LIBDIR}:${LD_LIBRARY_PATH}"
+        fi
+
+        # lunacm and vtl on PATH, so diagnosing a connection is a docker exec away.
+        [ -n "${LUNA_BINDIR}" ] && export PATH="${LUNA_BINDIR}:${PATH}"
+
+        export LUNA_CLIENT_DIR LUNA_CRYPTOKI LUNA_JSP_JAR
+
+        if [ ! -r "${ChrystokiConfigurationPath}/Chrystoki.conf" ]; then
+            # Not fatal: the client is still loadable, and the operator may be about to run
+            # `vtl createCert` inside the container. But nothing will connect until this exists.
+            log "WARN" "No Chrystoki.conf under ${ChrystokiConfigurationPath}. The Luna library will load but cannot reach an appliance."
+        fi
+        log "INFO" "$(luna_summary)"
+    else
+        log "INFO" "$(luna_summary)"
+    fi
+fi

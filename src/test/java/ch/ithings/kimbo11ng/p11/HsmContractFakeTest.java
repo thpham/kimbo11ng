@@ -38,8 +38,8 @@ class HsmContractFakeTest extends HsmContract {
     }
 
     @Override
-    protected long slotIndex() {
-        return 0L;
+    protected String slotLabelValue() {
+        return "0";
     }
 
     @Override

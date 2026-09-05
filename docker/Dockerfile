@@ -90,15 +90,26 @@ COPY --from=softhsm-builder /usr/local/bin           /usr/local/bin
 COPY docker/softhsmv3.conf    /etc/softhsmv3.conf
 COPY docker/environment-hsm   /opt/softhsm/environment-hsm
 
-# Register SoftHSMv3 as a PKCS#11 library in EJBCA Admin UI
+# Register the PKCS#11 libraries offered in the EJBCA Admin UI. The Luna entry is deliberately
+# dangling in this image: nothing Thales-owned ships here, and the file appears only when a client
+# tree is mounted at /usr/local/luna. Stock EJBCA does the same for index 255 (P11 Proxy).
 RUN echo '' >> /opt/keyfactor/ejbca/conf/web.properties && \
     echo '# SoftHSMv3 (PQC-enabled)' >> /opt/keyfactor/ejbca/conf/web.properties && \
     echo 'cryptotoken.p11.lib.10.name=SoftHSMv3' >> /opt/keyfactor/ejbca/conf/web.properties && \
-    echo 'cryptotoken.p11.lib.10.file=/usr/local/lib/softhsm/libsofthsmv3.so' >> /opt/keyfactor/ejbca/conf/web.properties
+    echo 'cryptotoken.p11.lib.10.file=/usr/local/lib/softhsm/libsofthsmv3.so' >> /opt/keyfactor/ejbca/conf/web.properties && \
+    echo '# Thales Luna — present only when a client is side-mounted (see docs/VENDOR_PROFILE_CHECKLIST.md)' >> /opt/keyfactor/ejbca/conf/web.properties && \
+    echo 'cryptotoken.p11.lib.20.name=Thales Luna' >> /opt/keyfactor/ejbca/conf/web.properties && \
+    echo 'cryptotoken.p11.lib.20.file=/usr/local/luna/libs/64/libCryptoki2.so' >> /opt/keyfactor/ejbca/conf/web.properties
 
-# Token init wrapper — runs before EJBCA start.sh
-COPY docker/init-softhsm.sh   /opt/keyfactor/bin/init-softhsm.sh
-RUN chmod +x /opt/keyfactor/bin/init-softhsm.sh
+# Mount point for an optional Thales Luna client. Empty in the image, and outside the /opt/* tree
+# that start.sh scans for environment-hsm — a mount at /opt/luna would sort ahead of /opt/softhsm.
+RUN mkdir -p /usr/local/luna
+ENV LUNA_CLIENT_DIR=/usr/local/luna
+
+# HSM init wrapper — runs before EJBCA start.sh
+COPY docker/init-hsm.sh       /opt/keyfactor/bin/init-hsm.sh
+COPY docker/luna-discover.sh  /opt/keyfactor/bin/luna-discover.sh
+RUN chmod +x /opt/keyfactor/bin/init-hsm.sh
 
 RUN mkdir -p /var/lib/softhsmv3/tokens && \
     chown -R 10001:0 /var/lib/softhsmv3
@@ -118,6 +129,6 @@ COPY target/kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
 RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
           /opt/keyfactor/ejbca/dist/clientToolBox/lib/
 
-# init-softhsm.sh runs as root to fix volume permissions and init token,
-# then drops to user 10001 via gosu before exec'ing start.sh
-CMD ["/opt/keyfactor/bin/init-softhsm.sh"]
+# init-hsm.sh runs as root to fix volume permissions, link an optional Luna client and init the
+# SoftHSM token, then drops to user 10001 via gosu before exec'ing start.sh
+CMD ["/opt/keyfactor/bin/init-hsm.sh"]

@@ -138,6 +138,67 @@ up:
 down:
     docker compose down
 
+# ─── Thales Luna (optional) ──────────────────────────────────────────────────
+
+# Compose files for a stack with a side-mounted Luna client. Nothing Thales-owned ships in the
+# image; see docs/VENDOR_PROFILE_CHECKLIST.md for what to mount and how to register the client.
+luna_compose := "-f docker-compose.yml -f docker-compose.luna.yml"
+
+# LUNA_HOST_DIR is an extracted minimal client; LUNA_HOST_CONFIG holds Chrystoki.conf and the certs.
+# Start the stack with a side-mounted Luna client
+luna-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${LUNA_HOST_DIR:?set LUNA_HOST_DIR to an extracted Luna 10.9.2 minimal client}"
+    : "${LUNA_HOST_CONFIG:?set LUNA_HOST_CONFIG to the directory holding Chrystoki.conf}"
+    docker compose {{luna_compose}} up -d
+    echo "Waiting for EJBCA to be healthy..."
+    docker compose {{luna_compose}} exec ejbca sh -c 'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done' || true
+    docker compose {{luna_compose}} logs ejbca 2>&1 | grep -i luna || true
+    echo "EJBCA is ready."
+
+# Report what the container makes of the mounted client — run this first when it will not connect
+luna-status:
+    docker compose {{luna_compose}} exec ejbca sh -c \
+        'source /opt/keyfactor/bin/luna-discover.sh; luna_discover; luna_summary; \
+         echo "ChrystokiConfigurationPath=${ChrystokiConfigurationPath:-unset}"; \
+         command -v lunacm >/dev/null && lunacm -e "slot list" || echo "lunacm not on PATH"'
+
+# Requires LUNA_PARTITION and LUNA_PIN; see create-token for why this is a DB insert.
+# Create a Pkcs11NgCryptoToken bound to a Luna partition
+create-luna-token:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${LUNA_PARTITION:?set LUNA_PARTITION to the partition label}"
+    : "${LUNA_PIN:?set LUNA_PIN to the partition password}"
+    TOKEN_NAME="${LUNA_TOKEN_NAME:-LunaHSM}"
+    EXISTS=$(docker compose {{luna_compose}} exec -T postgres psql -U ejbca -d ejbca -tAc \
+        "SELECT COUNT(*) FROM CryptoTokenData WHERE tokenName='${TOKEN_NAME}';")
+    if [ "$EXISTS" -gt 0 ]; then
+        echo "${TOKEN_NAME} token already exists, skipping."
+        exit 0
+    fi
+    # EJBCA stores the PIN obfuscated, not encrypted. This inserts it in the clear, which is
+    # acceptable for a test partition and is not acceptable for anything else — use the admin UI
+    # for a real one.
+    PROPS=$(printf '%s\n' \
+        "#$(date -u '+%a %b %d %H:%M:%S UTC %Y')" \
+        "pin=${LUNA_PIN}" \
+        "sharedLibrary=/usr/local/luna/libs/64/libCryptoki2.so" \
+        "slotLabelValue=${LUNA_PARTITION}" \
+        "slotLabelType=SLOT_LABEL" \
+        "tokenName=${TOKEN_NAME}" \
+        "allow.extractable.privatekey=false")
+    PROPS_B64=$(echo "$PROPS" | base64 | tr -d '\n')
+    TOKEN_ID=1234567891
+    docker compose {{luna_compose}} exec -T postgres psql -U ejbca -d ejbca -c \
+        "INSERT INTO CryptoTokenData (id, lastUpdate, rowProtection, rowVersion, tokenData, tokenName, tokenProps, tokenType) \
+         VALUES ($TOKEN_ID, EXTRACT(EPOCH FROM NOW())::bigint * 1000, NULL, 0, NULL, '${TOKEN_NAME}', '$PROPS_B64', 'Pkcs11NgCryptoToken');"
+    echo "Created ${TOKEN_NAME} (Pkcs11NgCryptoToken) with id=$TOKEN_ID"
+    docker compose {{luna_compose}} restart ejbca
+    sleep 20
+    echo "Done."
+
 # ─── Deploy (hot-reload JAR into running container) ──────────────────────────
 
 # Deploy the fat JAR into a running EJBCA container and restart

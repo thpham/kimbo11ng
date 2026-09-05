@@ -24,6 +24,7 @@ import java.security.PublicKey;
 import java.security.Security;
 import java.security.Signature;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.Callable;
@@ -66,8 +67,20 @@ public abstract class HsmContract {
     /** Absolute path to the PKCS#11 library. */
     protected abstract String libPath();
 
-    /** The slot to use, as an index into the slot list. */
-    protected abstract long slotIndex();
+    /**
+     * How {@link #slotLabelValue()} should be read: a {@code Pkcs11SlotLabelType} key, one of
+     * {@code SLOT_INDEX}, {@code SLOT_LABEL}, {@code SLOT_NUMBER} or {@code SUN_FILE}.
+     *
+     * <p>Index is the default because it needs no prior knowledge of the token. On real hardware
+     * prefer {@code SLOT_LABEL}: a Luna partition keeps its name across an appliance reboot, and
+     * slot numbering does not.
+     */
+    protected String slotLabelType() {
+        return "SLOT_INDEX";
+    }
+
+    /** The slot to use, interpreted according to {@link #slotLabelType()}. */
+    protected abstract String slotLabelValue();
 
     /** The user PIN. Returned fresh each call: the token implementation may zero what it is given. */
     protected abstract char[] pin();
@@ -91,8 +104,8 @@ public abstract class HsmContract {
     void openToken() throws Exception {
         Properties properties = new Properties();
         properties.setProperty(CryptoTokenImpl.SHLIB_LABEL_KEY, libPath());
-        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, "SLOT_INDEX");
-        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, String.valueOf(slotIndex()));
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, slotLabelType());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, slotLabelValue());
         properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
         properties.putAll(extraProperties());
 
@@ -147,10 +160,22 @@ public abstract class HsmContract {
     @DisplayName("reports a slot list containing the configured slot")
     void slotList() throws Exception {
         long[] slots = registry().get(libPath()).slotList();
-        assertTrue(slots.length > slotIndex(),
-                () -> "slot index " + slotIndex() + " is out of range; the library reported "
-                        + slots.length + " slot(s)");
-        assertEquals(slots[(int) slotIndex()], slot().slotId());
+        assertTrue(slots.length > 0, "the library reported no slots at all");
+
+        if ("SLOT_INDEX".equals(slotLabelType())) {
+            int index = Integer.parseInt(slotLabelValue());
+            assertTrue(slots.length > index,
+                    () -> "slot index " + index + " is out of range; the library reported "
+                            + slots.length + " slot(s)");
+            assertEquals(slots[index], slot().slotId());
+            return;
+        }
+        // Addressed by label or number: the index mapping says nothing, but whatever the slot
+        // resolved to must still be a slot this library admits to having.
+        assertTrue(Arrays.stream(slots).anyMatch(s -> s == slot().slotId()),
+                () -> "'" + slotLabelValue() + "' (" + slotLabelType() + ") resolved to slot "
+                        + slot().slotId() + ", which is not in the library's slot list "
+                        + Arrays.toString(slots));
     }
 
     @Test

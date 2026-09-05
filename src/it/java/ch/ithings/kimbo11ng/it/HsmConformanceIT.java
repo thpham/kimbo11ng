@@ -20,11 +20,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The HSM contract against a real PKCS#11 library — the day-one script for hardware.
  *
  * <pre>
+ * export ChrystokiConfigurationPath=/usr/local/luna/config   # Luna only
+ * export LD_LIBRARY_PATH=/usr/local/luna/libs/64             # Luna only
  * mvn verify -Pit \
- *   -Dkimbo11ng.it.lib=/usr/safenet/lunaclient/lib/libCryptoki2_64.so \
- *   -Dkimbo11ng.it.slot=0 \
+ *   -Dkimbo11ng.it.lib=/usr/local/luna/libs/64/libCryptoki2.so \
+ *   -Dkimbo11ng.it.slotType=SLOT_LABEL -Dkimbo11ng.it.slot=my-partition \
  *   -Dkimbo11ng.it.pin=userpin
  * </pre>
+ *
+ * <p>{@code slotType} defaults to {@code SLOT_INDEX}, which needs no prior knowledge of the token.
+ * Prefer {@code SLOT_LABEL} on hardware: a partition keeps its name across an appliance reboot and
+ * slot numbering does not.
  *
  * <p>Without {@code kimbo11ng.it.lib} the whole class is skipped, so it costs a normal run nothing.
  * The same assertions run on every build against the in-memory fake as
@@ -42,9 +48,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         disabledReason = "set -Dkimbo11ng.it.lib to point this at a PKCS#11 library")
 class HsmConformanceIT extends HsmContract {
 
-    private static final String LIB = System.getProperty("kimbo11ng.it.lib", "");
-    private static final String SLOT = System.getProperty("kimbo11ng.it.slot", "0");
-    private static final String PIN = System.getProperty("kimbo11ng.it.pin", "");
+    private static final String LIB = HsmItConfig.get(HsmItConfig.LIB, "");
+    private static final String SLOT = HsmItConfig.get(HsmItConfig.SLOT, "0");
+    private static final String SLOT_TYPE = HsmItConfig.get(HsmItConfig.SLOT_TYPE, "SLOT_INDEX");
+    private static final String PIN = HsmItConfig.get(HsmItConfig.PIN, "");
 
     /**
      * Private to this run: the shared registry is process-wide, and a library initialized by an
@@ -66,8 +73,13 @@ class HsmConformanceIT extends HsmContract {
     }
 
     @Override
-    protected long slotIndex() {
-        return Long.parseLong(SLOT);
+    protected String slotLabelType() {
+        return SLOT_TYPE;
+    }
+
+    @Override
+    protected String slotLabelValue() {
+        return SLOT;
     }
 
     @Override

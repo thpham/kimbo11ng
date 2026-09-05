@@ -105,6 +105,9 @@ mvn verify -Pit
 | `just docker-build`       | Build Docker image (EJBCA + softhsmv3 + kimbo11ng)                          |
 | `just up` / `just down`   | Start / stop services                                                       |
 | `just create-token`       | Provision TestHSM as Pkcs11NgCryptoToken (idempotent)                       |
+| `just luna-up`            | Start the stack with a side-mounted Thales Luna client (optional)           |
+| `just luna-status`        | Report what the container makes of the mounted Luna client                  |
+| `just create-luna-token`  | Provision a Pkcs11NgCryptoToken bound to a Luna partition                   |
 | `just ci`                 | Full pipeline: setup + docker-build + up + create-token + integration tests |
 | `just extract-jars-fresh` | Force re-extract JARs (after EJBCA version bump)                            |
 | `just versions`           | Show version matrix                                                         |
@@ -144,9 +147,13 @@ mvn verify -Pit          # + 23 integration tests (~4 min)
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
 
 # Against real hardware: the same contract HsmContractFakeTest runs on every build.
-# Skipped when kimbo11ng.it.lib is absent.
-mvn verify -Pit -Dkimbo11ng.it.lib=/path/to/libCryptoki2_64.so \
-                -Dkimbo11ng.it.slot=0 -Dkimbo11ng.it.pin=userpin
+# Skipped when kimbo11ng.it.lib is absent. Adding kimbo11ng.it.luna.jsp additionally runs the
+# cross-check — both stacks on one partition, each reading the other's keys, which is the only
+# test here that can falsify a vendor profile table.
+mvn verify -Pit -Dkimbo11ng.it.lib=/usr/local/luna/libs/64/libCryptoki2.so \
+                -Dkimbo11ng.it.slotType=SLOT_LABEL -Dkimbo11ng.it.slot=my-partition \
+                -Dkimbo11ng.it.pin=userpin \
+                -Dkimbo11ng.it.luna.jsp=/usr/local/luna/jsp/LunaProvider.jar
 ```
 
 Integration tests require Docker. The test image is built by `just docker-build`; a hot-reloaded
@@ -187,7 +194,8 @@ kimbo11ng/
                                      #   HsmConformanceIT — real-hardware contract)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
-  docker/                            # Dockerfile, softhsmv3 config
+  docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
+  docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)
   pom.xml                            # Maven build (ch.ithings:kimbo11ng)
   justfile                           # Build automation recipes

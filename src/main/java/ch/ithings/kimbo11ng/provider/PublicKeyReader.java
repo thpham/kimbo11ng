@@ -116,9 +116,19 @@ public final class PublicKeyReader {
         byte[] spkiBytes;
         SubjectPublicKeyInfo fromToken = asSubjectPublicKeyInfo(keyBytes);
         if (fromToken != null) {
-            requireOidMatches(fromToken, entry, policy);
-            requireLengthMatches(fromToken.getPublicKeyData().getOctets().length, entry);
-            spkiBytes = keyBytes;
+            boolean oidAgrees = requireOidMatches(fromToken, entry, policy);
+            byte[] material = fromToken.getPublicKeyData().getOctets();
+            requireLengthMatches(material.length, entry);
+            // A tolerated OID must not be a published OID. The length check above measured the
+            // material against `entry`, so entry.oid() names the only parameter set this key is
+            // known to support; keeping the token's OID would put a parameter set the material
+            // does not back into the certificate's SubjectPublicKeyInfo. Re-wrapping preserves
+            // exactly the tolerance LENIENT was built for — a token from the NIST draft era that
+            // labels its keys with pre-standard OIDs still enumerates, rather than failing the
+            // CA's startup — because the bytes are unchanged and only the label is corrected.
+            spkiBytes = oidAgrees ? keyBytes
+                    : new SubjectPublicKeyInfo(new AlgorithmIdentifier(entry.oid()), material)
+                            .getEncoded();
         } else {
             requireLengthMatches(keyBytes.length, entry);
             spkiBytes = new SubjectPublicKeyInfo(new AlgorithmIdentifier(entry.oid()), keyBytes)
@@ -174,16 +184,20 @@ public final class PublicKeyReader {
     /**
      * Rejects a token-supplied SubjectPublicKeyInfo that names a different algorithm.
      *
-     * <p>Under {@link Policy#LENIENT} this is a warning instead: the length check below it is what
+     * <p>Under {@link Policy#LENIENT} this is a warning instead: the length check beside it is what
      * prevents a wrong OID reaching a certificate, and an existing CA whose token labels its own
      * keys slightly differently should not fail to start over it. Under {@link Policy#STRICT} —
      * generation — there is no such excuse: we asked for a specific algorithm.
+     *
+     * @return {@code true} when the token's OID is {@code entry}'s, so its encoding can be
+     *         published as it stands; {@code false} when it was only tolerated, and the caller
+     *         must re-label the material before publishing it
      */
-    private static void requireOidMatches(SubjectPublicKeyInfo spki, AlgorithmEntry entry,
+    private static boolean requireOidMatches(SubjectPublicKeyInfo spki, AlgorithmEntry entry,
             Policy policy) throws InvalidKeyException {
         ASN1ObjectIdentifier actual = spki.getAlgorithm().getAlgorithm();
         if (entry.oid().equals(actual)) {
-            return;
+            return true;
         }
         String message = "The token reports this key as OID " + actual.getId()
                 + " but it was resolved as " + entry.canonicalName() + " (OID "
@@ -191,10 +205,12 @@ public final class PublicKeyReader {
         if (policy == Policy.STRICT) {
             throw new InvalidKeyException(message + " Refusing to guess which is right.");
         }
-        log.warn(message + " Continuing with the token's own encoding: its length is checked"
-                + " below, so a key of the wrong parameter set is still refused. This is usually a"
-                + " token that predates the final OID assignments. Set " + STRICT_PUBLIC_KEY
+        log.warn(message + " Continuing with the token's key material under the resolved OID: its"
+                + " length is checked against that parameter set, so a key of the wrong parameter"
+                + " set is still refused. This is usually a token that predates the final OID"
+                + " assignments. Set " + STRICT_PUBLIC_KEY
                 + "=true on the crypto token to make it fatal instead.");
+        return false;
     }
 
     /** @see Policy */

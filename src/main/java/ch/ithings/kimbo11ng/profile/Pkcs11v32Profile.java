@@ -15,9 +15,16 @@ import java.util.Set;
  * Post-quantum algorithms as described by OASIS PKCS#11 v3.2. Works with softhsmv3 and any token
  * that implements the specification as written.
  *
- * <p>Every constant below is hand-entered: jacknji11 1.3.1 predates v3.2 and defines none of these
- * in {@code CKA}, {@code CKK} or {@code CKM}. They are therefore assumptions until a token
- * confirms them, which is what the capability probe added in a later phase is for.
+ * <p>Every constant below is hand-entered, because jacknji11 1.3.1 predates v3.2 and defines none
+ * of these in {@code CKA}, {@code CKK} or {@code CKM}. Hand-entered is not the same as guessed:
+ * all 28 of them — three {@code CKK_*}, six {@code CKM_*}, {@code CKA_PARAMETER_SET} and the
+ * eighteen {@code CKP_*} parameter sets — were checked on 2026-09-05 against the OASIS working
+ * header (oasis-tcs/pkcs11, {@code working/headers/pkcs11t.h}) and against jacknji11 upstream,
+ * which took the same values from that header in PR #65. Zero divergences.
+ *
+ * <p>What the probe is still for is the other half of the question: the spec says what a mechanism
+ * is <em>numbered</em>, never whether a given token implements it. A correct table and an absent
+ * mechanism look identical until something asks the token.
  */
 public final class Pkcs11v32Profile extends AbstractTableProfile {
 

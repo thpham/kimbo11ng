@@ -75,9 +75,23 @@ match exactly**:
 | `CKM_SLH_DSA` | `0x2E` | `0x0000002e` |
 | `CKA_PARAMETER_SET` | `0x61D` | `0x0000061d` |
 
-Upstream defines **no** post-quantum `CKK_*` values, so our `CKK_ML_DSA` (`0x4A`), `CKK_ML_KEM`
-(`0x49`) and `CKK_SLH_DSA` (`0x4B`) remain confirmed only empirically — enumeration round-trips
-correctly against SoftHSMv3, which is evidence but not a second source.
+Upstream defines **no** post-quantum `CKK_*` values, so those three had to be checked elsewhere.
+[jacknji11 PR #65](https://github.com/joelhockey/jacknji11/pull/65) ("syn parameters with p11v3.2",
+merged) names its source: the OASIS working header at
+[oasis-tcs/pkcs11](https://github.com/oasis-tcs/pkcs11/blob/master/working/headers/pkcs11t.h).
+Checking the profile against that header directly closes the gap — `CKK_ML_KEM` `0x49`,
+`CKK_ML_DSA` `0x4A`, `CKK_SLH_DSA` `0x4B`, all matching.
+
+The same PR added `CKP.java`, which carries all eighteen parameter sets. Those match the profile
+too, including the part that is easy to get wrong: `CKP` interleaves SHA2 and SHAKE within each
+security level (`SHA2_128S`=1, `SHAKE_128S`=2, `SHA2_128F`=3 …) while the NIST OID arc groups all
+SHA2 before all SHAKE. Deriving one ordering from the other by arithmetic would mislabel keys, which
+is why both live in the table and why `Pkcs11v32ProfileTest.ckpAndOidOrdersDiffer` guards it.
+
+**Tally, verified 2026-09-05: 28 constants, zero divergences** — 3 `CKK_*`, 6 `CKM_*`,
+`CKA_PARAMETER_SET` and 18 `CKP_*`, against two sources that agree because one derives from the
+other. What remains unverifiable from a spec is whether a given token implements any of it; that is
+the capability probe's job, not the table's.
 
 ## If EJBCA stops shipping jacknji11
 

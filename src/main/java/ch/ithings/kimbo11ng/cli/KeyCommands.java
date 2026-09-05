@@ -169,6 +169,18 @@ final class KeyCommands {
         if (spi != null) {
             var entry = spi.algorithmFor(alias);
             if (entry.isPresent()) {
+                // ML-KEM generates perfectly well and then has nothing to sign with, because it is
+                // key encapsulation and not a signature scheme. Without this the JCA lookup fails
+                // as "no such algorithm: ML-KEM-768 for provider Kimbo11ng-…", which reads as a
+                // gap in this provider rather than as a question that does not apply to the key.
+                if (!entry.get().canSign()) {
+                    throw new CliException("Alias '" + alias + "' holds an "
+                            + entry.get().canonicalName() + " key, and " + entry.get().family().jcaName()
+                            + " is key encapsulation, not signing — there is no signature to test."
+                            + " Its operations are " + entry.get().ops().stream().map(Enum::name)
+                                    .sorted().collect(java.util.stream.Collectors.joining(", "))
+                            + ", which capabilities also reports.");
+                }
                 return entry.get().canonicalName();
             }
         }

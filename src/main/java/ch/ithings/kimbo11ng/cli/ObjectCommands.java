@@ -97,10 +97,10 @@ final class ObjectCommands {
                         out.println("Aliases in slot " + handle.slot().slotId() + ": "
                                 + aliases.size());
                         out.println();
-                        out.println(row("ALIAS", "KIND", "ALGORITHM", "KEY LENGTH", ""));
+                        out.println(keyRow("ALIAS", "KIND", "ALGORITHM", "KEY LENGTH"));
                         for (String alias : aliases) {
                             if (handle.token().isSecretKey(alias)) {
-                                out.println(row(alias, "secret", "-", "-", ""));
+                                out.println(keyRow(alias, "secret", "-", "-"));
                                 continue;
                             }
                             PublicKey publicKey = handle.token().readPublicKey(alias, true);
@@ -108,11 +108,11 @@ final class ObjectCommands {
                                 // A private key whose public half is missing or unreadable. It is
                                 // in the alias list and EJBCA will refuse to use it, so saying so
                                 // here is the whole value of the command.
-                                out.println(row(alias, "key pair", "<no public key>", "-", ""));
+                                out.println(keyRow(alias, "key pair", "<no public key>", "-"));
                                 continue;
                             }
-                            out.println(row(alias, "key pair", publicKey.getAlgorithm(),
-                                    keyLength(publicKey), ""));
+                            out.println(keyRow(alias, "key pair", publicKey.getAlgorithm(),
+                                    keyLength(publicKey)));
                         }
                     }
                 });
@@ -313,10 +313,24 @@ final class ObjectCommands {
 
     // ---- rendering ----
 
+    /**
+     * One row of {@code listobjects}: a handle, then three token-supplied strings.
+     *
+     * <p>Separate from {@link #keyRow} even though both are four columns and a trailing field.
+     * They were one method, and the widths that suit a numeric handle are the wrong ones for an
+     * alias — which is how {@code listkeypairs} ended up with a 10-column alias field that every
+     * real alias overflowed.
+     */
     private static String row(String handle, String className, String keyType, String label,
             String id) {
-        return InfoCommands.pad(handle, 10) + InfoCommands.pad(className, 14)
-                + InfoCommands.pad(keyType, 18) + InfoCommands.pad(label, 30) + id;
+        return (InfoCommands.pad(handle, 10) + InfoCommands.pad(className, 14)
+                + InfoCommands.pad(keyType, 18) + InfoCommands.pad(label, 30) + id).stripTrailing();
+    }
+
+    /** One row of {@code listkeypairs}, whose first column is an alias and needs the room. */
+    private static String keyRow(String alias, String kind, String algorithm, String keyLength) {
+        return (InfoCommands.pad(alias, 24) + InfoCommands.pad(kind, 10)
+                + InfoCommands.pad(algorithm, 20) + keyLength).stripTrailing();
     }
 
     private static String className(CryptokiE ce, SessionLease lease, long object)

@@ -136,7 +136,7 @@ class CliContainerIT {
     void listSlotsWithNoArguments() throws Exception {
         String out = ok(cli("listslots"));
         assertTrue(out.contains("Slots with token:"), out);
-        assertTrue(out.contains("Label: " + TOKEN_LABEL), out);
+        assertTrue(out.contains(TOKEN_LABEL), out);
         // Nothing was passed and nothing was prompted for: a slot list needs no credential, which
         // is what makes it the first thing to run against an unfamiliar HSM.
         assertFalse(out.contains("password"), out);
@@ -165,15 +165,62 @@ class CliContainerIT {
     @DisplayName("capabilities reports the post-quantum algorithms as usable, with no PIN")
     void capabilities() throws Exception {
         String out = ok(cli("capabilities", "--slot-ref", "SLOT_LABEL", "--slot", TOKEN_LABEL));
-        assertTrue(out.contains("18/18 usable"), out);
+        // The verdict moved onto the Profile line when the duplicate per-algorithm block
+        // above the table was dropped.
+        assertTrue(out.contains("18 of 18 post-quantum algorithms usable"), out);
         assertTrue(out.contains("ML-DSA-65"), out);
         assertTrue(out.contains("SLH-DSA-SHA2-128S"), out);
         assertFalse(out.contains("has no ML-DSA KeyFactory"),
                 "BouncyCastle was not installed, so every PQC algorithm was excluded:\n" + out);
     }
 
+    /**
+     * The classical half of the same answer, against a real SoftHSMv3.
+     *
+     * <p>Worth its own test rather than three more assertions above, because it holds a different
+     * property: the post-quantum list comes from the profile table and is therefore the same
+     * whatever the token says, while these three rows are read out of the token's own mechanism
+     * list. A SoftHSMv3 build without RSA would fail here and nowhere else.
+     */
     @Test
     @Order(5)
+    @DisplayName("capabilities lists RSA, EC and HMAC alongside the post-quantum algorithms")
+    void capabilitiesReportsEveryAlgorithm() throws Exception {
+        String out = ok(cli("capabilities", "--slot-ref", "SLOT_LABEL", "--slot", TOKEN_LABEL));
+        assertTrue(out.contains("Key algorithms this crypto token can use on this HSM"), out);
+        assertTrue(out.contains("CKM_RSA_PKCS_KEY_PAIR_GEN"), out);
+        assertTrue(out.contains("CKM_EC_KEY_PAIR_GEN"), out);
+        assertTrue(out.contains("HmacSHA512"), out);
+        assertTrue(out.contains("ML-DSA-65"), out);
+        // RSA generation is exercised further down, so "ok" here and a working generatekeypair
+        // there are the same claim checked two ways — if they ever disagree, one of them is lying.
+        String rsa = out.lines().filter(line -> line.startsWith("  RSA ")).findFirst().orElse("");
+        assertTrue(rsa.contains("ok"), rsa);
+
+        // Straight from Provider.getServices(), so this is what EJBCA is actually offered rather
+        // than a restatement of the table above. The two are not the same list: a token can
+        // generate an EC key and still not sign with SHA-512.
+        assertTrue(out.contains("Services EJBCA can request from this token"), out);
+        assertTrue(out.contains("SHA256withRSAandMGF1"), out);
+        assertTrue(out.contains("SHA256withECDSA"), out);
+        assertTrue(out.contains("KeyStore"), out);
+
+        // The JCA KeyPairGenerator service covers only EC and RSA, and without the footnote that
+        // reads as "post-quantum key pairs cannot be created" — which the table above contradicts
+        // and generateKeyPair below disproves. The two sections disagreeing is worse than either
+        // being incomplete, so the caveat is asserted, not just written.
+        assertTrue(out.contains("Post-quantum key pairs are not created through a JCA"
+                + " KeyPairGenerator"), out);
+
+        // Named through the PKCS#11 v3.2 fallback in TokenCapabilities: jacknji11 1.3.1 knows none
+        // of the six post-quantum mechanisms, so without it this column mixed CKM_ names for the
+        // classical rows with bare hex for every post-quantum one.
+        assertTrue(out.contains("CKM_ML_DSA_KEY_PAIR_GEN"), out);
+        assertTrue(out.contains("CKM_SLH_DSA_KEY_PAIR_GEN"), out);
+    }
+
+    @Test
+    @Order(6)
     @DisplayName("a post-quantum key pair generates and appears under its alias")
     void generateKeyPair() throws Exception {
         ok(onToken("generatekeypair", "--alias", "itmldsa", "--key-spec", "ML-DSA-65"));
@@ -183,7 +230,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     @DisplayName("testkeypair produces a real ML-DSA signature and verifies it")
     void testKeyPair() throws Exception {
         String out = ok(onToken("testkeypair", "--alias", "itmldsa"));
@@ -194,7 +241,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     @DisplayName("the key is sensitive, unextractable, and named as ML-DSA")
     void objectAttributes() throws Exception {
         String out = ok(onToken("showobjectattributes", "--alias", "itmldsa"));
@@ -208,7 +255,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     @DisplayName("listobjects shows both halves with a shared CKA_ID")
     void listObjects() throws Exception {
         String out = ok(onToken("listobjects"));
@@ -218,7 +265,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     @DisplayName("signperformancetest measures throughput on the token")
     void signPerformanceTest() throws Exception {
         String out = ok(onToken("signperformancetest", "--alias", "itmldsa",
@@ -228,7 +275,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     @DisplayName("a wrong PIN fails the command cleanly, with no stack trace")
     void wrongPin() throws Exception {
         Container.ExecResult result = cli("listkeypairs", "--slot-ref", "SLOT_LABEL",
@@ -240,7 +287,7 @@ class CliContainerIT {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     @DisplayName("deleteobject removes both halves")
     void deleteObject() throws Exception {
         ok(onToken("deleteobject", "--alias", "itmldsa"));

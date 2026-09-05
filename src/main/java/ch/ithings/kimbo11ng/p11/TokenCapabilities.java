@@ -200,10 +200,34 @@ public final class TokenCapabilities {
         String hex = String.format("0x%08x", code);
         String symbolic = CKM.L2S(code);
         if (symbolic == null || symbolic.startsWith("unknown ")) {
-            return hex;
+            String known = PKCS11_V32.get(code);
+            return known == null ? hex : known + " (" + hex + ")";
         }
         return "CKM_" + symbolic + " (" + hex + ")";
     }
+
+    /**
+     * The six PKCS#11 v3.2 mechanisms Keyfactor's jacknji11 1.3.1 predates.
+     *
+     * <p>Named here rather than left as hex so that one list of mechanisms does not mix the two
+     * styles — a table where RSA reads {@code CKM_RSA_PKCS_KEY_PAIR_GEN} and ML-DSA reads
+     * {@code 0x0000001c} suggests the second is less well understood than the first, when in fact
+     * both are fully specified and only the bindings differ.
+     *
+     * <p>Keyed by value, not derived from the algorithm's family, and that distinction matters: a
+     * vendor profile may map ML-DSA onto a vendor-defined mechanism in the {@code 0x80000000}
+     * range, and printing the standard name over a vendor number would be a confident lie about
+     * what the token was asked for. Anything not in this table stays hex, as before.
+     *
+     * <p>Drop this when the bindings catch up; {@link CKM#L2S} already wins when it answers.
+     */
+    private static final Map<Long, String> PKCS11_V32 = Map.of(
+            0x0000000fL, "CKM_ML_KEM_KEY_PAIR_GEN",
+            0x00000017L, "CKM_ML_KEM",
+            0x0000001cL, "CKM_ML_DSA_KEY_PAIR_GEN",
+            0x0000001dL, "CKM_ML_DSA",
+            0x0000002dL, "CKM_SLH_DSA_KEY_PAIR_GEN",
+            0x0000002eL, "CKM_SLH_DSA");
 
     @Override
     public String toString() {

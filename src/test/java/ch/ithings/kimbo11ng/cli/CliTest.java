@@ -190,7 +190,7 @@ class CliTest {
         assertEquals(Main.OK, Main.run(new String[] {"listslots", "--lib-file", LIB}, env));
         assertTrue(stdout().contains("All slots:"), stdout());
         assertTrue(stdout().contains("Slots with token:"), stdout());
-        assertTrue(stdout().contains("ID: 0, Label:"), stdout());
+        assertTrue(stdout().contains("slot 0:"), stdout());
         assertTrue(prompts.isEmpty(), "listslots must not ask for a PIN");
     }
 
@@ -223,8 +223,74 @@ class CliTest {
         int code = Main.run(new String[] {"capabilities", "--lib-file", LIB, "--slot", "0"}, env);
         assertEquals(Main.OK, code);
         assertTrue(stdout().contains("Profile:"), stdout());
-        assertTrue(stdout().contains("Post-quantum algorithms usable on this token:"), stdout());
+        assertTrue(stdout().contains("Key algorithms this crypto token can use on this HSM"),
+                stdout());
         assertTrue(prompts.isEmpty(), "capabilities must not ask for a PIN");
+    }
+
+    @Test
+    @DisplayName("capabilities reports RSA, EC and the secret-key algorithms, not only the profile")
+    void capabilitiesReportsClassical() {
+        int code = Main.run(new String[] {"capabilities", "--lib-file", LIB, "--slot", "0"}, env);
+        assertEquals(Main.OK, code);
+        // One table, not two: the profile boundary between classical and post-quantum is an
+        // implementation detail, and on a token with no ML-DSA the post-quantum list alone would
+        // report nothing usable while RSA worked perfectly.
+        assertTrue(stdout().contains("Key algorithms this crypto token can use on this HSM"),
+                stdout());
+        assertTrue(stdout().contains("CKM_RSA_PKCS_KEY_PAIR_GEN"), stdout());
+        assertTrue(stdout().contains("CKM_EC_KEY_PAIR_GEN"), stdout());
+        assertTrue(stdout().contains("HmacSHA256"), stdout());
+        assertTrue(stdout().contains("ML-DSA-65"), stdout());
+        // The OPERATIONS column, no longer bracketed now that it has a header of its own.
+        assertTrue(stdout().contains("SIGN, VERIFY"), stdout());
+        // Read from Provider.getServices(), which is the same call the JCA makes on EJBCA's
+        // behalf, so this section cannot drift from what the CA is actually offered.
+        assertTrue(stdout().contains("Services EJBCA can request from this token"), stdout());
+        // Named through the v3.2 fallback: jacknji11 1.3.1 knows none of the six post-quantum
+        // mechanisms, and a table where RSA is a name and ML-DSA is a hex number reads as though
+        // the second were less well understood than the first.
+        assertTrue(stdout().contains("CKM_ML_DSA_KEY_PAIR_GEN"), stdout());
+    }
+
+    @Test
+    @DisplayName("capabilities separates a mechanism the token lacks from one this provider lacks")
+    void capabilitiesDistinguishesTheTwoReasons() {
+        int code = Main.run(new String[] {"capabilities", "--lib-file", LIB, "--slot", "0"}, env);
+        assertEquals(Main.OK, code);
+        // FakeToken advertises CKM_AES_KEY_GEN, so "not advertised" here would blame the token for
+        // a gap that is ours: no Cipher service, and the key is sensitive and not extractable.
+        String aes = stdout().lines().filter(line -> line.startsWith("  AES ")).findFirst()
+                .orElse("");
+        assertTrue(aes.contains("unusable here"), aes);
+        assertFalse(aes.contains("not advertised"), aes);
+
+        // The OPERATIONS column is read out of KeyTemplates, not restated: the first version of
+        // this table said RSA was SIGN, VERIFY when the template also sets CKA_ENCRYPT, CKA_WRAP
+        // on the public half and CKA_DECRYPT, CKA_UNWRAP on the private one.
+        String rsa = stdout().lines().filter(line -> line.startsWith("  RSA ")).findFirst()
+                .orElse("");
+        assertTrue(rsa.contains("ENCRYPT"), rsa);
+        assertTrue(rsa.contains("UNWRAP"), rsa);
+        // And what the key may do is marked apart from what this provider can drive: there is no
+        // Cipher service here, so those four are reachable only through another provider.
+        assertTrue(rsa.matches(".*\\[\\d+\\].*"), "RSA row carries no footnote marker: " + rsa);
+    }
+
+    @Test
+    @DisplayName("no view leaves trailing whitespace or runs two columns together")
+    void tablesAreReadable() {
+        assertEquals(Main.OK, Main.run(new String[] {"capabilities", "--lib-file", LIB,
+                "--slot", "0", "--mechanisms"}, env));
+        for (String line : stdout().split("\n", -1)) {
+            assertEquals(line.stripTrailing(), line, "trailing whitespace: [" + line + "]");
+        }
+        // pad() used to return an over-long value untouched, so a column that overflowed ran
+        // straight into the next one. Every data row here has at least one value at or past its
+        // column width, which is what makes this a real check rather than a tautology.
+        String mldsa = stdout().lines().filter(line -> line.startsWith("  ML-DSA-44"))
+                .findFirst().orElse("");
+        assertTrue(mldsa.contains("ML-DSA-44  "), mldsa);
     }
 
     @Test

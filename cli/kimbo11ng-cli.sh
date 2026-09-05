@@ -21,7 +21,8 @@
 #   1. KIMBO11NG_CLASSPATH — set it and nothing else is guessed.
 #   2. EJBCA_HOME          — an EJBCA install elsewhere on the machine.
 #   3. the default install  — /opt/keyfactor/ejbca, which is the container.
-#   4. the build tree       — target/kimbo11ng.jar plus a classpath Maven resolves, for development.
+#   4. the build tree       — the assembled jar in target/ plus a classpath Maven resolves, for
+#                             development.
 #
 # Cases 2 and 3 take the jars from a real EJBCA install, so the CLI runs against the same library
 # versions the CA does and the two cannot disagree about what the token supports.
@@ -44,6 +45,21 @@ ejbca_lib() {
     printf '%s/*' "$lib"
 }
 
+build_jar() {
+    # The name of the assembled jar is already written down twice — the pom's finalName and the
+    # justfile's `artifact` — and a third spelling here is precisely how this branch came to look
+    # for a target/kimbo11ng.jar that no build has ever written. So match on the suffix the
+    # jar-with-dependencies descriptor appends, which is the same handle ArtifactContentsIT uses to
+    # find the artifact, and let the build keep sole ownership of the name.
+    local candidate
+    for candidate in "$repo"/target/*-jar-with-dependencies.jar; do
+        [ -f "$candidate" ] || continue
+        printf '%s' "$candidate"
+        return 0
+    done
+    return 1
+}
+
 classpath=""
 
 if [ -n "${KIMBO11NG_CLASSPATH:-}" ]; then
@@ -56,8 +72,7 @@ elif [ -n "${EJBCA_HOME:-}" ]; then
 elif classpath="$(ejbca_lib /opt/keyfactor/ejbca)"; then
     :
 
-elif [ -f "$repo/target/kimbo11ng.jar" ]; then
-    jar="$repo/target/kimbo11ng.jar"
+elif jar="$(build_jar)"; then
     deps="$repo/target/cli-classpath.txt"
     if [ ! -f "$deps" ] || [ "$repo/pom.xml" -nt "$deps" ]; then
         echo "Resolving the dependency classpath (once)..." >&2

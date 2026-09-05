@@ -107,3 +107,94 @@ The move is small, and MIT imposes no copyleft obligation:
 
 Step 4 is the only one with a trap in it. Steps 1–3 are mechanical, and the rehearsal above shows
 they are all that is needed.
+
+## How EJBCA resolves a crypto-token type, and what that pins
+
+Everything below was measured on 2026-09-04 against `keyfactor/ejbca-ce:9.3.7` bytecode and a
+running stack, while testing whether kimbo11ng could stop using Keyfactor's class name. It could
+not — but the mechanics are worth writing down, because they decide what a future CE can break and
+what the response would be.
+
+### The registry gates both paths, and the load path fails silently
+
+`CryptoTokenSessionBean.getCryptoToken` does **not** hand the stored `tokenType` straight to
+`Class.forName`. It resolves it first:
+
+```java
+String found = null;
+for (AvailableCryptoToken act : CryptoTokenFactory.instance().getAvailableCryptoTokens()) {
+    if (act.getClassPath().endsWith(type)) { found = act.getClassPath(); }   // no break
+}
+return found;                                                                // null if nothing
+```
+
+`createCryptoToken(null, …)` then takes its `ifnull` branch and returns a **`NullCryptoToken`**,
+logging "This must be an imported CA that is being upgraded". So an unregistered type does not
+raise `ClassNotFoundException` — it silently produces a CA that cannot sign. Two consequences: the
+`endsWith` match is why a row may store either the simple name or the FQN, and no two registered
+class paths may be suffixes of one another or resolution becomes iteration-order dependent.
+
+### Registration is reachable, and refuses what it cannot load
+
+`CryptoTokenFactory.addAvailableCryptoToken(classPath, name, translateable, use)` is
+**package-private**, so it can only be called from `org.cesecore.keys.token`. That is legal from
+this project: no EJBCA jar is sealed (no `Sealed` attribute in any manifest under `deps/ejbca/`) and
+every jar in `ejbca.ear/lib/` shares one module classloader, so a class of ours in that package is
+the same runtime package. It guards on `containsKey` (idempotent, never throws) and calls a private
+`loadClass` first, refusing to register a name whose class is absent.
+
+That last detail explains the registry size. EJBCA attempts nine registrations in `instance()`;
+this image holds **six**, because `PrimeCAToken`, `FortanixCryptoToken`, `AWSKMSCryptoToken` and
+`SecurosysCryptoToken` are EE-only classes CE does not ship — EJBCA logs "Can not register …. This
+is normally not an error." It also means **the "PKCS#11 NG" entry exists only because kimbo11ng
+supplies the class Keyfactor names.** Remove
+[Pkcs11NgCryptoToken](../src/main/java/org/cesecore/keys/token/p11ng/cryptotoken/Pkcs11NgCryptoToken.java)
+and the entry disappears by itself, through EJBCA's own designed path.
+
+Registrations happen inside the `instance == null` branch, so anything added later survives for the
+life of the JVM.
+
+### The admin UI hardcodes two class names
+
+This is why the squatted name cannot be given up. `CryptoTokenMBean` in `adminweb.war` tests a
+fixed pair in two places:
+
+| Method | What it decides |
+| --- | --- |
+| `getAvailableCryptoTokenTypes()` | which entries get the PKCS#11 treatment — compares `classPath` to `PKCS11CryptoToken.class.getName()` and to the literal `"org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken"` |
+| `saveCurrentCryptoToken(boolean)` | which types read library / slot / slot-label-type from the form — compares the **simple** names `"PKCS11CryptoToken"` and `"Pkcs11NgCryptoToken"`, then writes the FQN it hardcoded |
+
+A token type outside that pair still appears in the type dropdown, but renders **no** PKCS#11
+fields, and saving it stores neither `sharedLibrary` nor `slotLabelValue`. Verified by registering
+`ch.ithings.kimbo11ng.Kimbo11ngCryptoToken` under its own display name: the type resolved, keys
+generated fine from the CLI, and the admin UI offered no way to configure a slot. Nothing in our
+jar can change that — the condition lives in the WAR.
+
+So `org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken` is not merely a name we borrow.
+It is the key by which the admin UI recognises a token as PKCS#11 at all. The
+[implementation](../src/main/java/ch/ithings/kimbo11ng/Kimbo11ngCryptoToken.java) therefore lives in
+our own package, and that class stays as a thin subclass answering to the name the UI knows.
+
+### If a future CE stops registering the type
+
+The fallback is a class of ours in `org.cesecore.keys.token` calling the package-private
+`addAvailableCryptoToken`, carried into the JVM by a `ServiceLoader` service. Both halves were
+tested end to end and then removed, since with the entry present today the call is a no-op:
+
+- **Carrier that works:** `META-INF/services/com.keyfactor.util.crypto.provider.CryptoProvider`.
+  It fires during startup, before any crypto token resolves, and the interface pairs
+  `getProvider()` with `getErrorMessage()` precisely so an implementation may decline. Return an
+  **empty `Provider`**, not `null`: `CryptoProviderTools` catches the NPE and logs the error message
+  on every provider-installation pass, which put eight NPE stacks in the startup log.
+- **Carrier that does not work:** `org.cesecore.authorization.rules.AccessRulePlugin`. Never fired —
+  not at startup, not after a restart, not during a server-side `ejbca.sh cryptotoken list` that
+  demonstrably ran authorization. Whatever enumerates access-rule plugins runs later than anything
+  that matters.
+- ServiceLoader from `ejbca.ear/lib` is already proven in this project by
+  `META-INF/services/…PKCS11SlotListWrapperFactory`, which `ArtifactContentsIT` guards.
+
+Note what this fallback does and does not buy. It restores type *resolution*, so tokens provisioned
+by SQL insert or CLI work again. It cannot restore the admin UI's PKCS#11 form, and it cannot help
+if a future CE ships its own stub under that name — then the classloader picks a winner between two
+identical names, and the answer is to move the stored `tokenType` to a name we own and accept
+CLI-only provisioning.

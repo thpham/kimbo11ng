@@ -47,6 +47,7 @@ public final class Pkcs11Module {
     private final ConcurrentMap<Long, SessionPool> pools = new ConcurrentHashMap<>();
     private java.util.function.LongSupplier clock = System::currentTimeMillis;
     private final Map<Long, char[]> tokenLabels = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, TokenCapabilities> capabilities = new ConcurrentHashMap<>();
     private volatile long[] slots;
 
     Pkcs11Module(String canonicalPath, NativeProviderFactory factory)
@@ -140,12 +141,34 @@ public final class Pkcs11Module {
     }
 
     /**
-     * Forgets the slot and label caches so the next call asks the token again. For a slot that has
-     * been re-provisioned, or a client that has reconnected.
+     * What the token in a slot says it can do. Read once per slot and kept, because a mechanism
+     * list changes only when firmware does.
+     *
+     * <p>Like the other caches here, a failed probe is not cached — but for a different reason. A
+     * failed probe is not an error: {@link TokenCapabilities#unknown} answers yes to everything, so
+     * caching it would silently disable capability checking for the life of the JVM after one
+     * transient failure at startup, and nothing would ever say so.
+     */
+    public TokenCapabilities capabilities(long slotId) {
+        TokenCapabilities cached = capabilities.get(slotId);
+        if (cached != null) {
+            return cached;
+        }
+        TokenCapabilities probed = TokenCapabilities.probe(ce, slotId);
+        if (probed.probed()) {
+            capabilities.put(slotId, probed);
+        }
+        return probed;
+    }
+
+    /**
+     * Forgets the slot, label and capability caches so the next call asks the token again. For a
+     * slot that has been re-provisioned, or a client that has reconnected.
      */
     public void invalidate() {
         slots = null;
         tokenLabels.clear();
+        capabilities.clear();
         if (log.isDebugEnabled()) {
             log.debug("Invalidated slot caches for " + canonicalPath);
         }

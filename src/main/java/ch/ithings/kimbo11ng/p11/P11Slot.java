@@ -79,6 +79,11 @@ public final class P11Slot {
         return module;
     }
 
+    /** What this slot's token advertises. Probed once per slot; see {@link TokenCapabilities}. */
+    public TokenCapabilities capabilities() {
+        return module.capabilities(slotId);
+    }
+
     public long slotId() {
         return slotId;
     }

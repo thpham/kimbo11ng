@@ -302,6 +302,131 @@ class CryptoTokenLifecycleTest {
         }
     }
 
+    // ---- capability probing ----
+
+    /** A token initialised through the fixture's bridge, so each case can vary the fake. */
+    private CryptoTokenImpl tokenWith(FakeToken fake, Properties properties) throws Exception {
+        CryptoTokenImpl configured = new CryptoTokenImpl(new RecordingBridge(),
+                new Pkcs11ModuleRegistry(path -> fake));
+        configured.init(properties, null, 46);
+        configured.activate("1234".toCharArray());
+        return configured;
+    }
+
+    @Test
+    @DisplayName("refuses an algorithm whose mechanism the token does not advertise")
+    void unsupportedAlgorithmIsRefusedByName() throws Exception {
+        // What this replaces: CKR_MECHANISM_INVALID from inside C_GenerateKeyPair, naming neither
+        // the mechanism nor the algorithm nor the fifteen others that would have worked.
+        CryptoTokenImpl configured = tokenWith(
+                new FakeToken().hideMechanism(FakeToken.CKM_ML_DSA_KEY_PAIR_GEN),
+                tokenProperties());
+
+        InvalidAlgorithmParameterException e = assertThrows(
+                InvalidAlgorithmParameterException.class,
+                () -> configured.generateKeyPair("ML-DSA-65", "pqcKey"));
+        assertTrue(e.getMessage().contains("ML-DSA-65"), e.getMessage());
+        assertTrue(e.getMessage().contains("0x0000001c"), e.getMessage());
+
+        // And the rest of the table still works, which is the other half of the claim.
+        configured.generateKeyPair("SLH-DSA-SHA2-128S", "slhKey");
+        assertTrue(configured.getProvider().getKeyStoreSpi().engineContainsAlias("slhKey"));
+    }
+
+    @Test
+    @DisplayName("refuses RSA and EC too when their generation mechanism is missing")
+    void unsupportedClassicalAlgorithmIsRefused() throws Exception {
+        CryptoTokenImpl configured = tokenWith(
+                new FakeToken().hideMechanism(org.pkcs11.jacknji11.CKM.EC_KEY_PAIR_GEN),
+                tokenProperties());
+
+        InvalidAlgorithmParameterException e = assertThrows(
+                InvalidAlgorithmParameterException.class,
+                () -> configured.generateKeyPair("secp256r1", "ecKey"));
+        assertTrue(e.getMessage().contains("CKM_EC_KEY_PAIR_GEN"), e.getMessage());
+        configured.generateKeyPair("2048", "rsaKey");
+    }
+
+    @Test
+    @DisplayName("attempts it anyway when fail-fast is turned off")
+    void failFastKillSwitch() throws Exception {
+        // The case the switch exists for: the probe is wrong, not the token. A mechanism gated by
+        // a partition policy can be usable and unlisted, and then refusing on the list is refusing
+        // on bad evidence.
+        Properties properties = tokenProperties();
+        properties.setProperty(
+                ch.ithings.kimbo11ng.p11.TokenCapabilities.PROBE_FAIL_FAST, "false");
+        FakeToken underReporting =
+                new FakeToken().underReportMechanism(FakeToken.CKM_ML_DSA_KEY_PAIR_GEN);
+        CryptoTokenImpl configured = tokenWith(underReporting, properties);
+
+        assertTrue(configured.getProvider().runtime().algorithms().excluded()
+                        .containsKey("ML-DSA-65"),
+                "the probe still says it is unsupported");
+        configured.generateKeyPair("ML-DSA-65", "pqcKey");
+        assertTrue(configured.getProvider().getKeyStoreSpi().engineContainsAlias("pqcKey"),
+                "but the token honours it, and the operator has said to try");
+    }
+
+    @Test
+    @DisplayName("a token that will not answer the probe keeps working")
+    void unprobedTokenIsNotCrippled() throws Exception {
+        CryptoTokenImpl configured = tokenWith(
+                new FakeToken().failMechanismList(CKR.FUNCTION_NOT_SUPPORTED), tokenProperties());
+        var algorithms = configured.getProvider().runtime().algorithms();
+
+        // An unanswered question is not evidence of absence. Refusing everything because the probe
+        // failed would take a working HSM out of service over a mechanism list it declined to give.
+        assertFalse(algorithms.capabilities().probed());
+        assertEquals(18, algorithms.supported().size());
+        configured.generateKeyPair("ML-DSA-65", "pqcKey");
+        assertTrue(configured.getProvider().getKeyStoreSpi().engineContainsAlias("pqcKey"));
+    }
+
+    @Test
+    @DisplayName("names the profile that would have known an algorithm the active one does not")
+    void wrongProfilePointsAtTheRightOne() throws Exception {
+        // The misconfiguration an operator following the vendor-profile path will actually make.
+        // Everything not RSA and not in the profile falls through to the EC branch, which used to
+        // answer "string ML-DSA-65 is not an OID" — true of that branch, useless about the mistake.
+        Properties properties = tokenProperties();
+        properties.setProperty(ch.ithings.kimbo11ng.profile.ProfileResolver.PROFILE_PROPERTY,
+                "thales-luna");
+        CryptoTokenImpl configured = tokenWith(new FakeToken(), properties);
+
+        InvalidAlgorithmParameterException e = assertThrows(
+                InvalidAlgorithmParameterException.class,
+                () -> configured.generateKeyPair("ML-DSA-65", "pqcKey"));
+        assertTrue(e.getMessage().contains("thales-luna"), e.getMessage());
+        assertTrue(e.getMessage().contains("pkcs11v32"), e.getMessage());
+        assertTrue(e.getMessage().contains(
+                ch.ithings.kimbo11ng.profile.ProfileResolver.PROFILE_PROPERTY), e.getMessage());
+        // Every profile that knows it, not the first one ServiceLoader happened to return.
+        assertTrue(e.getMessage().contains("vendor-test"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("rejects a key specification no profile and no curve table knows")
+    void nonsenseKeySpec() throws Exception {
+        CryptoTokenImpl configured = tokenWith(new FakeToken(), tokenProperties());
+        InvalidAlgorithmParameterException e = assertThrows(
+                InvalidAlgorithmParameterException.class,
+                () -> configured.generateKeyPair("not-an-algorithm", "key"));
+        assertTrue(e.getMessage().contains("not-an-algorithm"), e.getMessage());
+    }
+
+    @Test
+    @DisplayName("logs the effective algorithm table at init")
+    void effectiveTableIsAvailable() throws Exception {
+        CryptoTokenImpl configured = tokenWith(
+                new FakeToken().hideMechanism(FakeToken.CKM_SLH_DSA), tokenProperties());
+        var algorithms = configured.getProvider().runtime().algorithms();
+
+        assertEquals(6, algorithms.supported().size(), "three ML-DSA and three ML-KEM");
+        assertEquals(12, algorithms.excluded().size(), "the SLH-DSA variants cannot sign");
+        assertTrue(algorithms.describe().contains("6/18 usable"), algorithms.describe());
+    }
+
     @Test
     @DisplayName("refuses to initialize without a library path")
     void libraryPathIsRequired() {

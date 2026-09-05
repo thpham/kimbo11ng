@@ -9,15 +9,15 @@ import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.Pkcs11Module;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
 import ch.ithings.kimbo11ng.p11.SessionLease;
+import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.P11KeyRef;
-import ch.ithings.kimbo11ng.provider.PublicKeyReader;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
-import ch.ithings.kimbo11ng.provider.Kimbo11ngPrivateKey;
 import ch.ithings.kimbo11ng.provider.PublicKeyReader;
 import ch.ithings.kimbo11ng.provider.TokenRuntime;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
@@ -46,6 +46,7 @@ import java.security.spec.AlgorithmParameterSpec;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.RSAKeyGenParameterSpec;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Properties;
@@ -195,15 +196,20 @@ public class CryptoTokenImpl {
             String upper = keySpec.toUpperCase(Locale.ROOT);
 
             if (keySpec.matches("\\d+") || upper.startsWith("RSA")) {
+                requireMechanism(current, CKM.RSA_PKCS_KEY_PAIR_GEN, keySpec);
                 generateRsa(current, label, keyId, parseRsaKeySize(keySpec), alias);
                 return;
             }
             Optional<AlgorithmEntry> entry = current.profile().lookup(keySpec);
             if (entry.isPresent()) {
+                requirePqcSupported(current, entry.get());
                 generatePqc(current, label, keyId, entry.get(), alias);
                 return;
             }
-            generateEc(current, label, keyId, curveNameOf(keySpec), alias);
+            String curveName = curveNameOf(keySpec);
+            requireCurveOrBetterProfile(current, keySpec, curveName);
+            requireMechanism(current, CKM.EC_KEY_PAIR_GEN, keySpec);
+            generateEc(current, label, keyId, curveName, alias);
         } catch (InvalidAlgorithmParameterException e) {
             throw e;
         } catch (Exception e) {
@@ -243,6 +249,88 @@ public class CryptoTokenImpl {
     }
 
     // ---- generation ----
+
+    /**
+     * Refuses a post-quantum algorithm the probe excluded, naming the reason.
+     *
+     * <p>What this replaces: {@code ca init} with an ML-DSA-65 key on a token whose firmware does
+     * not have the mechanism produced {@code CKR_MECHANISM_INVALID} from inside
+     * {@code C_GenerateKeyPair}, with nothing naming the mechanism, the algorithm, or the fact that
+     * fifteen other algorithms in the same profile would have worked.
+     */
+    private void requirePqcSupported(TokenRuntime current, AlgorithmEntry entry)
+            throws InvalidAlgorithmParameterException {
+        String reason = current.algorithms().rejectionReason(entry.canonicalName());
+        if (reason == null) {
+            return;
+        }
+        if (!current.algorithms().failFast()) {
+            log.warn("Generating a " + entry.canonicalName() + " key even though " + reason
+                    + " (" + TokenCapabilities.PROBE_FAIL_FAST + "=false). If the token rejects the"
+                    + " mechanism, this is why.");
+            return;
+        }
+        throw new InvalidAlgorithmParameterException(entry.canonicalName()
+                + " cannot be generated on this token: " + reason + ". The profile in use is '"
+                + current.profile().name() + "'; algorithms this token does offer are listed in"
+                + " the log at token initialisation. Set " + TokenCapabilities.PROBE_FAIL_FAST
+                + "=false to attempt it anyway.");
+    }
+
+    /**
+     * Catches a key specification that is neither a curve nor an algorithm the active profile
+     * describes, and says which profile would have described it.
+     *
+     * <p>Anything not RSA and not in the profile falls through to the EC path, so a token
+     * configured with the wrong profile answered a request for ML-DSA-65 with "string ML-DSA-65 is
+     * not an OID" — an accurate statement about the EC branch and no help at all about the actual
+     * mistake, which is one property.
+     */
+    private void requireCurveOrBetterProfile(TokenRuntime current, String keySpec, String curveName)
+            throws InvalidAlgorithmParameterException {
+        if (org.bouncycastle.asn1.ASN1ObjectIdentifier.tryFromID(
+                KeyTemplates.resolveCurveOid(curveName)) != null) {
+            return;
+        }
+        // Only on the failure path, so the ServiceLoader scan costs nothing in normal operation.
+        // Every profile that knows the algorithm is named, not the first one found: which of them
+        // is right for this HSM is the operator's call, and picking one to suggest would be the
+        // same guess this phase exists to remove.
+        List<String> knownTo = ProfileResolver.available().stream()
+                .filter(p -> p.lookup(keySpec).isPresent())
+                .map(PqcMechanismProfile::name)
+                .sorted()
+                .toList();
+        if (!knownTo.isEmpty()) {
+            throw new InvalidAlgorithmParameterException("'" + keySpec + "' is not a curve name,"
+                    + " and the profile in use ('" + current.profile().name() + "') does not"
+                    + " describe it. These profiles do: " + knownTo + ". Set "
+                    + ProfileResolver.PROFILE_PROPERTY + " to whichever matches this HSM, or"
+                    + " remove it and let the capability probe choose.");
+        }
+        throw new InvalidAlgorithmParameterException("'" + keySpec + "' is neither a curve name"
+                + " this provider recognises nor an algorithm described by any installed profile"
+                + " (in use: '" + current.profile().name() + "').");
+    }
+
+    /** The same check for RSA and EC, where the mechanism is fixed and there is no profile row. */
+    private void requireMechanism(TokenRuntime current, long ckm, String keySpec)
+            throws InvalidAlgorithmParameterException {
+        AlgorithmSupport algorithms = current.algorithms();
+        if (algorithms.capabilities().canGenerateKeyPair(ckm)) {
+            return;
+        }
+        String message = "the token does not offer key-pair generation with "
+                + TokenCapabilities.name(ckm);
+        if (!algorithms.failFast()) {
+            log.warn("Generating a '" + keySpec + "' key even though " + message + " ("
+                    + TokenCapabilities.PROBE_FAIL_FAST + "=false).");
+            return;
+        }
+        throw new InvalidAlgorithmParameterException("Cannot generate a '" + keySpec
+                + "' key: " + message + ". Set " + TokenCapabilities.PROBE_FAIL_FAST
+                + "=false to attempt it anyway.");
+    }
 
     /**
      * Refuses to generate over an alias the token already uses.
@@ -404,8 +492,16 @@ public class CryptoTokenImpl {
             throw new NoSuchSlotException("Failed to resolve slot: " + e.getMessage(), e);
         }
 
-        PqcMechanismProfile profile = ProfileResolver.resolve(properties);
         P11Slot slot = modules.get(libPath).slot(slotId, properties);
+        // Before anything else is decided: a slot-level call, so it needs no session and no PIN,
+        // which is what lets the algorithm table be settled at init rather than at first use.
+        TokenCapabilities capabilities = slot.capabilities();
+        PqcMechanismProfile profile = ProfileResolver.resolve(properties, capabilities);
+        boolean failFast = Boolean.parseBoolean(
+                properties.getProperty(TokenCapabilities.PROBE_FAIL_FAST, "true"));
+        AlgorithmSupport algorithms = AlgorithmSupport.compute(profile, capabilities, failFast);
+        log.info(algorithms.describe());
+
         boolean backfill = Boolean.parseBoolean(
                 properties.getProperty(TokenRuntime.BACKFILL_KEY_IDS, "true"));
         // Lenient by default, and only for enumeration — generation is always strict. The one
@@ -418,7 +514,7 @@ public class CryptoTokenImpl {
                 PublicKeyReader.STRICT_PUBLIC_KEY, "false"))
                 ? PublicKeyReader.Policy.STRICT
                 : PublicKeyReader.Policy.LENIENT;
-        TokenRuntime newRuntime = new TokenRuntime(slot, profile, backfill, policy);
+        TokenRuntime newRuntime = new TokenRuntime(slot, algorithms, backfill, policy);
         // The signing path can see that the HSM is gone but cannot act on it; clearing EJBCA's
         // keystore is what stops work being routed to a CA whose token is not answering, and what
         // lets autoActivate() log in again with the PIN EJBCA holds and we do not.

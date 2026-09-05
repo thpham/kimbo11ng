@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.profile.AlgorithmSupport;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 
 import java.util.Objects;
@@ -32,7 +33,7 @@ public final class TokenRuntime {
     public static final String BACKFILL_KEY_IDS = "kimbo11ng.keyid.backfill";
 
     private final P11Slot slot;
-    private final PqcMechanismProfile profile;
+    private final AlgorithmSupport algorithms;
     private final boolean backfillKeyIds;
     private final PublicKeyReader.Policy publicKeyPolicy;
     private volatile Kimbo11ngKeyStoreSpi keyStoreSpi;
@@ -47,8 +48,13 @@ public final class TokenRuntime {
 
     public TokenRuntime(P11Slot slot, PqcMechanismProfile profile, boolean backfillKeyIds,
             PublicKeyReader.Policy publicKeyPolicy) {
+        this(slot, AlgorithmSupport.unchecked(profile), backfillKeyIds, publicKeyPolicy);
+    }
+
+    public TokenRuntime(P11Slot slot, AlgorithmSupport algorithms, boolean backfillKeyIds,
+            PublicKeyReader.Policy publicKeyPolicy) {
         this.slot = Objects.requireNonNull(slot, "slot");
-        this.profile = Objects.requireNonNull(profile, "profile");
+        this.algorithms = Objects.requireNonNull(algorithms, "algorithms");
         this.backfillKeyIds = backfillKeyIds;
         this.publicKeyPolicy = Objects.requireNonNull(publicKeyPolicy, "publicKeyPolicy");
     }
@@ -74,7 +80,18 @@ public final class TokenRuntime {
     }
 
     public PqcMechanismProfile profile() {
-        return profile;
+        return algorithms.profile();
+    }
+
+    /**
+     * The profile intersected with what this token and this BouncyCastle can do.
+     *
+     * <p>Distinct from {@link #profile()}: the profile is what the vendor is claimed to support,
+     * this is what was confirmed. Generation goes through here so that asking for an algorithm the
+     * token does not have is refused by name rather than by {@code CKR_MECHANISM_INVALID}.
+     */
+    public AlgorithmSupport algorithms() {
+        return algorithms;
     }
 
     /** The keystore SPI for this token, or {@code null} before a KeyStore has been created. */
@@ -89,6 +106,7 @@ public final class TokenRuntime {
     @Override
     public String toString() {
         return "TokenRuntime{lib=" + slot.libPath() + " slot=" + slot.slotId()
-                + " profile=" + profile.name() + "}";
+                + " profile=" + algorithms.profile().name()
+                + " (" + algorithms.supported().size() + " usable algorithms)}";
     }
 }

@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–3 complete. Phases 4–8 not started.        |
+| **Status** | Phases 0–5 complete. Phases 6–8 not started.        |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -267,7 +267,7 @@ is deprecated. An initial bytecode check suggested otherwise; the compiler settl
 **Gate detail** — injected session death mid-sign still returns a valid signature · legacy key resolves and
 backfills, and still resolves when `CKA_ID` is read-only · existing demo keys keep working.
 
-## Phase 4 — Public-key construction correctness
+## Phase 4 — Public-key construction correctness ✅
 
 - **4.1** EC: accept the OCTET STRING unwrap only if it consumes the whole buffer; validate against
   the curve's field size; bounds-check.
@@ -313,12 +313,71 @@ keeps a wrong OID out of a certificate.
 **Gate detail** — RAW and DER EC matrix both at 0% failure · a missing `CKA_PARAMETER_SET` on an ML-DSA-44
 key yields a named error, never an ML-DSA-65 OID.
 
-## Phase 5 — Capability probing and fail-fast
+## Phase 5 — Capability probing and fail-fast ✅
 
 - **5.1** `TokenCapabilities` checking `CKF_SIGN` / `CKF_GENERATE_KEY_PAIR`, not mere presence.
 - **5.2** Intersect the table with the token at init; log it; fail fast naming the missing CKM.
 - **5.3** Profile auto-detection by probe score.
 - **5.4** Reject key specs outside the effective set.
+
+**Gate** — met. Against the live SoftHSMv3: auto-detection selects `pkcs11v32` on its own
+("18 of its 18 algorithms are advertised by the token") and the effective table is logged at init.
+Against the fake: a token missing `CKM_ML_DSA_KEY_PAIR_GEN` excludes exactly the three ML-DSA rows
+and keeps the other fifteen; a synthetic vendor profile discovered through `META-INF/services` is
+auto-selected for a token that answers only vendor mechanisms.
+
+### What the implementation changed, and why
+
+**The probe reads flags, and the flags matter.** Measured on SoftHSMv3, `CKM_ML_KEM` (0x17) is
+advertised with `0x30000000` — encapsulate and decapsulate — and no `CKF_SIGN`. A probe testing
+presence alone would have called that key signable. Conversely `CKM_EC_KEY_PAIR_GEN` reports
+`0x01910000`, generation plus EC curve flags, and `CKM_ML_DSA` reports `0x2800`, sign plus verify.
+The min/max key sizes are no use at all: the same token gives `128`–`256` for `CKM_ML_DSA`, which
+are security strengths, not key lengths. Only the mechanism and its flags are read.
+
+**Init does not fail; generation does.** The plan had `kimbo11ng.probe.failFast` fail `init` when a
+configured algorithm is missing. There is no configured algorithm at init — a key specification
+arrives with the request — and failing init would take a token offline for RSA and EC too, neither
+of which comes from the profile table at all. An RSA/EC-only HSM is a legitimate deployment. So the
+refusal moved to `generateKeyPair`, which is where an algorithm is actually named, and the property
+governs that. What init does is log the effective table, once, as a single event.
+
+**An unanswered probe is not a "no".** A token that will not answer `C_GetMechanismList` yields
+`TokenCapabilities.unknown`, which answers yes to everything and says so in the logged table
+(`NOT PROBED: …`). An empty capability set would have meant "this token does nothing" and taken a
+working HSM out of service over a mechanism list it declined to give. For the same reason a
+mechanism that is listed but not describable — some modules answer `CKR_MECHANISM_INVALID` for
+their own vendor mechanisms — counts as present with unknown flags, and a failed probe is never
+cached, unlike a successful one.
+
+**Ties in auto-detection are not broken.** Two profiles matching the same number of algorithms
+means their mechanism constants overlap on this token, and choosing either is a guess about whose
+numbering is in force — the same class of guess that put a wrong OID in a certificate. The built-in
+profile is used and both candidates are named. An explicit `kimbo11ng.pqc.profile` always wins over
+the probe: a module may under-report a mechanism gated by a partition policy, and overriding an
+operator on that evidence is worse than honouring a wrong choice, which at least fails where it was
+configured. `FakeToken` grew `underReportMechanism` to model exactly that, distinct from
+`hideMechanism`, which is firmware that genuinely lacks the mechanism.
+
+**The wrong-profile message now names the right profile.** Anything that is neither RSA nor in the
+active profile falls through to the EC branch, so a token configured with `thales-luna` answered a
+request for ML-DSA-65 with "string ML-DSA-65 is not an OID" — true of that branch and no help about
+the mistake, which is one property. Verified against the live stack, it now reads: *'ML-DSA-65' is
+not a curve name, and the profile in use ('thales-luna') does not describe it. These profiles do:
+[pkcs11v32]. Set kimbo11ng.pqc.profile to whichever matches this HSM, or remove it and let the
+capability probe choose.* Every profile that knows the algorithm is listed, not the first one
+`ServiceLoader` returned.
+
+**BouncyCastle is probed too, and only its successes are cached.** An algorithm the deployed BC has
+no `KeyFactory` for is excluded up front — this is what replaced the deleted `RawPqcPublicKey`,
+rather than wrapping a key EJBCA cannot sign with. A negative answer depends on which providers
+happen to be registered when it is asked, so caching one would let the order in which EJBCA
+registers BouncyCastle and initialises tokens decide whether PQC works at all.
+
+**Gate detail** — live SoftHSMv3 auto-detects `pkcs11v32` at 18/18 and the deliberate
+`thales-luna` misconfiguration is refused by name, then works again on restore · a hidden
+generation mechanism excludes three rows, a `CKF_SIGN`-less `CKM_SLH_DSA` excludes twelve, and
+ML-KEM survives both · 18 ITs green.
 
 ## Phase 6 — Secrets, key usages, log hygiene
 
@@ -349,7 +408,8 @@ create-token, `mvn verify -Pit`). Both green before a phase merges.
 
 Additionally — after Phase 2, `just deploy` into a running stack and `just create-token` twice, to
 exercise the facade swap; after Phase 3, restart with keys generated by the _old_ JAR present, to
-prove the migration path.
+prove the migration path; after Phase 5, set `kimbo11ng.pqc.profile=thales-luna` on the live token
+and confirm the refusal names `pkcs11v32`, then restore and confirm auto-detection reports 18/18.
 
 ## Standing rules
 

@@ -87,9 +87,13 @@ public final class FakeToken extends UnsupportedNativeProvider {
     public static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
     public static final long CKM_ML_DSA = 0x0000001DL;
     public static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
+    public static final long CKM_ML_KEM = 0x00000017L;
     public static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002DL;
     public static final long CKM_SLH_DSA = 0x0000002EL;
     public static final long CKA_PARAMETER_SET = 0x0000061DL;
+
+    /** {@code CKF_ENCAPSULATE | CKF_DECAPSULATE}, added in v3.2 and absent from jacknji11 1.3.1. */
+    public static final long CKF_KEM = 0x30000000L;
 
     private static final BouncyCastleProvider BC = new BouncyCastleProvider();
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -125,6 +129,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Set<Long> readOnlyAttributes = new HashSet<>();
     private final Map<Long, Long> vendorMechanisms = new HashMap<>();
     private final Set<Long> extraMechanisms = new HashSet<>();
+    private final Set<Long> hiddenMechanisms = new HashSet<>();
+    private final Set<Long> underReportedMechanisms = new HashSet<>();
+    private final Map<Long, Long> mechanismFlags = new HashMap<>();
+    private final Set<Long> undescribableMechanisms = new HashSet<>();
+    private long mechanismListCkr = -1;
     private long failNextCkr = -1;
     private int killSessionsAfter = -1;
     private int operationCount;
@@ -199,6 +208,60 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** Advertise an extra mechanism in {@code C_GetMechanismList}. */
     public FakeToken advertiseMechanism(long ckm) {
         extraMechanisms.add(ckm);
+        return this;
+    }
+
+    /**
+     * Stop advertising a mechanism, as firmware that predates an algorithm does. The mechanism then
+     * appears in neither {@code C_GetMechanismList} nor {@code C_GetMechanismInfo}, and any
+     * operation asking for it answers {@code CKR_MECHANISM_INVALID}.
+     */
+    public FakeToken hideMechanism(long... ckms) {
+        for (long ckm : ckms) {
+            hiddenMechanisms.add(ckm);
+        }
+        return this;
+    }
+
+    /**
+     * Omit a mechanism from {@code C_GetMechanismList} while still honouring it.
+     *
+     * <p>Different from {@link #hideMechanism} in the way that matters: here the probe is wrong, not
+     * the token. Modules do under-report — a mechanism gated by a partition policy may be usable
+     * and unlisted — and that is the case the {@code kimbo11ng.probe.failFast} kill switch exists
+     * for.
+     */
+    public FakeToken underReportMechanism(long ckm) {
+        underReportedMechanisms.add(ckm);
+        return this;
+    }
+
+    /**
+     * Report specific {@code CKF_*} flags for a mechanism. For the case a probe exists to catch: a
+     * mechanism that is listed but not usable for the operation being asked of it.
+     */
+    public FakeToken mechanismFlags(long ckm, long flags) {
+        mechanismFlags.put(ckm, flags);
+        return this;
+    }
+
+    /**
+     * List a mechanism but answer {@code CKR_MECHANISM_INVALID} when asked to describe it. Real
+     * modules do this for some of their own vendor mechanisms.
+     */
+    public FakeToken undescribableMechanism(long ckm) {
+        undescribableMechanisms.add(ckm);
+        return this;
+    }
+
+    /**
+     * Refuse {@code C_GetMechanismList} for good, as a module behind a policy that will not
+     * enumerate its mechanisms does. Distinct from {@link #failNextWith}: this fails only the probe
+     * and fails it every time, so the rest of the token stays usable and the question of what
+     * kimbo11ng does with an unanswerable probe can actually be asked.
+     */
+    public FakeToken failMechanismList(long ckr) {
+        this.mechanismListCkr = ckr;
         return this;
     }
 
@@ -378,10 +441,19 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_GetMechanismList(long slot, long[] list, LongRef count) {
+        // Gated: a token whose client has lost its connection reports itself here too, and the
+        // capability probe must not turn that into "this token supports nothing".
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
+        if (mechanismListCkr >= 0) {
+            return mechanismListCkr;
+        }
         if (slot != slotId) {
             return CKR.SLOT_ID_INVALID;
         }
-        List<Long> mechanisms = mechanismList();
+        List<Long> mechanisms = advertisedMechanisms();
         if (list == null) {
             count.value = mechanisms.size();
             return CKR.OK;
@@ -397,13 +469,22 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return CKR.OK;
     }
 
+    /** What {@code C_GetMechanismList} answers: everything supported, less the under-reported. */
+    private List<Long> advertisedMechanisms() {
+        List<Long> advertised = mechanismList();
+        advertised.removeAll(underReportedMechanisms);
+        return advertised;
+    }
+
+    /** What the token will actually do, which is not always what it admits to. */
     private List<Long> mechanismList() {
         List<Long> base = new ArrayList<>(List.of(
                 CKM.RSA_PKCS_KEY_PAIR_GEN, CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
                 CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
                 CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA,
-                CKM_ML_KEM_KEY_PAIR_GEN));
+                CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM));
+        base.removeAll(hiddenMechanisms);
         // A vendor-remapped mechanism is advertised under its vendor value only.
         base.replaceAll(m -> vendorMechanisms.getOrDefault(m, m));
         base.addAll(extraMechanisms);
@@ -415,18 +496,31 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (slot != slotId) {
             return CKR.SLOT_ID_INVALID;
         }
-        if (!mechanismList().contains(type)) {
+        if (!advertisedMechanisms().contains(type) || undescribableMechanisms.contains(type)) {
             return CKR.MECHANISM_INVALID;
         }
-        boolean keygen = type == CKM.RSA_PKCS_KEY_PAIR_GEN || type == CKM.EC_KEY_PAIR_GEN
-                || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
-                || type == CKM_ML_KEM_KEY_PAIR_GEN;
-        info.flags = keygen
-                ? CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR
-                : CK_MECHANISM_INFO.CKF_SIGN | CK_MECHANISM_INFO.CKF_VERIFY;
+        info.flags = flagsFor(type);
         info.ulMinKeySize = 0;
         info.ulMaxKeySize = 4096;
         return CKR.OK;
+    }
+
+    /** Flags matching what SoftHSMv3 reports, unless a test has overridden them. */
+    private long flagsFor(long type) {
+        Long override = mechanismFlags.get(type);
+        if (override != null) {
+            return override;
+        }
+        if (type == CKM.RSA_PKCS_KEY_PAIR_GEN || type == CKM.EC_KEY_PAIR_GEN
+                || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
+                || type == CKM_ML_KEM_KEY_PAIR_GEN) {
+            return CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR;
+        }
+        // Encapsulate/decapsulate, not sign — the distinction a presence-only probe would lose.
+        if (type == CKM_ML_KEM) {
+            return CKF_KEM;
+        }
+        return CK_MECHANISM_INFO.CKF_SIGN | CK_MECHANISM_INFO.CKF_VERIFY;
     }
 
     // ---------------------------------------------------------------- sessions and login

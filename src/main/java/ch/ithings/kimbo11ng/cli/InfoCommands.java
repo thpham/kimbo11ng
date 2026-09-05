@@ -263,10 +263,24 @@ final class InfoCommands {
                         + " parameters for at generation.");
 
         for (AlgorithmEntry entry : algorithms.supported()) {
-            KeyTemplates.Pair pqc = KeyTemplates.pqc(sample, sample, entry, algorithms.profile());
+            // The profile's declaration rather than the template's attributes, and only here. For
+            // every other row the template is the most specific truth there is; for a KEM it is
+            // the least. KeyTemplates asks for CKA_ENCRYPT and CKA_DECRYPT, so deriving this
+            // column from it would report ML-KEM as an encryption algorithm — which it is not.
+            // AlgorithmEntry.ops() carries the operation names PKCS#11 v3.2 gives these keys, and
+            // ProfileConformanceKit.opsMatchTheGenerationTemplate holds the two to agreeing.
+            String ops = entry.ops().stream().map(Enum::name).sorted()
+                    .collect(Collectors.joining(", "));
             algorithmRow(out, notes, entry.canonicalName(), entry.family().jcaName(),
-                    entry.ckmKeyPairGen(), "ok",
-                    usages(pqc), "");
+                    entry.ckmKeyPairGen(), "ok", ops,
+                    entry.canSign() ? ""
+                            : "Requested on the token as CKA_ENCRYPT and CKA_DECRYPT, not as the"
+                                    + " CKA_ENCAPSULATE (0x633) and CKA_DECAPSULATE (0x634) that"
+                                    + " PKCS#11 v3.2 defines for a KEM — jacknji11 1.3.1 predates"
+                                    + " both, along with C_EncapsulateKey. SoftHSMv3 sets the"
+                                    + " correct pair itself regardless, so showobjectattributes"
+                                    + " will show all four; a stricter token may not be so"
+                                    + " forgiving about being asked for the wrong two.");
         }
 
         for (SecretKeyType type : SecretKeyType.all()) {

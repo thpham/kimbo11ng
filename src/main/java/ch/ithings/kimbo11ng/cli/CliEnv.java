@@ -86,13 +86,34 @@ final class CliEnv {
      * <p>The prompt string is Keyfactor's, verbatim, so an operator's existing expect scripts and
      * their muscle memory both survive the move.
      *
+     * <p>An absent credential never leaves this method. {@code Console.readPassword} returns
+     * {@code null} at EOF, which is what Ctrl-D at the prompt produces, and {@code Pins.encodeUtf8}
+     * turns both that and an empty array into a zero-length PIN — so passing one on would reach
+     * {@code C_Login} as a real authentication attempt with an empty credential. Most tokens count
+     * that as a failure, and three or five failures lock the user PIN. An operator who cancelled a
+     * prompt should not have spent one of those.
+     *
      * <p>The caller owns the returned array and must zero it.
+     *
+     * @throws CliException if no credential was supplied, or the one supplied was empty
      */
-    char[] pin(Args args) {
+    char[] pin(Args args) throws CliException {
         String supplied = args.get("password", null);
         if (supplied != null) {
+            if (supplied.isEmpty()) {
+                throw CliException.usage("--password was given with an empty value. An empty PIN is"
+                        + " not a credential: the token would score it as a failed login attempt,"
+                        + " and a few of those lock the user PIN. Pass the PIN, or omit --password"
+                        + " to be prompted for it.");
+            }
             return supplied.toCharArray();
         }
-        return pinReader.read("Enter slot login password: ");
+        char[] entered = pinReader.read("Enter slot login password: ");
+        if (entered == null || entered.length == 0) {
+            throw new CliException("No PIN was entered, so nothing was sent to the token and no"
+                    + " login attempt was used. Run the command again and type the PIN at the"
+                    + " prompt, or pass --password.");
+        }
+        return entered;
     }
 }

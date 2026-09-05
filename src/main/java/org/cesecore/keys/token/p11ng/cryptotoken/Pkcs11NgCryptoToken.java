@@ -17,6 +17,7 @@ import org.apache.log4j.Logger;
 
 import java.io.IOException;
 import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
@@ -188,11 +189,26 @@ public class Pkcs11NgCryptoToken extends BaseCryptoToken implements P11SlotUser,
 
     @Override
     public Set<Long> getKeyUsagesFromPrivateKey(String alias) throws CryptoTokenOfflineException {
-        return impl.getKeyUsagesFromKey(alias, true);
+        return impl.getKeyUsagesFromPrivateKey(alias);
     }
 
     @Override
     public Set<Long> getKeyUsagesFromPublicKey(String alias) throws CryptoTokenOfflineException {
-        return impl.getKeyUsagesFromKey(alias, false);
+        return impl.getKeyUsagesFromPublicKey(alias);
+    }
+
+    /**
+     * Refuses a key test that cannot mean anything before {@code BaseCryptoToken} picks a branch.
+     *
+     * <p>{@code testKeyPair} chooses between a signing test and an RSA-style encrypt/decrypt test
+     * from the key-usage set. An ML-KEM key legitimately reports {@code CKA_DECRYPT} and no
+     * {@code CKA_SIGN}, which selects the encryption branch — and key encapsulation is not
+     * encryption, so the test fails inside a JCA {@code Cipher} with a message about padding.
+     */
+    @Override
+    public void testKeyPair(String alias)
+            throws InvalidKeyException, CryptoTokenOfflineException {
+        impl.requireTestableKeyPair(alias);
+        super.testKeyPair(alias);
     }
 }

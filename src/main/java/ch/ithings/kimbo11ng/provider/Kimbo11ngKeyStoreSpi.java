@@ -395,6 +395,24 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         return publicKeys.get(alias);
     }
 
+    /**
+     * The durable reference for an alias, or {@code null} if this keystore has not seen it.
+     *
+     * <p>Exposed so that reads which are not key operations — the key-usage attributes, say — can
+     * find both halves of a pair by the {@code CKA_ID} they share rather than by a label either of
+     * them may have been renamed under.
+     */
+    public P11KeyRef referenceFor(String alias) {
+        Kimbo11ngPrivateKey key = privateKeys.get(alias);
+        return key == null ? null : key.ref();
+    }
+
+    /** The post-quantum algorithm row for an alias; empty for RSA, EC, and unknown aliases. */
+    public Optional<AlgorithmEntry> algorithmFor(String alias) {
+        Kimbo11ngPrivateKey key = privateKeys.get(alias);
+        return key == null ? Optional.empty() : key.entry();
+    }
+
     /** Drops cached keys; used when the token is deactivated. */
     public void clear() {
         privateKeys.clear();

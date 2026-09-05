@@ -608,6 +608,25 @@ class EjbcaContainerIT {
             "Certificate must be signed with SHA256WithRSA (primary). sigAlgOID=" + cert.getSigAlgOID());
     }
 
+    @Test @Order(19)
+    void testMlKemKey_refusesWithAnExplanation() throws Exception {
+        // EJBCA's key test has two branches, sign and RSA-style encrypt/decrypt, chosen from the
+        // key-usage set. An ML-KEM key honestly reports CKA_DECRYPT and no CKA_SIGN, so it lands
+        // in the encryption branch — and encapsulation is not encryption. Without the interception
+        // this fails inside a JCA Cipher with a message about padding.
+        org.testcontainers.containers.Container.ExecResult r =
+            ejbcaContainer().execInContainer(
+                "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
+                "--token", "TestHSM", "--alias", "it-mlkem");
+
+        assertEquals(1, r.getExitCode(),
+            "testkey on a KEM key must fail, not silently pass.\nstdout: " + r.getStdout());
+        assertTrue(r.getStdout().contains("key-encapsulation"),
+            "the failure must say why. Output: " + r.getStdout());
+        assertTrue(r.getStdout().contains("ML-KEM-768"),
+            "the failure must name the algorithm. Output: " + r.getStdout());
+    }
+
     // ─── Private helpers ──────────────────────────────────────────────────────
 
     private static ContainerState ejbcaContainer() {

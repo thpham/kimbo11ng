@@ -117,7 +117,7 @@ public final class P11KeyRef {
      *        key with its private half, where finding the wrong same-label object is recoverable
      *        and finding none is not — never for deletion.
      */
-    long[] findAll(CryptokiE ce, long session, long objectClass, boolean labelFallback) {
+    public long[] findAll(CryptokiE ce, long session, long objectClass, boolean labelFallback) {
         if (hasCkaId()) {
             long[] byId = ce.FindObjects(session,
                     new CKA(CKA.CLASS, objectClass), new CKA(CKA.ID, ckaId));

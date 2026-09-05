@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–5 complete. Phases 6–8 not started.        |
+| **Status** | Phases 0–6 complete. Phases 7–8 not started.        |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -55,7 +55,7 @@ Eleven corrections from reading the EJBCA bytecode. The five that changed the de
 | `AlgorithmTools.getSignatureAlgorithms` uses `instanceof MLDSAKey`/`SLHDSAKey` and returns `emptyList()` otherwise.                                                                 | **Delete `RawPqcPublicKey`.** An opaque PQC key can never be signed with, so the fallback is a dead end.                                                                                                                              |
 | Our slot-list factory is priority 2 vs SunP11's 1, so EJBCA's classic PKCS11CryptoToken uses it for **every** library — SunPKCS11 is a silent co-user.                              | **Never call `C_Finalize`** in normal operation.                                                                                                                                                                                      |
 | `C_Login` on an already-logged-in token returns `CKR_USER_ALREADY_LOGGED_IN` without checking the PIN.                                                                              | No implementation can re-validate. The fix is a **truthful `deactivate()`**, not a re-check. The "no PIN in a heap dump" gate is unachievable — `BaseCryptoToken` holds `mAuthCode` itself.                                           |
-| `testKeyPair` branches on the key-usage set containing `0x105` (decrypt) or `0x108` (sign).                                                                                         | `getKeyUsagesFromKey` is **load-bearing**, not a nicety: an ML-DSA key reporting an empty set gets an RSA-style encryption test.                                                                                                      |
+| `testKeyPair` branches on the key-usage set containing `0x105` (decrypt) or `0x108` (sign).                                                                                         | Re-read in phase 6 and **restated**: the predicate is `contains(261) && !contains(264)`, so an empty set selects the *signing* test, not an encryption test. The real consumer that constrains the design is `getKeyUsageStringForKeyPairInfo`, which compares the set for equality. See [Phase 6](#phase-6--secrets-key-usages-log-hygiene-). |
 
 Also: phases reordered so the **algorithm registry comes before** the session pool (it defines the
 types the later phases consume and is the strategic Luna enabler); `C_Verify` dropped from scope
@@ -379,11 +379,78 @@ registers BouncyCastle and initialises tokens decide whether PQC works at all.
 generation mechanism excludes three rows, a `CKF_SIGN`-less `CKM_SLH_DSA` excludes twelve, and
 ML-KEM survives both · 18 ITs green.
 
-## Phase 6 — Secrets, key usages, log hygiene
+## Phase 6 — Secrets, key usages, log hygiene ✅
 
 - **6.1** PIN via `CharsetEncoder`, zeroed in `finally`; never a `String`.
 - **6.2** `getKeyUsagesFromKey` returns the true CKA constants (`0x105`/`0x108` drive `testKeyPair`).
 - **6.3** Log redaction via `LogRedactionUtils`; per-keygen INFO → DEBUG.
+- **6.4** Dead constants removed; `Kimbo11ngPrivateKey` identity on `(libPath, slot, ckaId)`.
+
+**Gate** — met, with the expectation itself corrected (below). Against the fake: an RSA private key
+reports `{261, 264}`, EC and ML-DSA `{264}`, ML-KEM `{261}`. Against the live stack: `cryptotoken
+testkey` passes for RSA and ML-DSA and refuses an ML-KEM key by name. A source scan gate now fails
+the build if any credential is turned into a `String` or reaches a log statement.
+
+### What the implementation changed, and why
+
+**Two of the four items were already done.** 6.1 landed with the session pool in phase 2 —
+`Pins.encodeUtf8` encodes through a `CharBuffer` and `SessionPool.login` zeroes the bytes in a
+`finally` — and 6.4's `Kimbo11ngPrivateKey.equals`/`hashCode` on `(libPath, slot, ckaId)` landed
+with key identity in phase 3, along with the removal of `PASSWORD_LABEL_KEY` and `ATTRIB_LABEL_KEY`.
+What phase 6 adds for them is a standing gate: `SecretHygieneTest` scans `src/main/java` for a
+credential passed to `new String(…)`/`String.valueOf(…)` and for any log statement naming a
+credential or the token `Properties` — which carry `pin=`. Verified by introducing each violation
+and watching the gate name the file and line. SpotBugs has no detector for either, and no runtime
+test can observe a heap that no longer holds the reference, so the source is the only place the
+property is visible.
+
+**The stated reason for 6.2 was wrong, and the real contract is narrower.**
+`BaseCryptoToken.testKeyPair` computes `usages.contains(261) && !usages.contains(264)` and runs the
+encrypt/decrypt test only when that is true. The empty set every EJBCA CE token returns — including
+`PKCS11CryptoToken`, `SoftCryptoToken` and `AzureCryptoToken`, all of which return `new TreeSet<>()`
+— makes it **false**, so today everything already gets the *signing* test. The plan, and the TODO
+comment this replaces, said an empty set selects an RSA-style encryption test for every key. It does
+not. The real gain is elsewhere: a decryption-only key currently gets a signing test it cannot pass,
+and EJBCA has no key-usage information to show.
+
+**A second consumer decides the design, and the plan's gate would have broken it.**
+`CryptoTokenManagementSessionBean.getKeyUsageStringForKeyPairInfo` compares the returned set for
+**equality** against `{261}`, `{264}` and `{261,264}`, mapping them to `KeyPairInfo.KeyUsage`
+`ENCRYPT`, `SIGN` and `SIGN_ENCRYPT`, and to `null` for anything else — that is what the admin UI
+shows per key. The plan's gate expected an RSA key to report `{0x105, 0x107, 0x108}`; that includes
+`CKA_UNWRAP`, the equality would never match, and the UI would show no usage at all, which is worse
+than the empty set. So `getKeyUsagesFromPrivateKey` is restricted to the two constants EJBCA
+compares against, and `getKeyUsagesFromKey(alias, isPrivate)` with no attributes named still reports
+the full set for a caller that wants it.
+
+**Attributes are read one per call.** A bulk `C_GetAttributeValue` returns non-zero if any requested
+type is invalid for the object, and jacknji11 turns any non-zero return into an exception — so one
+attribute a token does not implement would take the whole answer with it. The hot path asks for two.
+
+**Implementing this is what makes ML-KEM need intercepting.** An ML-KEM private key honestly reports
+`CKA_DECRYPT` and no `CKA_SIGN`, which is exactly the predicate that selects the encryption branch —
+so the change that makes the answer true is also the change that routes a KEM key into a JCA
+`Cipher`. `Pkcs11NgCryptoToken.testKeyPair` now refuses first, naming the algorithm and saying that
+neither branch is a KEM operation and the key is otherwise fine. Verified live: `cryptotoken testkey`
+exits 1 with that message for ML-KEM-768 and still passes for ML-DSA-65 and RSA-2048. The RSA case
+is the one that had to be checked — `{261, 264}` contains 261, and had the predicate been
+`contains(261)` alone, every RSA CA key would have moved to the encryption branch.
+
+**`LogRedactionUtils` was dropped, deliberately.** It redacts subject DNs and subject alternative
+names, and `getContentLogSafe` returns a flat `<redacted>` whenever the global PII flag is set. A
+crypto-token alias is an operator-chosen key name, not certificate PII: running aliases through it
+would blank every alias in the token log while protecting nothing, and would put a dependency on
+`LogRedactionConfigurationCache` — an EJBCA singleton — into a path the unit tests exercise. Nothing
+here ever sees a certificate subject. An audit of every non-debug log statement found nothing that
+leaks; the `SecretHygieneTest` gate is what keeps it that way.
+
+**Per-keygen INFO stayed at INFO.** The plan demoted it to DEBUG as noise. Key generation on this
+token is CA key generation: rare, irreversible, and performed against hardware. One line recording
+it is a log an operator wants, not one they have to filter.
+
+**Gate detail** — RSA `{261,264}`, EC `{264}`, ML-DSA `{264}`, ML-KEM `{261}` · a key usage the
+token does not implement does not lose the others · both halves found by `CKA_ID`, so a relabelled
+public key is still read · live `testkey` refuses ML-KEM and passes ML-DSA and RSA · 19 ITs green.
 
 ## Phase 7 — Coverage that matches the claims
 

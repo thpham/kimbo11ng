@@ -9,6 +9,7 @@ import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CK_TOKEN_INFO;
 import org.pkcs11.jacknji11.Cryptoki;
 import org.pkcs11.jacknji11.CryptokiE;
+import org.pkcs11.jacknji11.NativeProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -53,8 +54,26 @@ public final class Pkcs11Module {
     Pkcs11Module(String canonicalPath, NativeProviderFactory factory)
             throws CryptoTokenOfflineException {
         this.canonicalPath = canonicalPath;
-        this.ce = new CryptokiE(new Cryptoki(factory.create(canonicalPath)));
+        this.ce = new CryptokiE(new Cryptoki(load(canonicalPath, factory)));
         initialize();
+    }
+
+    /**
+     * Loads the shared library, reporting a link failure as the token being offline.
+     *
+     * <p>JNA answers a module whose own dependencies do not resolve with an
+     * {@code UnsatisfiedLinkError} — an {@link Error}, which every {@code catch (Exception)}
+     * between here and EJBCA misses. So the most ordinary HSM misconfiguration there is, a client
+     * library outside {@code LD_LIBRARY_PATH}, escaped unmapped out of {@code initDevice} and out
+     * of the slot-list factory instead of naming the library that could not be loaded.
+     */
+    private static NativeProvider load(String canonicalPath, NativeProviderFactory factory)
+            throws CryptoTokenOfflineException {
+        try {
+            return factory.create(canonicalPath);
+        } catch (LinkageError e) {
+            throw Pkcs11Errors.offline("Could not load the PKCS#11 library " + canonicalPath, e);
+        }
     }
 
     private void initialize() throws CryptoTokenOfflineException {

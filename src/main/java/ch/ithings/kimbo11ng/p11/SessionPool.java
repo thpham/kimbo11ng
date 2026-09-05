@@ -222,10 +222,20 @@ public final class SessionPool {
     public void login(char[] pin)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
         byte[] pinBytes = Pins.encodeUtf8(pin);
-        try (SessionLease lease = borrow()) {
-            ce.Login(lease.session(), CKU.USER, pinBytes);
-            if (log.isDebugEnabled()) {
-                log.debug("Logged in to slot " + slotId);
+        try {
+            try {
+                loginOnce(pinBytes);
+            } catch (CryptoTokenOfflineException | RuntimeException first) {
+                if (Pkcs11Errors.classify(first) != Pkcs11Errors.Kind.RETRYABLE) {
+                    throw first;
+                }
+                // The pooled session was dead, not the token. loginOnce has already dropped it, so
+                // this attempt opens a fresh one. Without the retry an HSM that reconnected while
+                // EJBCA kept the token loaded could never be re-activated: every attempt drew the
+                // same stale handle and only an application server restart cleared it.
+                log.info("Retrying login to slot " + slotId + " on a fresh session"
+                        + Pkcs11Errors.describe(first));
+                loginOnce(pinBytes);
             }
         } catch (Exception e) {
             if (Pkcs11Errors.isAlreadyLoggedIn(e)) {
@@ -246,15 +256,53 @@ public final class SessionPool {
         }
     }
 
+    /** One {@code C_Login} on one borrowed session. The lease is dropped if the session is dead. */
+    private void loginOnce(byte[] pinBytes) throws CryptoTokenOfflineException {
+        SessionLease lease = borrow();
+        try {
+            ce.Login(lease.session(), CKU.USER, pinBytes);
+            if (log.isDebugEnabled()) {
+                log.debug("Logged in to slot " + slotId);
+            }
+        } catch (RuntimeException e) {
+            invalidateIfDead(lease, e);
+            throw e;
+        } finally {
+            lease.close();
+        }
+    }
+
     /** Ends the token's login state. Sessions stay open; only the authentication is dropped. */
     public void logout() {
-        try (SessionLease lease = borrow()) {
-            ce.Logout(lease.session());
+        try {
+            SessionLease lease = borrow();
+            try {
+                ce.Logout(lease.session());
+            } catch (RuntimeException e) {
+                invalidateIfDead(lease, e);
+                throw e;
+            } finally {
+                lease.close();
+            }
         } catch (Exception e) {
             // Logging out a token that is not logged in is the state we wanted anyway.
             if (log.isDebugEnabled()) {
                 log.debug("C_Logout on slot " + slotId + ": " + Pkcs11Errors.describe(e));
             }
+        }
+    }
+
+    /**
+     * Drops the session behind a lease when the failure says the session, not the token, is gone.
+     *
+     * <p>The signing paths have always done this; the login and logout paths did not, and a session
+     * a reconnected HSM had forgotten went back into the pool looking healthy. Every later borrow
+     * drew it out again and failed identically, so the token stayed unusable until the application
+     * server was restarted.
+     */
+    private void invalidateIfDead(SessionLease lease, Throwable failure) {
+        if (Pkcs11Errors.classify(failure) == Pkcs11Errors.Kind.RETRYABLE) {
+            lease.invalidate();
         }
     }
 

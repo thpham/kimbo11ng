@@ -83,7 +83,7 @@ class SessionAndLibraryRecoveryTest {
         // answers it with an Error, so it used to escape every catch between here and EJBCA.
         Pkcs11ModuleRegistry registry = new Pkcs11ModuleRegistry(path -> {
             throw new UnsatisfiedLinkError(
-                    "libCryptoki2_64.so: cannot open shared object file: No such file or directory");
+                    "libCryptoki2_64.so: cannot open shared object file: no such file");
         });
 
         CryptoTokenOfflineException e = assertThrows(CryptoTokenOfflineException.class,

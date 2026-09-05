@@ -27,6 +27,16 @@
              in one classloader fail with "native library already loaded in another classloader". -->
         <jna.version>5.12.1</jna.version>
         <commons-logging.version>1.2</commons-logging.version>
+        <!-- org.pkcs11:jacknji11 is upstream's own coordinate (joelhockey/jacknji11, MIT). Two
+             builds answer to it here: 1.3.1 is Keyfactor's fork — rebranded com.keyfactor in its
+             own pom, published nowhere, and installed under the upstream groupId by
+             `just install-deps` — and 1.3-SNAPSHOT is upstream HEAD, built by `just jacknji11-upstream`.
+             The default is 1.3.1 because that is what a fresh clone can get. Building against
+             upstream instead is `mvn verify -Djacknji11.version=1.3-SNAPSHOT`, which rehearses the
+             contingency where EJBCA stops shipping jacknji11 at all.
+             Verified on 2026-09-05: both build clean, 583 unit tests and 23 ITs green either way.
+             See docs/JACKNJI11_PROVENANCE.md. -->
+        <jacknji11.version>1.3.1</jacknji11.version>
         <!-- Coverage floor, as measured by jacoco:check on the bundle. Baseline at the start of
              phase 0 was LINE 0.09 / BRANCH 0.25, with every PKCS#11-touching class at 0% because
              nothing could be tested without an HSM; the fake token lifted it to 0.25 / 0.30, and
@@ -68,7 +78,7 @@
         <dependency>
             <groupId>org.pkcs11</groupId>
             <artifactId>jacknji11</artifactId>
-            <version>1.3.1</version>
+            <version>${jacknji11.version}</version>
             <scope>provided</scope>
         </dependency>
         <dependency>

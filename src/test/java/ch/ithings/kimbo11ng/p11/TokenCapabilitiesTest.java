@@ -137,11 +137,21 @@ class TokenCapabilitiesTest {
     }
 
     @Test
-    @DisplayName("names a standard mechanism and falls back to hex for a v3.2 one")
+    @DisplayName("names a mechanism the bindings know, and falls back to hex for one they do not")
     void mechanismNames() {
         assertEquals("CKM_ECDSA (0x00001041)", TokenCapabilities.name(CKM.ECDSA));
-        // jacknji11 1.3.1 predates v3.2 and its placeholder for an unknown constant reads as an
-        // error; bare hex is the honest rendering.
-        assertEquals("0x0000001d", TokenCapabilities.name(FakeToken.CKM_ML_DSA));
+
+        // A vendor-defined mechanism, which no build of jacknji11 can name. Its placeholder reads
+        // as an error ("unknown CKM constant ..."), so bare hex is the honest rendering.
+        assertEquals("0x80000100", TokenCapabilities.name(0x80000100L));
+
+        // Deliberately not pinned to an exact string: whether the post-quantum mechanisms are
+        // named depends on which jacknji11 is on the classpath — Keyfactor's 1.3.1 predates
+        // PKCS#11 v3.2 and has no name for 0x1D, while upstream HEAD calls it CKM_ML_DSA. The
+        // contract is that the hex is always present, so a log line identifies the mechanism
+        // either way. Asserting the 1.3.1 rendering here made this test a statement about the
+        // dependency rather than about the code.
+        assertTrue(TokenCapabilities.name(FakeToken.CKM_ML_DSA).contains("0x0000001d"),
+                TokenCapabilities.name(FakeToken.CKM_ML_DSA));
     }
 }

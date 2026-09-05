@@ -2,7 +2,9 @@
 
 Open-source PKCS#11 NG CryptoToken for [EJBCA CE](https://www.ejbca.org/) with post-quantum cryptography support.
 
-Backed by [JackNJI11](https://github.com/joelhockey/jacknji11) (Apache 2.0 JNA PKCS#11 bindings) and tested against [softhsmv3](https://github.com/pqctoday/softhsmv3) with OpenSSL 3.6+.
+Backed by [JackNJI11](https://github.com/joelhockey/jacknji11) (MIT-licensed JNA PKCS#11 bindings —
+see [provenance](docs/JACKNJI11_PROVENANCE.md)) and tested against
+[softhsmv3](https://github.com/pqctoday/softhsmv3) with OpenSSL 3.6+.
 
 ## Features
 

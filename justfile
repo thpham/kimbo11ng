@@ -82,6 +82,26 @@ install-deps: extract-jars
 # Full setup: extract + install + build
 setup: install-deps build
 
+# Only needed to build against upstream instead of Keyfactor's fork:
+#   just jacknji11-upstream && mvn verify -Djacknji11.version=1.3-SNAPSHOT
+# The contingency rehearsal for EJBCA no longer shipping jacknji11 — see
+# docs/JACKNJI11_PROVENANCE.md. Upstream's own tests need a real PKCS#11 token, so they are skipped.
+# Build upstream jacknji11 (joelhockey/jacknji11, MIT) from source and install it locally
+jacknji11-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SRC="${JACKNJI11_SRC:-$(mktemp -d)/jacknji11}"
+    if [ -d "$SRC/.git" ]; then
+        echo "Updating $SRC..."
+        git -C "$SRC" fetch --depth 1 origin master && git -C "$SRC" reset --hard FETCH_HEAD
+    else
+        echo "Cloning upstream into $SRC..."
+        git clone --depth 1 https://github.com/joelhockey/jacknji11.git "$SRC"
+    fi
+    echo "Upstream HEAD: $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
+    cd "$SRC" && mvn -q -DskipTests install
+    echo "Installed $(cd "$SRC" && mvn -q help:evaluate -Dexpression=project.groupId -DforceStdout):jacknji11:$(cd "$SRC" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout)"
+
 # Show current version matrix
 versions:
     #!/usr/bin/env bash

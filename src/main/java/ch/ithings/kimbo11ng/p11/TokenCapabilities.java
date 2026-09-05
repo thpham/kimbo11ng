@@ -177,10 +177,12 @@ public final class TokenCapabilities {
     /**
      * {@code "CKM_ECDSA (0x00001041)"}, for messages that have to name a mechanism.
      *
-     * <p>Bare hex for the post-quantum ones: jacknji11 1.3.1 predates PKCS#11 v3.2 and has no name
-     * for {@code 0x1C}, {@code 0x1D}, {@code 0x2D}, {@code 0x2E}, {@code 0x0F} or {@code 0x17}, and
-     * its placeholder ("unknown CKM constant …") reads as an error rather than a value. Callers
-     * that know the algorithm name say it themselves.
+     * <p>Bare hex whenever the bindings cannot name the mechanism, because their placeholder
+     * ("unknown CKM constant …") reads as an error rather than a value. Which mechanisms that
+     * covers depends on the build: Keyfactor's jacknji11 1.3.1 predates PKCS#11 v3.2 and names
+     * none of {@code 0x1C}, {@code 0x1D}, {@code 0x2D}, {@code 0x2E}, {@code 0x0F} or
+     * {@code 0x17}, while upstream HEAD names all six. Vendor-defined mechanisms are never named
+     * by either. The hex is always present, so a log line identifies the mechanism regardless.
      */
     public static String name(long ckm) {
         long code = CkULong.typeCode(ckm);

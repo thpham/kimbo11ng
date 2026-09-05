@@ -11,7 +11,9 @@ import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 
 import java.security.Provider;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -36,6 +38,19 @@ public final class Kimbo11ngProvider extends Provider {
 
     private static final ConcurrentMap<String, Kimbo11ngProvider> INSTANCES =
             new ConcurrentHashMap<>();
+
+    /**
+     * The {@code Signature} algorithms currently registered, so that re-pointing this provider at a
+     * runtime with a different algorithm set can withdraw the ones that no longer apply.
+     *
+     * <p>Without this the services stay frozen at whatever the first runtime for this (library,
+     * slot) supported, while {@link #runtime()} reports the new one — a provider that answers
+     * accurately about its token and inaccurately about itself.
+     *
+     * <p>{@code transient} because {@link Provider} is {@link java.io.Serializable} and this is a
+     * cache of what was registered, rebuilt from the runtime on every {@code registerServices}.
+     */
+    private final transient Set<String> registeredSignatures = ConcurrentHashMap.newKeySet();
 
     /**
      * A classical signature service: the JCA name EJBCA asks for, the mechanism behind it, whether
@@ -94,10 +109,64 @@ public final class Kimbo11ngProvider extends Provider {
         Kimbo11ngProvider provider = INSTANCES.computeIfAbsent(name,
                 n -> new Kimbo11ngProvider(n, newRuntime));
         TokenRuntime previous = provider.runtime.getAndSet(newRuntime);
-        if (previous != null && previous != newRuntime && log.isDebugEnabled()) {
-            log.debug("Re-pointed provider " + name + " from " + previous + " to " + newRuntime);
+        if (previous != null && previous != newRuntime) {
+            if (log.isDebugEnabled()) {
+                log.debug("Re-pointed provider " + name + " from " + previous + " to "
+                        + newRuntime);
+            }
+            provider.resyncSignatures(newRuntime);
         }
         return provider;
+    }
+
+    /**
+     * Brings the {@code Signature} services back in line after the runtime was swapped.
+     *
+     * <p>The instance is cached per (library, slot) and its name has to stay stable because EJBCA
+     * holds on to it, so a differing algorithm set cannot be handled by making a second provider.
+     * Re-initialising the same slot under a different profile — an operator changing
+     * {@code kimbo11ng.pqc.profile}, or a probe that now sees different firmware — otherwise leaves
+     * this provider advertising the first profile's algorithms forever.
+     *
+     * <p>Only a genuine difference triggers the work: {@code forToken} runs on every init and
+     * activate, and churning services under concurrent lookups for no reason is its own hazard.
+     */
+    private synchronized void resyncSignatures(TokenRuntime newRuntime) {
+        Set<String> wanted = signatureSurface(newRuntime);
+        if (wanted.equals(registeredSignatures)) {
+            return;
+        }
+        for (String algorithm : Set.copyOf(registeredSignatures)) {
+            if (!wanted.contains(algorithm)) {
+                Service stale = getService("Signature", algorithm);
+                if (stale != null) {
+                    removeService(stale);
+                }
+            }
+        }
+        // Re-runs the whole registration: putService replaces an entry with the same type and
+        // algorithm, so the services that did not change are simply rebound to the new runtime.
+        registerServices(newRuntime);
+        log.info("Provider " + getName() + " now offers " + wanted.size()
+                + " signature algorithms after re-pointing to profile "
+                + newRuntime.profile().name());
+    }
+
+    /** The {@code Signature} algorithm names a runtime should be offering. */
+    private static Set<String> signatureSurface(TokenRuntime runtime) {
+        TokenCapabilities capabilities = runtime.algorithms().capabilities();
+        Set<String> names = new LinkedHashSet<>();
+        for (ClassicalSignature row : CLASSICAL_SIGNATURES) {
+            if (capabilities.canSign(row.mechanism())) {
+                names.add(row.jcaName());
+            }
+        }
+        for (AlgorithmEntry entry : runtime.algorithms().supported()) {
+            if (entry.canSign()) {
+                names.add(entry.canonicalName());
+            }
+        }
+        return names;
     }
 
     private static String nameFor(TokenRuntime runtime) {
@@ -145,6 +214,7 @@ public final class Kimbo11ngProvider extends Provider {
         // recoverable for SignWithWorkingAlgorithm — it tries the next algorithm — where a
         // CKR_MECHANISM_INVALID mid-signature is not.
         TokenCapabilities capabilities = initialRuntime.algorithms().capabilities();
+        registeredSignatures.clear();
         int classical = 0;
         for (ClassicalSignature row : CLASSICAL_SIGNATURES) {
             if (!capabilities.canSign(row.mechanism())) {
@@ -162,6 +232,7 @@ public final class Kimbo11ngProvider extends Provider {
                             row.mechanismParam());
                 }
             });
+            registeredSignatures.add(row.jcaName());
             classical++;
         }
 
@@ -181,6 +252,7 @@ public final class Kimbo11ngProvider extends Provider {
                     return Kimbo11ngSignatureSpi.fromKeyEntry();
                 }
             });
+            registeredSignatures.add(entry.canonicalName());
             registered++;
         }
 

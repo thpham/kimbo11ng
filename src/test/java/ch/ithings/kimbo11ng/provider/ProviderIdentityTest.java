@@ -7,6 +7,7 @@ package ch.ithings.kimbo11ng.provider;
 import ch.ithings.kimbo11ng.fake.FakeToken;
 import ch.ithings.kimbo11ng.fake.TestSlot;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
+import ch.ithings.kimbo11ng.profile.ThalesLunaProfile;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -24,6 +25,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -91,6 +94,30 @@ class ProviderIdentityTest {
             assertSame(runtime, again.runtime(),
                     "the provider must be pointing at the runtime it was just given");
         }
+    }
+
+    @Test
+    @DisplayName("re-pointing to a narrower profile withdraws the algorithms it no longer has")
+    void signatureServicesFollowTheRuntime() throws Exception {
+        // The other half of "one provider object per slot": the object survives, so its services
+        // have to be maintained rather than frozen at whatever the first runtime supported.
+        // Otherwise the provider reports the new runtime from runtime() while still offering the
+        // old profile's algorithms, and Signature.getInstance succeeds for something the token
+        // will refuse - or fails for something it would accept.
+        TestSlot fixture = newSlot();
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(fixture.slot(), profile));
+        assertNotNull(provider.getService("Signature", "SLH-DSA-SHA2-128F"),
+                "the v3.2 table has SLH-DSA, so the provider should start out offering it");
+
+        Kimbo11ngProvider again = Kimbo11ngProvider.forToken(
+                new TokenRuntime(fixture.slot(), new ThalesLunaProfile()));
+
+        assertSame(provider, again, "the provider object must still be the same one");
+        assertNull(again.getService("Signature", "SLH-DSA-SHA2-128F"),
+                "the Luna table has no SLH-DSA; the withdrawn algorithm must stop being offered");
+        assertNotNull(again.getService("Signature", "ML-DSA-65"),
+                "ML-DSA-65 is in both tables and must survive the swap");
     }
 
     @Test

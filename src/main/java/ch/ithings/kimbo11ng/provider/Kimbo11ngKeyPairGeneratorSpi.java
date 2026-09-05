@@ -37,12 +37,18 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
         this.slot = slot;
     }
 
-    /** Label for keys created through this path; EJBCA relabels via {@code setKeyEntry}. */
-    private static byte[] provisionalLabel(long handle) {
-        return ("generated-" + handle).getBytes(StandardCharsets.UTF_8);
+    /**
+     * Label for keys created through this path; EJBCA relabels via {@code setKeyEntry}.
+     *
+     * <p>Random rather than derived from the object handle: the handle is not known until after
+     * generation, and it has to go into the template so both halves of the pair carry it.
+     */
+    private static String provisionalLabel() {
+        return "generated-" + java.util.UUID.randomUUID();
     }
 
-    KeyPair generate(KeyTemplates.Pair templates, String algorithm, long mechanism) {
+    KeyPair generate(KeyTemplates.Pair templates, byte[] keyId, String label, String algorithm,
+            long mechanism) {
         try (SessionLease lease = slot.borrow()) {
             long session = lease.session();
             CryptokiE ce = slot.ce();
@@ -53,8 +59,8 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             java.security.PublicKey publicKey = "RSA".equals(algorithm)
                     ? Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubRef.value())
                     : Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubRef.value());
-            Kimbo11ngPrivateKey privateKey = new Kimbo11ngPrivateKey(privRef.value(), algorithm,
-                    new String(provisionalLabel(privRef.value()), StandardCharsets.UTF_8), slot);
+            Kimbo11ngPrivateKey privateKey = new Kimbo11ngPrivateKey(algorithm, slot,
+                    new P11KeyRef(keyId, label, null), privRef.value());
             if (log.isDebugEnabled()) {
                 log.debug("Generated " + algorithm + " key pair: priv=" + privRef.value()
                         + " pub=" + pubRef.value());
@@ -91,9 +97,9 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
         @Override
         public KeyPair generateKeyPair() {
             byte[] keyId = KeyTemplates.newKeyId();
-            byte[] label = provisionalLabel(System.nanoTime());
-            return generate(KeyTemplates.rsa(label, keyId, keySize), "RSA",
-                    CKM.RSA_PKCS_KEY_PAIR_GEN);
+            String label = provisionalLabel();
+            return generate(KeyTemplates.rsa(label.getBytes(StandardCharsets.UTF_8), keyId, keySize),
+                    keyId, label, "RSA", CKM.RSA_PKCS_KEY_PAIR_GEN);
         }
     }
 
@@ -129,9 +135,9 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
         public KeyPair generateKeyPair() {
             try {
                 byte[] keyId = KeyTemplates.newKeyId();
-                byte[] label = provisionalLabel(System.nanoTime());
-                return generate(KeyTemplates.ec(label, keyId, curveName), "EC",
-                        CKM.EC_KEY_PAIR_GEN);
+                String label = provisionalLabel();
+                return generate(KeyTemplates.ec(label.getBytes(StandardCharsets.UTF_8), keyId,
+                        curveName), keyId, label, "EC", CKM.EC_KEY_PAIR_GEN);
             } catch (java.io.IOException e) {
                 throw new ProviderException("Cannot encode EC parameters for curve "
                         + curveName + ": " + e.getMessage(), e);

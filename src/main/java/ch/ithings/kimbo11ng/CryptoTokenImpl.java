@@ -13,8 +13,10 @@ import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
+import ch.ithings.kimbo11ng.provider.P11KeyRef;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
+import ch.ithings.kimbo11ng.provider.Kimbo11ngPrivateKey;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey;
 import ch.ithings.kimbo11ng.provider.TokenRuntime;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
@@ -24,7 +26,9 @@ import com.keyfactor.util.keys.token.KeyGenParams;
 import com.keyfactor.util.keys.token.pkcs11.NoSuchSlotException;
 import com.keyfactor.util.keys.token.pkcs11.Pkcs11SlotLabelType;
 import org.apache.log4j.Logger;
+import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKM;
+import org.pkcs11.jacknji11.CKO;
 import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.LongRef;
 
@@ -184,6 +188,7 @@ public class CryptoTokenImpl {
             throw new CryptoTokenOfflineException("Token is not initialized");
         }
         try {
+            requireAliasFree(current, alias);
             byte[] label = alias.getBytes(StandardCharsets.UTF_8);
             byte[] keyId = KeyTemplates.newKeyId();
             String upper = keySpec.toUpperCase(Locale.ROOT);
@@ -238,18 +243,44 @@ public class CryptoTokenImpl {
 
     // ---- generation ----
 
+    /**
+     * Refuses to generate over an alias the token already uses.
+     *
+     * <p>PKCS#11 has no uniqueness constraint on {@code CKA_LABEL}, so without this the token ends
+     * up holding two private keys with the same name. Everything then still appears to work —
+     * enumeration picks one of them, arbitrarily — until a restart picks the other and the CA
+     * signs with a key its certificate does not match.
+     *
+     * <p>The token is asked, not the local cache: another node, or an operator with a vendor tool,
+     * may have created the key since this instance last enumerated.
+     */
+    private void requireAliasFree(TokenRuntime current, String alias)
+            throws InvalidAlgorithmParameterException, CryptoTokenOfflineException {
+        try (SessionLease lease = current.slot().borrow()) {
+            long[] existing = current.slot().ce().FindObjects(lease.session(),
+                    new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
+                    new CKA(CKA.LABEL, alias.getBytes(StandardCharsets.UTF_8)));
+            if (existing != null && existing.length > 0) {
+                throw new InvalidAlgorithmParameterException("The token already holds a private"
+                        + " key with the alias '" + alias + "'. Delete it first, or choose another"
+                        + " alias; generating a second key with the same label would leave two"
+                        + " keys that cannot be told apart.");
+            }
+        }
+    }
+
     private void generateRsa(TokenRuntime current, byte[] label, byte[] keyId, int bits,
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.rsa(label, keyId, bits);
-        generateAndRegister(current, templates, CKM.RSA_PKCS_KEY_PAIR_GEN, alias, "RSA", null,
-                Kimbo11ngPublicKey::readRsaPublicKey);
+        generateAndRegister(current, templates, keyId, CKM.RSA_PKCS_KEY_PAIR_GEN, alias, "RSA",
+                null, Kimbo11ngPublicKey::readRsaPublicKey);
         log.info("Generated RSA-" + bits + " key pair '" + alias + "'");
     }
 
     private void generateEc(TokenRuntime current, byte[] label, byte[] keyId, String curveName,
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.ec(label, keyId, curveName);
-        generateAndRegister(current, templates, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
+        generateAndRegister(current, templates, keyId, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
                 Kimbo11ngPublicKey::readEcPublicKey);
         log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
     }
@@ -259,7 +290,7 @@ public class CryptoTokenImpl {
         KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile());
         // The entry is passed rather than re-derived from the token, so the OID recorded in the
         // SubjectPublicKeyInfo is the one the key was actually generated as.
-        generateAndRegister(current, templates, entry.ckmKeyPairGen(), alias,
+        generateAndRegister(current, templates, keyId, entry.ckmKeyPairGen(), alias,
                 entry.family().jcaName(), entry,
                 (ce, session, handle) -> Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handle,
                         entry));
@@ -280,7 +311,7 @@ public class CryptoTokenImpl {
      * modules, a different handle entirely.
      */
     private void generateAndRegister(TokenRuntime current, KeyTemplates.Pair templates,
-            long mechanism, String alias, String algorithm, AlgorithmEntry entry,
+            byte[] keyId, long mechanism, String alias, String algorithm, AlgorithmEntry entry,
             PublicKeyReader reader) throws Exception {
         long privHandle;
         PublicKey publicKey;
@@ -293,33 +324,45 @@ public class CryptoTokenImpl {
             privHandle = privRef.value();
             publicKey = reader.read(ce, lease.session(), pubRef.value());
         }
-        register(current, alias, privHandle, algorithm, entry, publicKey);
+        register(current, new P11KeyRef(keyId, alias, entry), privHandle, algorithm, publicKey);
     }
 
-    private void register(TokenRuntime current, String alias, long privHandle, String algorithm,
-            AlgorithmEntry entry, PublicKey publicKey) {
+    private void register(TokenRuntime current, P11KeyRef ref, long privHandle, String algorithm,
+            PublicKey publicKey) {
         Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
         if (spi != null) {
-            spi.registerGeneratedKeyPair(alias, privHandle, algorithm, entry, publicKey);
+            spi.registerGeneratedKeyPair(ref.label(), ref, privHandle, algorithm, publicKey);
         } else if (log.isDebugEnabled()) {
-            log.debug("No KeyStore SPI yet; '" + alias + "' will appear on the next enumeration");
+            log.debug("No KeyStore SPI yet; '" + ref.label()
+                    + "' will appear on the next enumeration");
         }
-        refreshKeyStoreCache(alias);
+        refreshKeyStoreCache(ref.label());
     }
 
     /**
      * Makes a freshly generated key visible to EJBCA.
      *
      * <p>{@code BaseCryptoToken.setKeyStore} wraps our KeyStore in a {@code CachingKeyStoreWrapper}
-     * whose alias list is built once, at construction. EJBCA populates that cache through
-     * {@code KeyStore.setKeyEntry}, but a key generated on the token is never set through the
-     * KeyStore API, so the cache does not learn about it and {@code ca init} fails with
+     * whose alias list is a {@code HashMap} built once, at construction, and updated only through
+     * {@code setKeyEntry} and {@code deleteEntry}. A key generated on the token never passes
+     * through the KeyStore API, so the cache does not learn about it and {@code ca init} fails with
      * "No key with alias" for a key that demonstrably exists. Handing the same underlying KeyStore
      * back to {@code setKeyStore} rebuilds the wrapper and its cache.
      *
-     * <p>TODO(phase-3): unwrapping the wrapper to re-wrap it is a cache-busting hack resting on a
-     * deprecated accessor. Once a key is resolved from the token by {@code CKA_ID} on demand, there
-     * is no cache to bust and this goes away.
+     * <p>The obvious alternative does not work: {@code CachingKeyStoreWrapper.setKeyEntry} would
+     * update the cache directly, but {@code KeyStore.setKeyEntry} refuses a {@code PrivateKey}
+     * without a certificate chain, and we have none. EJBCA's own {@code KeyStoreTools} gets around
+     * that by minting a self-signed placeholder certificate with the new key — which an ML-KEM key
+     * cannot do, because it cannot sign. So the rebuild stays.
+     *
+     * <p>It is cheap because {@code engineGetCertificate} answers without touching the token: the
+     * rebuild reads only this SPI's in-memory maps. Were it to search the token per alias, every
+     * key generation would cost one search per key already on it.
+     *
+     * <p>{@code getKeyStore()} is deprecated in EJBCA, and this is the one call that needs it. If
+     * a future EJBCA removes it, the fallback is EJBCA's own approach in {@code KeyStoreTools}:
+     * mint a self-signed placeholder certificate so {@code setKeyEntry} accepts the key. That is
+     * not used here because an ML-KEM key cannot sign one.
      */
     @SuppressWarnings("deprecation")
     private void refreshKeyStoreCache(String alias) {
@@ -362,7 +405,13 @@ public class CryptoTokenImpl {
 
         PqcMechanismProfile profile = ProfileResolver.resolve(properties);
         P11Slot slot = modules.get(libPath).slot(slotId, properties);
-        TokenRuntime newRuntime = new TokenRuntime(slot, profile);
+        boolean backfill = Boolean.parseBoolean(
+                properties.getProperty(TokenRuntime.BACKFILL_KEY_IDS, "true"));
+        TokenRuntime newRuntime = new TokenRuntime(slot, profile, backfill);
+        // The signing path can see that the HSM is gone but cannot act on it; clearing EJBCA's
+        // keystore is what stops work being routed to a CA whose token is not answering, and what
+        // lets autoActivate() log in again with the PIN EJBCA holds and we do not.
+        slot.onOffline((reason, cause) -> takeOffline(reason));
         // Same provider object per (library, slot); only the runtime behind it changes.
         Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(newRuntime);
         this.runtime = newRuntime;
@@ -372,6 +421,20 @@ public class CryptoTokenImpl {
             // BaseCryptoToken.setJCAProvider registers it in java.security.Security and throws if
             // the name cannot then be resolved, so registration is EJBCA's job, not ours.
             bridge.bridgeSetJCAProvider(provider);
+        }
+    }
+
+    /** Clears the keystore so EJBCA treats this token as offline and re-activates it later. */
+    private void takeOffline(String reason) {
+        try {
+            bridge.bridgeSetKeyStore(null);
+            TokenRuntime current = runtime;
+            if (current != null && current.keyStoreSpi() != null) {
+                current.keyStoreSpi().clear();
+            }
+            log.warn("Token taken offline: " + reason);
+        } catch (KeyStoreException e) {
+            log.error("Could not take the token offline after " + reason + ": " + e.getMessage(), e);
         }
     }
 

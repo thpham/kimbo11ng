@@ -205,8 +205,8 @@ class P11SlotSigningTest {
             byte[] data) throws Exception {
         Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
                 new TokenRuntime(fixture.slot(), new Pkcs11v32Profile()));
-        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(privateHandle, keyAlgorithm, "test",
-                fixture.slot());
+        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(keyAlgorithm, fixture.slot(),
+                new P11KeyRef(null, "test", null), privateHandle);
         Signature signer = Signature.getInstance(algorithm, provider);
         signer.initSign(key);
         signer.update(data);

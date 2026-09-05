@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.P11Slot;
+import org.apache.log4j.Logger;
 import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
@@ -37,6 +38,8 @@ import java.security.SignatureSpi;
  * {@code engineSign}, and the buffer is reset accordingly.
  */
 public class Kimbo11ngSignatureSpi extends SignatureSpi {
+
+    private static final Logger log = Logger.getLogger(Kimbo11ngSignatureSpi.class);
 
     /** Chooses the PKCS#11 mechanism for a given key. */
     public interface MechanismResolver {
@@ -117,27 +120,81 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
         }
         byte[] data = buffer.toByteArray();
         buffer.reset();
-        // One session, held for exactly the C_SignInit/C_Sign pair that must not be interleaved
-        // with anything else. Threads signing with other keys proceed in parallel on their own
-        // sessions; previously every signature in the JVM queued behind one lock.
+        try {
+            return signOnce(data);
+        } catch (Exception first) {
+            switch (Pkcs11Errors.classify(first)) {
+                case RETRYABLE -> {
+                    // Tier 1: the session or the object handle went stale, but the token is still
+                    // there. A network HSM drops a connection and this is what the next operation
+                    // sees. The pool has already discarded the broken session; invalidating the
+                    // handles makes the retry re-resolve the key rather than reuse a number the
+                    // token may have reassigned.
+                    log.info("Retrying signature for '" + signingKey.getAlias() + "' after "
+                            + Pkcs11Errors.describe(first) + "; re-resolving the key handle");
+                    slot.invalidateHandles();
+                    signingKey.invalidateHandle();
+                    try {
+                        return signOnce(data);
+                    } catch (Exception second) {
+                        // Once. A second failure of the same kind is not a stale handle, and
+                        // retrying a genuinely broken token in a loop only delays the diagnosis.
+                        throw offlineIfGone(second, failure(second));
+                    }
+                }
+                // Tier 2: the token itself is gone, or the login it was holding is. Neither can be
+                // fixed here — we do not hold the PIN. Going offline is what lets EJBCA's
+                // autoActivate() log in again with the credential it does hold.
+                case OFFLINE -> throw offlineIfGone(first, failure(first));
+                default -> throw failure(first);
+            }
+        }
+    }
+
+    /**
+     * One attempt: borrow a session, resolve the key in it, sign.
+     *
+     * <p>The handle is resolved inside the lease rather than passed in, because a handle is only
+     * meaningful in the session that produced it.
+     */
+    private byte[] signOnce(byte[] data) throws Exception {
         try (SessionLease lease = slot.borrow()) {
             CryptokiE ce = slot.ce();
             try {
-                ce.SignInit(lease.session(), new CKM(mechanism), signingKey.getObjectHandle());
+                long handle = signingKey.objectHandle(ce, lease.session());
+                ce.SignInit(lease.session(), new CKM(mechanism), handle);
                 byte[] rawSig = ce.Sign(lease.session(), data);
                 return ecdsaDerEncoding ? convertRawEcdsaToDer(rawSig) : rawSig;
             } catch (Exception e) {
                 // C_SignInit may have succeeded, leaving an operation live on this session. It
-                // cannot be returned to the pool: the next borrower's C_SignInit would answer
+                // cannot go back into the pool: the next borrower's C_SignInit would answer
                 // CKR_OPERATION_ACTIVE and the failure would surface on an unrelated thread.
                 lease.invalidate();
                 throw e;
             }
-        } catch (Exception e) {
-            throw new SignatureException("PKCS#11 signing failed with mechanism 0x"
-                    + Long.toHexString(mechanism) + " for key " + signingKey.getAlias()
-                    + Pkcs11Errors.describe(e), e);
         }
+    }
+
+    private SignatureException failure(Throwable cause) {
+        return new SignatureException("PKCS#11 signing failed with mechanism 0x"
+                + Long.toHexString(mechanism) + " for key " + signingKey.getAlias()
+                + Pkcs11Errors.describe(cause), cause);
+    }
+
+    /**
+     * Tells the crypto token the HSM is gone, when that is what the failure says.
+     *
+     * <p>The exception handed back is still a {@code SignatureException}, because that is what the
+     * JCA contract requires of {@code engineSign} and what EJBCA's {@code SignWithWorkingAlgorithm}
+     * expects to catch. The offline report is a side channel to {@code CryptoTokenImpl}, which
+     * clears the keystore so EJBCA stops routing work to a CA whose HSM is not answering.
+     */
+    private SignatureException offlineIfGone(Throwable cause, SignatureException failure) {
+        if (Pkcs11Errors.classify(cause) == Pkcs11Errors.Kind.OFFLINE) {
+            slot.reportOffline("signing with '" + signingKey.getAlias() + "' failed"
+                    + Pkcs11Errors.describe(cause), cause);
+        }
+        return failure;
     }
 
     @Override

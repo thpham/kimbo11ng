@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–2 complete. Phases 3–8 not started.        |
+| **Status** | Phases 0–3 complete. Phases 4–8 not started.        |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -216,7 +216,11 @@ did not apply fault injection to `C_OpenSession`, `C_GetSlotList` or `C_GetToken
 three calls where a missing token or a disconnected HSM client first reports itself, so none of
 those scenarios could be simulated at all. All three are gated now.
 
-## Phase 3 — Durable key identity and recovery
+## Phase 3 — Durable key identity and recovery ✅
+
+**Landed.** 228 unit tests and the 18-test `EjbcaContainerIT` green; coverage floor raised from
+LINE 0.66 / BRANCH 0.55 to 0.69 / 0.58. A key is now found by `CKA_ID` rather than remembered by
+handle, and a dropped session no longer costs a signature.
 
 - **3.1** `P11KeyRef` (`CKA_ID` = 16 random bytes set **in the template**, no post-generation
   mutation); label fallback and optional backfill for legacy keys.
@@ -224,7 +228,43 @@ those scenarios could be simulated at all. All three are gated now.
 - **3.3** Duplicate-alias rejection; delete scoped by `CKA_ID`, including certificates.
 - **3.4** `engineGetCertificate` parses `CKA_VALUE` or returns null without an HSM round trip.
 
-**Gate** — injected session death mid-sign still returns a valid signature · legacy key resolves and
+**Gate** — met, and one item was verified against a real EJBCA rather than only the fake: see
+"the migration test earned its place" below.
+
+### What the implementation changed, and why
+
+**The plan's reason for removing the keystore cache-bust was wrong.** It said resolving keys by
+`CKA_ID` would remove the need. It does not: `CachingKeyStoreWrapper` caches the *alias list* in a
+`HashMap` built once at construction, updated only through `setKeyEntry` and `deleteEntry`. That is
+on EJBCA's side and has nothing to do with how we find a key. The obvious replacement does not work
+either — `KeyStore.setKeyEntry` refuses a `PrivateKey` without a certificate chain, and EJBCA's own
+`KeyStoreTools` only gets around that by minting a self-signed placeholder certificate with the new
+key, which an ML-KEM key cannot do because it cannot sign. The rebuild stays, now documented with
+that reasoning instead of a TODO that would never have come true. It is cheap because
+`engineGetCertificate` answers from memory.
+
+**Certificate reading was dropped from 3.4.** The plan offered a choice — parse `CKA_VALUE` into an
+`X509Certificate`, or return null without a round trip — and the second is right here. EJBCA keeps
+certificates in its database and never looks for one on the token; a chain could not be
+reconstructed anyway, since PKCS#11 stores certificates as unordered independent objects. Worse,
+EJBCA rebuilds its keystore cache after every key generation and that rebuild asks for each alias's
+certificate, so reading the token here would make every keygen cost one search per key already on
+it. Deletion still removes `CKO_CERTIFICATE` objects, which is cheap and correct.
+
+**The migration test earned its place.** Running the plan's own verification step — generate keys
+with the *original* build, upgrade the JAR, restart — found a bug no unit test had: the backfill
+wrote `CKA_ID` onto the private key and not its public half. Since the pair is looked up by id from
+that moment on, the public key became unfindable, the alias loaded with no public key, and EJBCA
+reported both keys as not existing. Both halves are written now, `findAll` takes an explicit
+label-fallback flag (on for pairing, off for deletion, where falling back would destroy same-label
+objects), and two regression tests pin it. Verified end to end afterwards: keys created by the
+original build enumerate, get backfilled and sign after an in-place upgrade.
+
+**One correction to something stated earlier in this document's history:** `CachingKeyStoreWrapper.getKeyStore()`
+is deprecated. An initial bytecode check suggested otherwise; the compiler settled it under
+`-Werror`. The suppression is back, with a note on what to do if EJBCA removes the method.
+
+**Gate detail** — injected session death mid-sign still returns a valid signature · legacy key resolves and
 backfills, and still resolves when `CKA_ID` is read-only · existing demo keys keep working.
 
 ## Phase 4 — Public-key construction correctness

@@ -17,6 +17,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.pkcs11.jacknji11.CKR;
 
+import java.security.InvalidAlgorithmParameterException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.Provider;
@@ -212,6 +213,58 @@ class CryptoTokenLifecycleTest {
         // "No key with alias" for a key that demonstrably exists.
         assertTrue(java.util.Collections.list(bridge.bridgeGetKeyStore().aliases())
                 .contains("pqcKey"));
+    }
+
+    @Test
+    @DisplayName("refuses to generate a second key under an alias the token already uses")
+    void duplicateAliasIsRejected() throws Exception {
+        impl.activate("1234".toCharArray());
+        impl.generateKeyPair("2048", "signKey");
+
+        // PKCS#11 does not constrain CKA_LABEL, so without this check the token ends up holding
+        // two keys with one name. Everything appears to work — enumeration picks one arbitrarily —
+        // until a restart picks the other and the CA signs with a key its certificate does not match.
+        InvalidAlgorithmParameterException e = assertThrows(
+                InvalidAlgorithmParameterException.class,
+                () -> impl.generateKeyPair("2048", "signKey"));
+        assertTrue(e.getMessage().contains("signKey"), e.getMessage());
+
+        assertEquals(1, impl.getProvider().getKeyStoreSpi().engineSize());
+    }
+
+    @Test
+    @DisplayName("checks the token, not just its own cache, for the alias")
+    void duplicateAliasIsCheckedOnTheToken() throws Exception {
+        impl.activate("1234".toCharArray());
+        // Created behind this instance's back, as another node or a vendor tool would.
+        var templates = ch.ithings.kimbo11ng.provider.KeyTemplates.rsa(
+                "external".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                ch.ithings.kimbo11ng.provider.KeyTemplates.newKeyId(), 2048);
+        try (var lease = impl.getSlot().borrow()) {
+            impl.getSlot().ce().GenerateKeyPair(lease.session(),
+                    new org.pkcs11.jacknji11.CKM(org.pkcs11.jacknji11.CKM.RSA_PKCS_KEY_PAIR_GEN),
+                    templates.pub(), templates.priv(),
+                    new org.pkcs11.jacknji11.LongRef(), new org.pkcs11.jacknji11.LongRef());
+        }
+
+        assertThrows(InvalidAlgorithmParameterException.class,
+                () -> impl.generateKeyPair("2048", "external"));
+    }
+
+    @Test
+    @DisplayName("goes offline when the signing path reports the token gone")
+    void offlineReportClearsTheKeyStore() throws Exception {
+        impl.activate("1234".toCharArray());
+        impl.generateKeyPair("2048", "signKey");
+        assertNotNull(bridge.bridgeGetKeyStore());
+
+        // The seam the signing path uses when it sees CKR_TOKEN_NOT_PRESENT: it can detect the
+        // failure but cannot act on it, because clearing EJBCA's keystore is not reachable there.
+        impl.getSlot().reportOffline("token removed", null);
+
+        assertNull(bridge.bridgeGetKeyStore(), "EJBCA reads a null keystore as offline");
+        assertEquals(0, impl.getProvider().getKeyStoreSpi().engineSize(),
+                "cached handles must not outlive the token they point into");
     }
 
     @Test

@@ -115,6 +115,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private int finalizeCalls;
     private int sessionInfoCalls;
     private int loginCalls;
+    private int findObjectsCalls;
 
     // ---- fault-injection knobs (0.3) ----
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
@@ -239,6 +240,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** {@code C_Login} calls, to assert that login happens per token rather than per session. */
     public synchronized int loginCalls() {
         return loginCalls;
+    }
+
+    /** Object searches, to assert that a code path does not touch the token at all. */
+    public synchronized int findObjectsCalls() {
+        return findObjectsCalls;
     }
 
     public int finalizeCalls() {
@@ -597,6 +603,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_FindObjectsInit(long handle, CKA[] template, long count) {
+        findObjectsCalls++;
         long gated = gate();
         if (gated != CKR.OK) {
             return gated;

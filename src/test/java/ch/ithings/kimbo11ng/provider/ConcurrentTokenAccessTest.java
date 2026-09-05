@@ -172,8 +172,8 @@ class ConcurrentTokenAccessTest {
     }
 
     private void sign(Kimbo11ngProvider provider, long privateHandle) throws Exception {
-        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(privateHandle, "RSA", "shared-rsa",
-                fixture.slot());
+        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey("RSA", fixture.slot(),
+                new P11KeyRef(null, "shared-rsa", null), privateHandle);
         Signature signer = Signature.getInstance("SHA256withRSA", provider);
         signer.initSign(key);
         signer.update("kimbo11ng".getBytes(StandardCharsets.UTF_8));

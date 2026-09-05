@@ -10,6 +10,7 @@ import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CryptokiE;
 
 import java.io.File;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * One slot of one PKCS#11 library: what a crypto token actually operates on.
@@ -31,10 +32,18 @@ public final class P11Slot {
 
     private static final Logger log = Logger.getLogger(P11Slot.class);
 
+    /** Told when the token has gone away, so the crypto token can take itself offline. */
+    @FunctionalInterface
+    public interface OfflineListener {
+        void tokenWentOffline(String reason, Throwable cause);
+    }
+
     private final Pkcs11Module module;
     private final long slotId;
     private final SessionPoolConfig config;
     private volatile boolean loggedIn;
+    private final AtomicLong handleGeneration = new AtomicLong();
+    private volatile OfflineListener offlineListener;
 
     P11Slot(Pkcs11Module module, long slotId, SessionPoolConfig config) {
         this.module = module;
@@ -72,6 +81,55 @@ public final class P11Slot {
 
     public long slotId() {
         return slotId;
+    }
+
+    /**
+     * Counter that changes whenever cached object handles must be treated as stale.
+     *
+     * <p>A key caches the handle it last resolved together with the generation it resolved under.
+     * When they no longer match, the handle is looked up again. That is what keeps a key usable
+     * across a dropped session without asking the token to re-resolve on every single operation.
+     */
+    public long handleGeneration() {
+        return handleGeneration.get();
+    }
+
+    /** Marks every cached object handle for this slot as needing re-resolution. */
+    public void invalidateHandles() {
+        long generation = handleGeneration.incrementAndGet();
+        if (log.isDebugEnabled()) {
+            log.debug("Invalidated cached object handles for slot " + slotId
+                    + " (generation " + generation + ")");
+        }
+    }
+
+    /**
+     * Registers who to tell when the token disappears.
+     *
+     * <p>The signing path can detect that a token is gone — it is the code holding the failing
+     * CKR — but it cannot act on it: taking a crypto token offline means clearing EJBCA's keystore,
+     * which only {@code CryptoTokenImpl} can reach. This is the seam between the two.
+     */
+    public void onOffline(OfflineListener listener) {
+        this.offlineListener = listener;
+    }
+
+    /**
+     * Reports that the token is gone. Idempotent from the caller's point of view: the listener
+     * decides what to do, and clearing an already-cleared keystore is harmless.
+     */
+    public void reportOffline(String reason, Throwable cause) {
+        log.warn("Token on slot " + slotId + " of " + module.path() + " went offline: " + reason);
+        invalidateHandles();
+        loggedIn = false;
+        OfflineListener listener = offlineListener;
+        if (listener != null) {
+            try {
+                listener.tokenWentOffline(reason, cause);
+            } catch (RuntimeException e) {
+                log.warn("Offline listener for slot " + slotId + " failed: " + e.getMessage(), e);
+            }
+        }
     }
 
     public String libPath() {
@@ -120,6 +178,9 @@ public final class P11Slot {
      */
     public synchronized void close() {
         logout();
+        // Handles resolved against the sessions being closed must not be reused if this slot is
+        // activated again: the pool is rebuilt from scratch and the token may renumber objects.
+        invalidateHandles();
         module.releaseSlot(slotId);
         if (log.isDebugEnabled()) {
             log.debug("Released slot " + slotId + " of " + module.path());

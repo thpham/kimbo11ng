@@ -63,20 +63,32 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public Certificate[] engineGetCertificateChain(String alias) {
-        // EJBCA keeps issued certificates in its database, not on the token.
         return null;
     }
 
+    /**
+     * Always {@code null}, and deliberately without asking the token.
+     *
+     * <p>EJBCA keeps issued certificates in its database; nothing in it expects to find one here,
+     * and a chain could not be reconstructed anyway, since PKCS#11 stores certificates as
+     * independent objects with no ordering between them.
+     *
+     * <p>Searching the token per alias would also be quietly expensive: EJBCA rebuilds its
+     * {@code CachingKeyStoreWrapper} cache after every key generation, and the rebuild calls this
+     * for every alias. Answering from memory keeps that rebuild free.
+     *
+     * <p>What the original code did was the worst of both: it searched the token and then discarded
+     * the result.
+     */
     @Override
     public Certificate engineGetCertificate(String alias) {
-        // Previously this searched the token and discarded the result, costing a round trip for
-        // nothing. TODO(phase-3): parse CKA_VALUE into an X509Certificate when one is present.
         return null;
     }
 
     @Override
     public Date engineGetCreationDate(String alias) {
-        // TODO(phase-3): read CKA_START_DATE. Returning 'now' was worse than returning nothing.
+        // CKA_START_DATE is a validity date the operator may set, not a creation timestamp, and
+        // most tokens leave it empty. Returning 'now' — what this used to do — was a fabrication.
         return null;
     }
 
@@ -89,38 +101,24 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             long session = lease.session();
             CryptokiE ce = slot().ce();
             byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
+            P11KeyRef ref = p11Key.ref();
 
-            ce.SetAttributeValue(session, p11Key.getObjectHandle(), new CKA(CKA.LABEL, labelBytes));
-
-            // Relabel the matching public key, located by the shared CKA_ID written at
-            // generation. Previously this relied on the provider remembering the last generated
-            // handle pair, which was wrong under concurrent generation.
-            byte[] keyId = readKeyId(ce, session, p11Key.getObjectHandle());
-            if (keyId != null) {
-                long[] pubHandles = ce.FindObjects(session,
-                        new CKA(CKA.CLASS, CKO.PUBLIC_KEY), new CKA(CKA.ID, keyId));
-                if (pubHandles != null) {
-                    for (long handle : pubHandles) {
-                        ce.SetAttributeValue(session, handle, new CKA(CKA.LABEL, labelBytes));
-                    }
+            // Both halves get the new label, located by the CKA_ID they share. Relabelling only
+            // the private key would leave enumeration unable to pair them again after a restart.
+            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY}) {
+                for (long handle : ref.findAll(ce, session, objectClass)) {
+                    ce.SetAttributeValue(session, handle, new CKA(CKA.LABEL, labelBytes));
                 }
             }
 
-            privateKeys.put(alias, new Kimbo11ngPrivateKey(p11Key.getObjectHandle(),
-                    p11Key.getAlgorithm(), alias, slot(), p11Key.entry().orElse(null)));
+            P11KeyRef renamed = new P11KeyRef(ref.ckaId(), alias, ref.entry().orElse(null));
+            privateKeys.put(alias, new Kimbo11ngPrivateKey(p11Key.getAlgorithm(), slot(), renamed));
+            PublicKey pub = publicKeys.remove(p11Key.getAlias());
+            if (pub != null) {
+                publicKeys.put(alias, pub);
+            }
         } catch (Exception e) {
             log.error("Failed to label key entry '" + alias + "': " + e.getMessage(), e);
-        }
-    }
-
-    private static byte[] readKeyId(CryptokiE ce, long session, long handle) {
-        try {
-            return ce.GetAttributeValue(session, handle, CKA.ID).getValue();
-        } catch (Exception e) {
-            if (log.isDebugEnabled()) {
-                log.debug("No CKA_ID on handle " + handle + ": " + e.getMessage());
-            }
-            return null;
         }
     }
 
@@ -136,27 +134,45 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         }
     }
 
+    /**
+     * Removes one key pair and its certificate from the token.
+     *
+     * <p>Scoped by {@code CKA_ID} when the key has one. Deleting by label — what this used to do —
+     * destroys every object that happens to share the name, and a label is an EJBCA alias that an
+     * operator may reuse. Deleting one CA's key because another CA's key was named the same is not
+     * recoverable.
+     */
     @Override
     public void engineDeleteEntry(String alias) {
+        Kimbo11ngPrivateKey key = privateKeys.get(alias);
+        if (key == null) {
+            log.warn("Not deleting '" + alias + "': no such key in this keystore");
+            return;
+        }
         try (SessionLease lease = slot().borrow()) {
             long session = lease.session();
             CryptokiE ce = slot().ce();
-            byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
-            // TODO(phase-3): scope deletion by CKA_ID so unrelated objects sharing a label
-            // survive, and remove certificate objects too.
-            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY}) {
-                long[] handles = ce.FindObjects(session,
-                        new CKA(CKA.CLASS, objectClass), new CKA(CKA.LABEL, labelBytes));
-                if (handles != null) {
-                    for (long handle : handles) {
-                        ce.DestroyObject(session, handle);
-                    }
+            P11KeyRef ref = key.ref();
+            if (!ref.hasCkaId()) {
+                log.warn("Deleting '" + alias + "' by label: it carries no CKA_ID, so any other"
+                        + " object with the same label will be removed with it.");
+            }
+            int destroyed = 0;
+            // The certificate too: leaving it behind means the next key generated under this alias
+            // enumerates with the previous key's certificate attached to it.
+            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY, CKO.CERTIFICATE}) {
+                for (long handle : ref.findAll(ce, session, objectClass)) {
+                    ce.DestroyObject(session, handle);
+                    destroyed++;
                 }
             }
-            privateKeys.remove(alias);
-            publicKeys.remove(alias);
+            log.info("Deleted " + destroyed + " token object(s) for alias '" + alias + "'");
         } catch (Exception e) {
             log.error("Failed to delete entry '" + alias + "': " + e.getMessage(), e);
+        } finally {
+            privateKeys.remove(alias);
+            publicKeys.remove(alias);
+            slot().invalidateHandles();
         }
     }
 
@@ -273,9 +289,10 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                     algorithm = entry.get().family().jcaName();
                 }
 
-                privateKeys.put(alias, new Kimbo11ngPrivateKey(handle, algorithm, alias,
-                        slot(), entry.orElse(null)));
-                readMatchingPublicKey(ce, session, alias, labelBytes, keyType, entry)
+                P11KeyRef ref = referenceFor(ce, session, handle, alias, entry.orElse(null));
+                privateKeys.put(alias,
+                        new Kimbo11ngPrivateKey(algorithm, slot(), ref, handle));
+                readMatchingPublicKey(ce, session, alias, ref, keyType, entry)
                         .ifPresent(pub -> publicKeys.put(alias, pub));
 
                 if (log.isDebugEnabled()) {
@@ -302,12 +319,48 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         }
     }
 
+    /**
+     * Builds the durable reference for a key found on the token, writing a {@code CKA_ID} onto a
+     * legacy key that has none.
+     *
+     * <p>The backfill is what lets keys generated before kimbo11ng wrote ids stop depending on
+     * their label. It is optional ({@code kimbo11ng.keyid.backfill}) and it may be refused by the
+     * token, in which case the key keeps working by label — an existing CA must not break because
+     * its HSM will not accept an attribute change.
+     */
+    private P11KeyRef referenceFor(CryptokiE ce, long session, long handle, String alias,
+            AlgorithmEntry entry) {
+        byte[] existingId = P11KeyRef.readCkaId(ce, session, handle);
+        P11KeyRef ref = new P11KeyRef(existingId, alias, entry);
+        if (existingId != null || !runtime.backfillKeyIds()) {
+            return ref;
+        }
+        byte[] newId = KeyTemplates.newKeyId();
+        P11KeyRef backfilled = Kimbo11ngPrivateKey.backfillCkaId(ce, session, handle, ref, newId);
+        if (!backfilled.hasCkaId()) {
+            return ref;
+        }
+        // The public half must get the same id, or it becomes unfindable the moment the private
+        // key stops being looked up by label — which is precisely what the backfill just changed.
+        // Found by label here because that is all the pair has in common until this write lands.
+        for (long pubHandle : ref.findAll(ce, session, CKO.PUBLIC_KEY, true)) {
+            try {
+                ce.SetAttributeValue(session, pubHandle, new CKA(CKA.ID, newId));
+            } catch (Exception e) {
+                log.warn("Wrote a CKA_ID onto '" + alias + "' but not onto its public key ("
+                        + e.getMessage() + "); the pair will still be matched by label.");
+            }
+        }
+        return backfilled;
+    }
+
     private Optional<PublicKey> readMatchingPublicKey(CryptokiE ce, long session, String alias,
-            byte[] labelBytes, long keyType, Optional<AlgorithmEntry> entry) {
+            P11KeyRef ref, long keyType, Optional<AlgorithmEntry> entry) {
         try {
-            long[] pubHandles = ce.FindObjects(session, new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
-                    new CKA(CKA.LABEL, labelBytes != null ? labelBytes : new byte[0]));
-            if (pubHandles == null || pubHandles.length == 0) {
+            // By CKA_ID when there is one: a public key whose label was edited separately from its
+            // private half would otherwise be missed, and the alias would load without a public key.
+            long[] pubHandles = ref.findAll(ce, session, CKO.PUBLIC_KEY, true);
+            if (pubHandles.length == 0) {
                 return Optional.empty();
             }
             long pubHandle = pubHandles[0];
@@ -329,10 +382,9 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     }
 
     /** Registers a freshly generated pair without a full re-enumeration. */
-    public void registerGeneratedKeyPair(String alias, long privHandle, String algorithm,
-            AlgorithmEntry entry, PublicKey publicKey) {
-        privateKeys.put(alias,
-                new Kimbo11ngPrivateKey(privHandle, algorithm, alias, slot(), entry));
+    public void registerGeneratedKeyPair(String alias, P11KeyRef ref, long privHandle,
+            String algorithm, PublicKey publicKey) {
+        privateKeys.put(alias, new Kimbo11ngPrivateKey(algorithm, slot(), ref, privHandle));
         if (publicKey != null) {
             publicKeys.put(alias, publicKey);
         }

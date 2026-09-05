@@ -21,13 +21,34 @@ import java.util.Objects;
  */
 public final class TokenRuntime {
 
+    /**
+     * Whether a legacy key found without a {@code CKA_ID} should have one written onto it.
+     *
+     * <p>On by default: it is what lets keys generated before kimbo11ng wrote ids stop depending on
+     * their label, which is an EJBCA alias an operator can change. Turn it off for a token whose
+     * objects must not be modified at all — an audited partition, say — and those keys keep
+     * resolving by label.
+     */
+    public static final String BACKFILL_KEY_IDS = "kimbo11ng.keyid.backfill";
+
     private final P11Slot slot;
     private final PqcMechanismProfile profile;
+    private final boolean backfillKeyIds;
     private volatile Kimbo11ngKeyStoreSpi keyStoreSpi;
 
     public TokenRuntime(P11Slot slot, PqcMechanismProfile profile) {
+        this(slot, profile, true);
+    }
+
+    public TokenRuntime(P11Slot slot, PqcMechanismProfile profile, boolean backfillKeyIds) {
         this.slot = Objects.requireNonNull(slot, "slot");
         this.profile = Objects.requireNonNull(profile, "profile");
+        this.backfillKeyIds = backfillKeyIds;
+    }
+
+    /** @see #BACKFILL_KEY_IDS */
+    public boolean backfillKeyIds() {
+        return backfillKeyIds;
     }
 
     public P11Slot slot() {

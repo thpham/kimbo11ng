@@ -285,6 +285,26 @@ Beyond the standard EJBCA token properties (`sharedLibrary`, `slotLabelValue`, `
 | `kimbo11ng.probe.failFast`             | true    | Refuse an algorithm whose mechanism the token does not advertise    |
 | `kimbo11ng.keyid.backfill`             | true    | Write a `CKA_ID` onto legacy keys that have none                    |
 | `kimbo11ng.strict.publickey`           | false   | Make an OID disagreement fatal when enumerating existing keys       |
+| `kimbo11ng.pqc.kemUsage`               | both    | ML-KEM usage attributes: `both`, `v32` only, or `legacy` only        |
+
+`kimbo11ng.pqc.kemUsage` is worth a word, because the default sends two pairs and that looks like
+indecision until you see who reads them.
+
+`CKA_ENCAPSULATE` (0x633) and `CKA_DECAPSULATE` (0x634) are what PKCS#11 v3.2 defines for a
+key-encapsulation key, and what a v3.2 token gates `C_EncapsulateKey` and `C_DecapsulateKey` on.
+Until 2026-09-05 this project asked only for `CKA_ENCRYPT` and `CKA_DECRYPT` — a different and
+untrue claim, since ML-KEM has no `C_Encrypt`. It went unnoticed because SoftHSMv3 accepts the wrong
+pair and then quietly sets the right one itself.
+
+But `CKA_DECRYPT` cannot simply be dropped: **EJBCA reads it by number**. `BaseCryptoToken.testKeyPair`
+branches on `contains(261) && !contains(264)`, and `getKeyUsageStringForKeyPairInfo` compares the
+usage set for equality against `{261}` to decide the admin UI shows ENCRYPT. Neither knows 0x634, so
+a spec-correct key with no `CKA_DECRYPT` shows no usage in the UI and gets routed to the signing
+test. Hence `both`.
+
+Set `v32` for a token strict enough to refuse `CKA_ENCRYPT` on a KEM key — defensible of it, at the
+cost of the EJBCA reporting above. Set `legacy` for one that refuses the attributes it has never
+heard of. Both branches are covered by `CliContainerIT` against real SoftHSMv3.
 
 ## Project Structure
 

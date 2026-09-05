@@ -36,6 +36,7 @@ public final class TokenRuntime {
     private final AlgorithmSupport algorithms;
     private final boolean backfillKeyIds;
     private final PublicKeyReader.Policy publicKeyPolicy;
+    private final ch.ithings.kimbo11ng.profile.KemUsage kemUsage;
     private volatile Kimbo11ngKeyStoreSpi keyStoreSpi;
 
     public TokenRuntime(P11Slot slot, PqcMechanismProfile profile) {
@@ -53,10 +54,29 @@ public final class TokenRuntime {
 
     public TokenRuntime(P11Slot slot, AlgorithmSupport algorithms, boolean backfillKeyIds,
             PublicKeyReader.Policy publicKeyPolicy) {
+        this(slot, algorithms, backfillKeyIds, publicKeyPolicy, ch.ithings.kimbo11ng.profile.KemUsage.BOTH);
+    }
+
+    public TokenRuntime(P11Slot slot, AlgorithmSupport algorithms, boolean backfillKeyIds,
+            PublicKeyReader.Policy publicKeyPolicy, ch.ithings.kimbo11ng.profile.KemUsage kemUsage) {
         this.slot = Objects.requireNonNull(slot, "slot");
         this.algorithms = Objects.requireNonNull(algorithms, "algorithms");
         this.backfillKeyIds = backfillKeyIds;
         this.publicKeyPolicy = Objects.requireNonNull(publicKeyPolicy, "publicKeyPolicy");
+        this.kemUsage = Objects.requireNonNull(kemUsage, "kemUsage");
+    }
+
+    /**
+     * Which usage attributes an ML-KEM key is generated with.
+     *
+     * <p>Held on the runtime rather than read where it is used, so that the value a token was
+     * initialised with governs every key it makes — a property re-read mid-life would let two keys
+     * on one partition disagree about what they are for.
+     *
+     * @see ch.ithings.kimbo11ng.profile.KemUsage#PROPERTY
+     */
+    public ch.ithings.kimbo11ng.profile.KemUsage kemUsage() {
+        return kemUsage;
     }
 
     /**

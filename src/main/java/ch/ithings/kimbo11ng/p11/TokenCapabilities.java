@@ -222,12 +222,12 @@ public final class TokenCapabilities {
      * <p>Drop this when the bindings catch up; {@link CKM#L2S} already wins when it answers.
      */
     private static final Map<Long, String> PKCS11_V32 = Map.of(
-            0x0000000fL, "CKM_ML_KEM_KEY_PAIR_GEN",
-            0x00000017L, "CKM_ML_KEM",
-            0x0000001cL, "CKM_ML_DSA_KEY_PAIR_GEN",
-            0x0000001dL, "CKM_ML_DSA",
-            0x0000002dL, "CKM_SLH_DSA_KEY_PAIR_GEN",
-            0x0000002eL, "CKM_SLH_DSA");
+            Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN, "CKM_ML_KEM_KEY_PAIR_GEN",
+            Pkcs11v32.CKM_ML_KEM, "CKM_ML_KEM",
+            Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN, "CKM_ML_DSA_KEY_PAIR_GEN",
+            Pkcs11v32.CKM_ML_DSA, "CKM_ML_DSA",
+            Pkcs11v32.CKM_SLH_DSA_KEY_PAIR_GEN, "CKM_SLH_DSA_KEY_PAIR_GEN",
+            Pkcs11v32.CKM_SLH_DSA, "CKM_SLH_DSA");
 
     @Override
     public String toString() {

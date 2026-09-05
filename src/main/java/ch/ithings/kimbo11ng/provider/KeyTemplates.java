@@ -5,6 +5,8 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.KemUsage;
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.x9.ECNamedCurveTable;
@@ -91,9 +93,38 @@ public final class KeyTemplates {
         return new Pair(pub, priv);
     }
 
-    /** Templates for a post-quantum key pair described by {@code entry}. */
+    /**
+     * Templates for a post-quantum key pair described by {@code entry}, with the default KEM
+     * spelling.
+     *
+     * <p>Kept so that the many callers which do not configure a token — tests, and the CLI's
+     * capability table — need not thread a setting they have no opinion about. The one production
+     * caller passes the token's own, resolved from the profile and the property.
+     */
     public static Pair pqc(byte[] label, byte[] keyId, AlgorithmEntry entry,
             PqcMechanismProfile profile) {
+        return pqc(label, keyId, entry, profile, profile.defaultKemUsage());
+    }
+
+    /**
+     * Templates for a post-quantum key pair described by {@code entry}.
+     *
+     * <p>The ML-KEM branch now also asks for {@code CKA_ENCAPSULATE} and {@code CKA_DECAPSULATE},
+     * the attributes PKCS#11 v3.2 defines for a key-encapsulation key. It previously asked only
+     * for {@code CKA_ENCRYPT} and {@code CKA_DECRYPT}, which is a different claim: those gate
+     * {@code C_Encrypt} and {@code C_Decrypt}, operations ML-KEM does not have. That went
+     * unnoticed because SoftHSMv3 is permissive — measured on 2026-09-05, a key generated the old
+     * way came back carrying 0x633 and 0x634 anyway, the token having set the correct pair itself.
+     *
+     * <p>Both pairs rather than a clean swap, and the reason is EJBCA rather than PKCS#11: it
+     * reads {@code CKA_DECRYPT} by number and knows nothing of 0x634. {@link KemUsage} says which
+     * consumer each pair serves and what is lost by dropping either.
+     *
+     * @param kemUsage which spelling to send; the profile chooses and
+     *     {@link KemUsage#PROPERTY} overrides
+     */
+    public static Pair pqc(byte[] label, byte[] keyId, AlgorithmEntry entry,
+            PqcMechanismProfile profile, KemUsage kemUsage) {
         List<CKA> pub = new ArrayList<>(List.of(
                 new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
                 new CKA(CKA.KEY_TYPE, entry.ckkKeyType()),
@@ -113,9 +144,15 @@ public final class KeyTemplates {
             pub.add(new CKA(CKA.VERIFY, true));
             priv.add(new CKA(CKA.SIGN, true));
         } else {
-            // ML-KEM: encapsulation is a public-key operation, decapsulation a private-key one.
-            pub.add(new CKA(CKA.ENCRYPT, true));
-            priv.add(new CKA(CKA.DECRYPT, true));
+            // Encapsulation is a public-key operation, decapsulation a private-key one.
+            if (kemUsage.sendsV32()) {
+                pub.add(new CKA(Pkcs11v32.CKA_ENCAPSULATE, true));
+                priv.add(new CKA(Pkcs11v32.CKA_DECAPSULATE, true));
+            }
+            if (kemUsage.sendsEncryption()) {
+                pub.add(new CKA(CKA.ENCRYPT, true));
+                priv.add(new CKA(CKA.DECRYPT, true));
+            }
         }
         return new Pair(pub, priv);
     }

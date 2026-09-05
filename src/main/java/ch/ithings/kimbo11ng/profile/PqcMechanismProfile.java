@@ -38,6 +38,21 @@ public interface PqcMechanismProfile {
     long ckaParameterSet();
 
     /**
+     * Which usage attributes this vendor's tokens want on an ML-KEM key.
+     *
+     * <p>A default rather than an abstract method, because most profiles have no opinion and the
+     * bare v3.2 answer is the safe one. {@link ThalesLunaProfile} overrides it: Luna's own ML-KEM
+     * programming guide gives {@code CKA_ENCAPSULATE} and {@code CKA_DECAPSULATE} in the
+     * generation templates and does not list {@code CKA_ENCRYPT} at all.
+     *
+     * <p>{@link KemUsage#PROPERTY} overrides whatever is returned here, so an operator whose token
+     * disagrees with its documentation is never stuck.
+     */
+    default KemUsage defaultKemUsage() {
+        return KemUsage.BOTH;
+    }
+
+    /**
      * Resolve a key specification such as {@code "ML-DSA-65"}, tolerating separator and case
      * differences.
      */

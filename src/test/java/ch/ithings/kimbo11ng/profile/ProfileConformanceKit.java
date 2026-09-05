@@ -8,6 +8,7 @@ import ch.ithings.kimbo11ng.CryptoTokenImpl;
 import ch.ithings.kimbo11ng.fake.FakeToken;
 import ch.ithings.kimbo11ng.fake.TestBridge;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
@@ -232,33 +233,79 @@ public abstract class ProfileConformanceKit {
      * pkcs11v32 alone, because a vendor profile is exactly where the two would be filled in by
      * different hands.
      *
-     * <p>{@code ENCAPSULATE} and {@code DECAPSULATE} map onto {@code CKA_ENCRYPT} and
-     * {@code CKA_DECRYPT} here, and that mapping is the reason this test spells the pairs out
-     * rather than comparing names: PKCS#11 v3.2 gives a KEM its own {@code CKA_ENCAPSULATE}
-     * (0x633) and {@code CKA_DECAPSULATE} (0x634), which jacknji11 1.3.1 does not define, so
-     * {@code KeyTemplates} expresses encapsulation through the encryption attributes. Measured
-     * against SoftHSMv3, which accepts that and then sets the correct pair itself. If the
-     * templates ever move to the v3.2 attributes, this is the test that has to be updated with
-     * them, deliberately.
+     * <p>Run for every {@link KeyTemplates.KemUsage} mode, because a kill-switch whose branches
+     * nothing exercises is broken by the time it is needed — and it would be needed on hardware
+     * nobody here can test on. The declared operations are the same in all three; only which
+     * attribute carries them changes, which is exactly what this pins down.
      */
     @ParameterizedTest(name = "{0}")
     @MethodSource("everyEntry")
     @DisplayName("declares the operations its generation template actually asks for")
     void opsMatchTheGenerationTemplate(AlgorithmEntry entry) {
         byte[] sample = "sample".getBytes(StandardCharsets.UTF_8);
-        KeyTemplates.Pair pair = KeyTemplates.pqc(sample, sample, entry, profile());
-        boolean sign = entry.ops().contains(AlgorithmEntry.KeyOp.SIGN);
-        assertEquals(sign, isSet(pair.privateTemplate(), CKA.SIGN),
-                entry.canonicalName() + ": CKA_SIGN on the private template must match ops()");
-        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.VERIFY),
-                isSet(pair.publicTemplate(), CKA.VERIFY),
-                entry.canonicalName() + ": CKA_VERIFY on the public template must match ops()");
-        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.ENCAPSULATE),
-                isSet(pair.publicTemplate(), CKA.ENCRYPT),
-                entry.canonicalName() + ": ENCAPSULATE is requested as CKA_ENCRYPT");
-        assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.DECAPSULATE),
-                isSet(pair.privateTemplate(), CKA.DECRYPT),
-                entry.canonicalName() + ": DECAPSULATE is requested as CKA_DECRYPT");
+        for (KemUsage usage : KemUsage.values()) {
+            KeyTemplates.Pair pair = KeyTemplates.pqc(sample, sample, entry, profile(), usage);
+            String where = entry.canonicalName() + " (" + usage + ")";
+            assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.SIGN),
+                    isSet(pair.privateTemplate(), CKA.SIGN),
+                    where + ": CKA_SIGN on the private template must match ops()");
+            assertEquals(entry.ops().contains(AlgorithmEntry.KeyOp.VERIFY),
+                    isSet(pair.publicTemplate(), CKA.VERIFY),
+                    where + ": CKA_VERIFY on the public template must match ops()");
+
+            boolean kem = entry.ops().contains(AlgorithmEntry.KeyOp.ENCAPSULATE);
+            assertEquals(kem, entry.ops().contains(AlgorithmEntry.KeyOp.DECAPSULATE),
+                    where + ": a KEM declares both halves or neither");
+
+            boolean v32Spelling = kem && usage.sendsV32();
+            boolean encryptSpelling = kem && usage.sendsEncryption();
+            assertEquals(v32Spelling, isSet(pair.publicTemplate(),
+                            Pkcs11v32.CKA_ENCAPSULATE),
+                    where + ": CKA_ENCAPSULATE on the public template");
+            assertEquals(v32Spelling, isSet(pair.privateTemplate(),
+                            Pkcs11v32.CKA_DECAPSULATE),
+                    where + ": CKA_DECAPSULATE on the private template");
+            assertEquals(encryptSpelling, isSet(pair.publicTemplate(), CKA.ENCRYPT),
+                    where + ": CKA_ENCRYPT on the public template");
+            assertEquals(encryptSpelling, isSet(pair.privateTemplate(), CKA.DECRYPT),
+                    where + ": CKA_DECRYPT on the private template");
+
+            // BOTH has to keep CKA_DECRYPT: EJBCA reads 261 by number to decide both the key
+            // usage the admin UI shows and which branch testKeyPair takes, and knows nothing of
+            // 0x634. Dropping it is what KeyUsageTest.mlKem caught.
+            if (kem && usage == KemUsage.BOTH) {
+                assertTrue(isSet(pair.privateTemplate(), CKA.DECRYPT),
+                        where + ": BOTH must keep the attribute EJBCA reads");
+            }
+        }
+    }
+
+    /**
+     * The profile's chosen default is the one an unconfigured token gets.
+     *
+     * <p>Asserted here rather than only in the vendor's own test class, because the point of
+     * putting the choice on the profile was that adding a vendor stays a table change. A profile
+     * that declared a default nothing consulted would satisfy every other test in this kit.
+     */
+    @Test
+    @DisplayName("its chosen KEM usage is what an unconfigured token generates with")
+    void defaultKemUsageIsHonoured() {
+        byte[] sample = "sample".getBytes(StandardCharsets.UTF_8);
+        assertEquals(profile().defaultKemUsage(),
+                KemUsage.parse(null, profile().defaultKemUsage()),
+                "an unset property must fall back to the profile");
+        for (AlgorithmEntry entry : profile().entries()) {
+            if (entry.canSign()) {
+                continue;
+            }
+            KeyTemplates.Pair chosen = KeyTemplates.pqc(sample, sample, entry, profile());
+            KeyTemplates.Pair explicit = KeyTemplates.pqc(sample, sample, entry, profile(),
+                    profile().defaultKemUsage());
+            assertEquals(explicit.publicTemplate(), chosen.publicTemplate(),
+                    entry.canonicalName() + ": the no-setting overload must use the profile's");
+            assertEquals(explicit.privateTemplate(), chosen.privateTemplate(),
+                    entry.canonicalName() + ": the no-setting overload must use the profile's");
+        }
     }
 
     private static boolean isSet(java.util.List<CKA> template, long type) {

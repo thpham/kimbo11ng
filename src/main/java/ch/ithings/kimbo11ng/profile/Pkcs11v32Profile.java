@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
+import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry.KeyOp;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 
@@ -15,34 +16,18 @@ import java.util.Set;
  * Post-quantum algorithms as described by OASIS PKCS#11 v3.2. Works with softhsmv3 and any token
  * that implements the specification as written.
  *
- * <p>Every constant below is hand-entered, because jacknji11 1.3.1 predates v3.2 and defines none
- * of these in {@code CKA}, {@code CKK} or {@code CKM}. Hand-entered is not the same as guessed:
- * all 28 of them — three {@code CKK_*}, six {@code CKM_*}, {@code CKA_PARAMETER_SET} and the
- * eighteen {@code CKP_*} parameter sets — were checked on 2026-09-05 against the OASIS working
- * header (oasis-tcs/pkcs11, {@code working/headers/pkcs11t.h}) and against jacknji11 upstream,
- * which took the same values from that header in PR #65. Zero divergences.
+ * <p>The key types, mechanisms and attribute ids live in {@link Pkcs11v32}, with their provenance;
+ * they are specification values and were duplicated into {@link ThalesLunaProfile} for as long as
+ * they lived here. What remains below is the part that is genuinely this profile's: which
+ * algorithms exist, which {@code CKP_*} parameter set names each one, and which NIST OID it
+ * carries. Those eighteen parameter sets were checked on 2026-09-05 against the same OASIS working
+ * header as the rest, with zero divergences.
  *
  * <p>What the probe is still for is the other half of the question: the spec says what a mechanism
  * is <em>numbered</em>, never whether a given token implements it. A correct table and an absent
  * mechanism look identical until something asks the token.
  */
 public final class Pkcs11v32Profile extends AbstractTableProfile {
-
-    /** Attribute id for the parameter set (PKCS#11 v3.2). */
-    public static final long CKA_PARAMETER_SET = 0x0000061DL;
-
-    // Key types
-    private static final long CKK_ML_DSA = 0x0000004AL;
-    private static final long CKK_ML_KEM = 0x00000049L;
-    private static final long CKK_SLH_DSA = 0x0000004BL;
-
-    // Mechanisms
-    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
-    private static final long CKM_ML_DSA = 0x0000001DL;
-    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
-    private static final long CKM_ML_KEM = 0x00000017L;
-    private static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002DL;
-    private static final long CKM_SLH_DSA = 0x0000002EL;
 
     // NIST OID arcs
     private static final String SIG_ARC = "2.16.840.1.101.3.4.3.";
@@ -86,18 +71,21 @@ public final class Pkcs11v32Profile extends AbstractTableProfile {
     }
 
     private static AlgorithmEntry mlDsa(String name, long ckp, String oid, int pubLen) {
-        return new AlgorithmEntry(name, PqcFamily.ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN,
-                CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+        return new AlgorithmEntry(name, PqcFamily.ML_DSA, Pkcs11v32.CKK_ML_DSA,
+                Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN, Pkcs11v32.CKM_ML_DSA, OptionalLong.of(ckp),
+                new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
     }
 
     private static AlgorithmEntry mlKem(String name, long ckp, String oid, int pubLen) {
-        return new AlgorithmEntry(name, PqcFamily.ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
-                CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
+        return new AlgorithmEntry(name, PqcFamily.ML_KEM, Pkcs11v32.CKK_ML_KEM,
+                Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN, Pkcs11v32.CKM_ML_KEM, OptionalLong.of(ckp),
+                new ASN1ObjectIdentifier(oid), pubLen, KEM);
     }
 
     private static AlgorithmEntry slhDsa(String name, long ckp, String oid, int pubLen) {
-        return new AlgorithmEntry(name, PqcFamily.SLH_DSA, CKK_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
-                CKM_SLH_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+        return new AlgorithmEntry(name, PqcFamily.SLH_DSA, Pkcs11v32.CKK_SLH_DSA,
+                Pkcs11v32.CKM_SLH_DSA_KEY_PAIR_GEN, Pkcs11v32.CKM_SLH_DSA, OptionalLong.of(ckp),
+                new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
     }
 
     @Override
@@ -107,6 +95,6 @@ public final class Pkcs11v32Profile extends AbstractTableProfile {
 
     @Override
     public long ckaParameterSet() {
-        return CKA_PARAMETER_SET;
+        return Pkcs11v32.CKA_PARAMETER_SET;
     }
 }

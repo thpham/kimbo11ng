@@ -101,6 +101,18 @@ COPY target/kimbo11ng-jar-with-dependencies.jar \
 RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/kimbo11ng-jar-with-dependencies.jar \
           /opt/keyfactor/ejbca/dist/clientToolBox/lib/
 
+# The CLI, on PATH. Everything it needs to reach the token — the PKCS#11 module, its OpenSSL,
+# LD_LIBRARY_PATH, SOFTHSM2_CONF and the token state — exists only in here, so this is the only
+# place the tool can usefully run.
+#
+# No ENV naming a default module here on purpose. Which library this image should use is not a
+# build-time fact: it is SoftHSMv3 normally and a side-mounted Thales Luna client when one is
+# mounted, and that decision is already made at runtime by environment-hsm and luna-discover.sh.
+# Baking a path in would give the wrong answer on exactly the deployment that matters most, so the
+# launcher sources those two instead.
+COPY cli/kimbo11ng-cli.sh /usr/local/bin/kimbo11ng-cli
+RUN chmod +x /usr/local/bin/kimbo11ng-cli
+
 # init-hsm.sh runs as root to fix volume permissions, link an optional Luna client and init the
 # SoftHSM token, then drops to user 10001 via gosu before exec'ing start.sh
 CMD ["/opt/keyfactor/bin/init-hsm.sh"]

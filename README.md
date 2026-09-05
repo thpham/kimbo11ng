@@ -65,6 +65,60 @@ an AES key on the token would be one nothing could use.
   reconstructed from unordered objects anyway, and answering from memory keeps EJBCA's
   per-key-generation cache rebuild free. This is a design decision, not a gap.
 
+## Command-line tool
+
+EJBCA Community ships one PKCS#11 key tool, `clientToolBox PKCS11HSMKeyTool`, and it goes through
+SunPKCS11 — its key specifications are RSA, an EC curve, or `DSAnnnn`. Install kimbo11ng for
+post-quantum keys and you have a key-management CLI that cannot see the keys you installed it for.
+`kimbo11ng-cli` closes that gap. Keyfactor closed the same one in Enterprise with `p11ng-cli`;
+[docs/P11NG_CLI_SURFACE.md](docs/P11NG_CLI_SURFACE.md) records the published evidence behind every
+command name and option spelling here.
+
+Every command that touches a key drives the same `CryptoTokenImpl` EJBCA loads, so what the tool
+reports is what the CA will see — it does not model the crypto token, it runs it.
+
+The tool lives inside the image, on `PATH`. That is not a convenience: the PKCS#11 module, its
+OpenSSL, `LD_LIBRARY_PATH` and the token state exist only in the container. It picks its module the
+way the server does, by sourcing `docker/environment-hsm`, so it follows a side-mounted Thales Luna
+client automatically and needs no `--lib-file` in the common case.
+
+```bash
+docker compose exec ejbca kimbo11ng-cli                 # the command list
+docker compose exec ejbca kimbo11ng-cli listslots       # no PIN, no slot, no library needed
+just cli-token capabilities --slot-ref SLOT_LABEL --slot TestToken
+```
+
+| Command | What it answers |
+| --- | --- |
+| `listslots`, `showinfo`, `showslotinfo`, `showtokeninfo` | does the library load, does the slot exist, is the PIN locked — none of which needs a credential |
+| `capabilities` | which algorithms this token can actually do, and the profile kimbo11ng resolves for it |
+| `listkeypairs` | the alias list EJBCA will show, built by the key store the CA reads |
+| `listobjects`, `showobjectattributes` | the raw PKCS#11 objects behind those aliases, with `CKA_SENSITIVE` and `CKA_EXTRACTABLE` |
+| `generatekeypair`, `generatekey`, `deleteobject` | the key lifecycle, post-quantum included |
+| `testkeypair` | sign and verify once, the check `HsmKeepAliveWorker` runs on a schedule |
+| `signperformancetest` | throughput and per-signature latency |
+
+`capabilities` is the one with no Enterprise counterpart. The verdict it prints — *"Effective
+algorithms for profile 'pkcs11v32' (18/18 usable)"* — is today only readable in the WildFly log,
+after the crypto token has been created and EJBCA has already tried to use it. As a command it is a
+pre-flight check that needs no PIN.
+
+`signperformancetest` earns its place on SLH-DSA, where the figure is not published by anyone and
+is what decides whether an HSM can serve a CA at a given issuance rate. Measured on the SoftHSMv3 in
+this image, single-threaded:
+
+| Algorithm | Signings/s | Per signature |
+| --- | --- | --- |
+| ML-DSA-65 | 3001 (2 threads) | 0.67 ms |
+| SLH-DSA-SHA2-128S | 7.25 | 140 ms |
+
+Outside the container, `cli/kimbo11ng-cli.sh` takes its classpath from `KIMBO11NG_CLASSPATH`,
+`EJBCA_HOME`, or a checkout's `target/`. `just cli` runs it from the build tree.
+
+Not implemented: the Utimaco CP5 key-authorisation commands (`initializekey`, `authorizekey`,
+`unblockkey`, `backupobject`, `restoreobject`) — vendor extensions with no hardware here to develop
+or verify against.
+
 ## Prerequisites
 
 - Docker
@@ -167,9 +221,18 @@ Testcontainers:
   (RSA + ML-DSA alternative), each issuing a certificate whose signature algorithm OID is checked
 - `cryptotoken testkey` for each signing algorithm, and its refusal for ML-KEM
 
+**CLI integration tests** (`CliContainerIT`) run the tool from `PATH` inside the same image, against
+real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA and a symmetric key, each generated, signed with,
+inspected and deleted. The container is started with `sleep infinity` and no application server ever
+boots, which is the assertion rather than an optimisation: the tool's claim is that it answers
+"does this HSM work" before EJBCA is in the picture. It costs seconds rather than the minutes a full
+stack takes, and it is the only place three things are covered — the launcher finding its classpath,
+module discovery through `environment-hsm`, and the crypto provider being installed, without which
+every post-quantum algorithm reports as excluded.
+
 ```bash
-mvn verify               # 583 unit tests + 4 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 24 integration tests (~4 min)
+mvn verify               # 655 unit tests + 4 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 24 EJBCA + 21 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100

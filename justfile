@@ -166,6 +166,24 @@ it:
 it-only:
     cd {{module_dir}} && mvn -Pit test-compile failsafe:integration-test failsafe:verify
 
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+# Runs the command-line tool from the build tree. Against the SoftHSM inside the running
+# container, prefer `just cli-token` below, which fills in the library path and the slot.
+#
+# Run the CLI: just cli listslots --lib-file /usr/lib/softhsm/libsofthsm2.so
+cli *ARGS:
+    ./cli/kimbo11ng-cli.sh {{ARGS}}
+
+# The same tool, inside the EJBCA container, where SoftHSMv3 and its OpenSSL actually live.
+# Nothing on the host can talk to that token: the library needs the container's
+# LD_LIBRARY_PATH, and the token state is in the container's filesystem. The image puts
+# kimbo11ng-cli on PATH and sets KIMBO11NG_LIB_FILE, so there is nothing to assemble here.
+#
+# Run the CLI inside the running container against the SoftHSM slot
+cli-token *ARGS:
+    docker compose exec -T ejbca kimbo11ng-cli {{ARGS}}
+
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 # Only needed when bumping openssl_version or softhsm_version, or to build the runtime image

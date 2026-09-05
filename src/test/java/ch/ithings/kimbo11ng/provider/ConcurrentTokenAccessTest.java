@@ -251,7 +251,8 @@ class ConcurrentTokenAccessTest {
                 "some session was borrowed and never returned");
     }
 
-    private void deleteIfPresent(Kimbo11ngKeyStoreSpi keyStore, String alias) {
+    private void deleteIfPresent(Kimbo11ngKeyStoreSpi keyStore, String alias)
+            throws java.security.KeyStoreException {
         if (keyStore.engineContainsAlias(alias)) {
             keyStore.engineDeleteEntry(alias);
         }

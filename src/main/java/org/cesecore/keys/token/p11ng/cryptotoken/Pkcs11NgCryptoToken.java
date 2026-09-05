@@ -38,6 +38,9 @@ public class Pkcs11NgCryptoToken extends BaseCryptoToken implements P11SlotUser,
 
     private transient CryptoTokenImpl impl;
 
+    // The bridge is inherently self-referential: CryptoTokenImpl needs the protected
+    // BaseCryptoToken methods this class exposes. It stores the reference without using it.
+    @SuppressWarnings("this-escape")
     public Pkcs11NgCryptoToken() throws InstantiationException {
         super();
         impl = new CryptoTokenImpl(this);

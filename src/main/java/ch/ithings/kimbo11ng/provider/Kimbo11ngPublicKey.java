@@ -247,6 +247,8 @@ public class Kimbo11ngPublicKey {
      * {@code encoded} is always SubjectPublicKeyInfo-format so EJBCA can hash it for SubjectKeyId.
      */
     public static final class RawPqcPublicKey implements PublicKey {
+        private static final long serialVersionUID = 1L;
+
         private final String keySpec;
         private final byte[] encoded;
 

@@ -4,12 +4,12 @@
  */
 package ch.ithings.kimbo11ng.slot;
 
+import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
 import com.keyfactor.util.keys.token.pkcs11.PKCS11SlotListWrapper;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CK_TOKEN_INFO;
 import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.Cryptoki;
-import org.pkcs11.jacknji11.jna.JNA;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -29,9 +29,12 @@ public class SlotListWrapper implements PKCS11SlotListWrapper {
     private final Map<Long, char[]> labelCache = new HashMap<>();
 
     public SlotListWrapper(String libPath) {
+        this(libPath, NativeProviderFactory.jna());
+    }
+
+    public SlotListWrapper(String libPath, NativeProviderFactory providerFactory) {
         this.libPath = libPath;
-        JNA jna = new JNA(libPath);
-        Cryptoki cryptoki = new Cryptoki(jna);
+        Cryptoki cryptoki = new Cryptoki(providerFactory.create(libPath));
         this.ce = new CryptokiE(cryptoki);
         try {
             ce.Initialize();

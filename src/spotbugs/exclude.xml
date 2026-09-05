@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2026 Thomas Pham — kimbo11ng
+  SPDX-License-Identifier: Apache-2.0
+
+  SpotBugs exclusions.
+
+  Two kinds of entry, and only two:
+    - "scheduled": a real finding whose fix belongs to a named hardening phase. It carries the
+      phase number and must be deleted when that phase lands.
+    - "permanent": the detector's assumption does not hold for this code, with the reason stated.
+
+  The threshold stays at Medium and the build stays failing, so any NEW finding breaks the build.
+  This file is expected to shrink to near-empty, not to grow.
+-->
+<FindBugsFilter>
+
+    <!-- ===== scheduled: phase 1 (algorithm registry + provider facade) ===== -->
+
+    <!-- The provider hands out its live KeyStoreSpi so CryptoTokenImpl can register generated
+         keys. Phase 1 replaces this with an AtomicReference<TokenRuntime>; phase 3 removes the
+         registration hand-off entirely in favour of CKA_ID lookup. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngProvider"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- RawPqcPublicKey neither copies nor clones its encoding. Phase 1 deletes the class:
+         EJBCA's AlgorithmTools resolves signature algorithms with instanceof MLDSAKey /
+         SLHDSAKey, so an opaque key can never be signed with. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey$RawPqcPublicKey"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- ===== scheduled: phase 2 (module lifecycle + session pool) ===== -->
+
+    <!-- CryptokiDevice and SlotListWrapper publish their live CryptokiE because every call site
+         needs it. Phase 2 retires both into Pkcs11Module + SessionPool, where the session is
+         reached only through an AutoCloseable lease and never handed out. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.CryptokiDevice"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.slot.SlotListWrapper"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.CryptoTokenImpl"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- ===== scheduled: phase 3 (durable key identity) ===== -->
+
+    <!-- The key maps are published for the CryptoTokenImpl registration path and are plain
+         HashMaps. Phase 2 makes them concurrent; phase 3 removes the accessors. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- ===== scheduled: phase 4 (public-key construction) ===== -->
+
+    <!-- The catch(Exception) around the CKA_EC_POINT unwrap. Measured: this heuristic returns a
+         truncated point for ~23% of P-256 keys when a module reports a raw (unwrapped) point.
+         Phase 4 replaces it with a parse-and-consume check plus a length assertion. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey"/>
+        <Method name="readEcPublicKey"/>
+        <Bug pattern="REC_CATCH_EXCEPTION"/>
+    </Match>
+
+    <!-- ===== permanent, justified ===== -->
+
+    <!-- The PKCS#11 library path is the operator-configured 'sharedLibrary' token property. An
+         administrator naming the shared object to load is the feature, not untrusted input;
+         EJBCA additionally constrains it to cryptotoken.p11.lib.* entries in web.properties. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.CryptokiDevice"/>
+        <Method name="getLibraryName"/>
+        <Bug pattern="PATH_TRAVERSAL_IN"/>
+    </Match>
+
+    <!-- java.security.Provider extends Properties (Hashtable). No JCA provider overrides
+         equals(); identity comparison is what the JCA framework relies on, and EJBCA's
+         SignWithWorkingAlgorithm caches per Provider.hashCode(). -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngProvider"/>
+        <Bug pattern="EQ_DOESNT_OVERRIDE_EQUALS"/>
+    </Match>
+
+</FindBugsFilter>

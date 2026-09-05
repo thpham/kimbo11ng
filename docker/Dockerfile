@@ -35,7 +35,25 @@ ENV PKG_CONFIG_PATH=/opt/openssl/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/opt/openssl/lib
 
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/pqctoday/softhsmv3.git
+# Canonical URL: pqctoday/softhsmv3 was renamed to pqctoday-org/pqctoday-hsm. Cloning the old
+# name still works through GitHub's redirect, but a redirect can disappear the moment anyone
+# re-creates that name, so depend on the real one. Cloned into softhsmv3/ explicitly so the
+# repository rename does not change the build directory.
+#
+# Pinned to a release tag: an unpinned HEAD makes this image unreproducible, and upstream
+# has moved past the layout these cmake flags expect.
+#
+# Choosing the tag is not free — upstream has three eras:
+#   v0.4.4 and earlier  no stateful/ sources; builds from a plain clone.   <- pinned here
+#   v0.4.7, v0.4.8      reference stateful/hash-sigs/*.c, but those are gitlinks with NO
+#                       .gitmodules, so neither a plain clone nor --recurse-submodules can
+#                       populate them. Unbuildable; cmake fails with
+#                       "Cannot find source file: stateful/hash-sigs/endian.c".
+#   v0.5.0 and later    same sources, but .gitmodules is present, so moving up to one of
+#                       these requires adding --recurse-submodules to the clone below.
+ARG SOFTHSM_VERSION=v0.4.4
+RUN git clone --depth 1 --branch ${SOFTHSM_VERSION} \
+        https://github.com/pqctoday-org/pqctoday-hsm.git softhsmv3
 
 RUN cd softhsmv3 && \
     mkdir build && cd build && \

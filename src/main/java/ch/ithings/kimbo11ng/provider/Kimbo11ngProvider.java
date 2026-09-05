@@ -17,13 +17,18 @@ public class Kimbo11ngProvider extends Provider {
     private static final long serialVersionUID = 1L;
     private static final Logger log = Logger.getLogger(Kimbo11ngProvider.class);
 
-    private final CryptokiDevice device;
-    private Kimbo11ngKeyStoreSpi keyStoreSpi;
+    // Provider is Serializable, but a live PKCS#11 device and its keystore state are not:
+    // a deserialized provider would hold handles into a session that no longer exists.
+    private final transient CryptokiDevice device;
+    private transient Kimbo11ngKeyStoreSpi keyStoreSpi;
 
     // Track last generated key pair handles for setKeyEntry labeling
     private long lastGeneratedPrivHandle = -1;
     private long lastGeneratedPubHandle = -1;
 
+    // TODO(phase-1): the provider becomes a stable facade holding an AtomicReference<TokenRuntime>
+    // and registers its services from the algorithm table, which removes this escape.
+    @SuppressWarnings("this-escape")
     public Kimbo11ngProvider(CryptokiDevice device) {
         super("Kimbo11ng-" + device.getLibraryName() + "-slot" + device.getSlotId(),
                 "1.0",

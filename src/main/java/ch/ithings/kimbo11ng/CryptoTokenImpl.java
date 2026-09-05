@@ -400,6 +400,9 @@ public class CryptoTokenImpl {
         registerKeyPairInSpi(alias, privRef.value(), "SLH-DSA", pubKey);
     }
 
+    // TODO(phase-3): unwrapping the CachingKeyStoreWrapper to re-wrap it is a cache-busting hack
+    // that relies on a deprecated accessor. Registering the key by CKA_ID removes the need.
+    @SuppressWarnings("deprecation")
     private void registerKeyPairInSpi(String alias, long privHandle, String algorithm,
             java.security.PublicKey pubKey) {
         Kimbo11ngKeyStoreSpi spi = p11Provider != null ? p11Provider.getKeyStoreSpi() : null;

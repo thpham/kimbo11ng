@@ -9,6 +9,13 @@ set dotenv-load := false
 ejbca_version   := "9.3.7"
 ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version
 openssl_version := "3.6.0"
+# softhsmv3 (now pqctoday-org/pqctoday-hsm) is built from source. Pinned to a release tag:
+# upstream is under heavy development and building an unpinned HEAD makes the image
+# unreproducible and breaks without warning — which it did, between the last published
+# image and today.
+# NOTE: v0.4.7 and v0.4.8 are unbuildable upstream (gitlinks without .gitmodules); moving to
+# v0.5.0+ additionally requires --recurse-submodules in docker/Dockerfile. See that file.
+softhsm_version := "v0.4.4"
 
 # EJBCA dependency JARs: "filename groupId artifactId version"
 # Extracted from the base image and installed to local Maven repo.
@@ -92,25 +99,33 @@ versions:
 
 # Build the kimbo11ng fat JAR
 build:
-    cd {{module_dir}} && mvn clean package -q
+    # 'verify', not 'package': the build gates (unit tests, artifact contents, SpotBugs,
+    # coverage floor, duplicate classes, license headers) are all bound to the verify phase.
+    cd {{module_dir}} && mvn clean verify -q
     @echo "Built: {{module_dir}}/target/{{artifact}}"
 
-# Build without clean
+# Build without clean or gates — fast path for `just deploy` hot-reload iteration only.
 build-quick:
-    cd {{module_dir}} && mvn package -q
-    @echo "Built: {{module_dir}}/target/{{artifact}}"
+    cd {{module_dir}} && mvn package -q -DskipTests
+    @echo "Built (ungated): {{module_dir}}/target/{{artifact}}"
+
+# Unit tests + all build gates, no Docker required
+test:
+    cd {{module_dir}} && mvn clean verify
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 
 # Build the Docker image (EJBCA + softhsmv3 + kimbo11ng)
 docker-build: build
     docker build -f docker/Dockerfile -t ghcr.io/thpham/ejbca-ce:latest \
-        --build-arg OPENSSL_VERSION={{openssl_version}} .
+        --build-arg OPENSSL_VERSION={{openssl_version}} \
+        --build-arg SOFTHSM_VERSION={{softhsm_version}} .
 
 # Build Docker image without cache
 docker-build-nocache: build
     docker build -f docker/Dockerfile -t kimbo11ng-ejbca \
-        --build-arg OPENSSL_VERSION={{openssl_version}} --no-cache .
+        --build-arg OPENSSL_VERSION={{openssl_version}} \
+        --build-arg SOFTHSM_VERSION={{softhsm_version}} --no-cache .
 
 # Start all services (EJBCA + MariaDB)
 up:

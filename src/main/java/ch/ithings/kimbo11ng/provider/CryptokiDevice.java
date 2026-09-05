@@ -4,12 +4,12 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CK_SESSION_INFO;
 import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.Cryptoki;
 import org.pkcs11.jacknji11.CKU;
-import org.pkcs11.jacknji11.jna.JNA;
 
 import java.io.File;
 
@@ -28,10 +28,13 @@ public class CryptokiDevice {
     private boolean loggedIn = false;
 
     public CryptokiDevice(String libPath, long slotId) {
+        this(libPath, slotId, NativeProviderFactory.jna());
+    }
+
+    public CryptokiDevice(String libPath, long slotId, NativeProviderFactory providerFactory) {
         this.libPath = libPath;
         this.slotId = slotId;
-        JNA jna = new JNA(libPath);
-        Cryptoki cryptoki = new Cryptoki(jna);
+        Cryptoki cryptoki = new Cryptoki(providerFactory.create(libPath));
         this.ce = new CryptokiE(cryptoki);
         try {
             ce.Initialize();

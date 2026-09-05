@@ -45,7 +45,10 @@ jobs:
           path: deps/ejbca
           key: ejbca-jars-${{ env.EJBCA_VERSION }}
 
-      - name: Setup (extract JARs + install deps + build)
+      # `just setup` = install-deps + build, and `build` runs `mvn clean verify`, so this
+      # covers unit tests, artifact-contents, SpotBugs, coverage floor, duplicate classes
+      # and license headers. None of it needs Docker, so it gates pull requests too.
+      - name: Setup, build and verify (unit tests + build gates)
         run: just setup
 
       - name: Upload JAR artifact

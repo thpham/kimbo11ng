@@ -78,6 +78,7 @@ All versions are centralized in the `justfile`. Run `just versions` to display:
 ```
 EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7)
 OpenSSL:   3.6.0
+SoftHSMv3: v0.28.1 (pqctoday-org/pqctoday-hsm)
 Artifact:  kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar
 
 Dependencies:

@@ -87,6 +87,7 @@ versions:
     #!/usr/bin/env bash
     echo "EJBCA:     {{ejbca_version}} ({{ejbca_image}})"
     echo "OpenSSL:   {{openssl_version}}"
+    echo "SoftHSMv3: {{softhsm_version}} (pqctoday-org/pqctoday-hsm)"
     echo "Artifact:  {{artifact}}"
     echo ""
     echo "Dependencies:"

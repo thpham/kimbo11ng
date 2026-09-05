@@ -55,7 +55,8 @@ service is registered only if the token advertises its mechanism with the matchi
 
 - Docker
 - [just](https://github.com/casey/just) command runner
-- Maven 3.8+ and JDK 17+
+- Maven 3.8+ and JDK 21+ to build (the artifact targets Java 17, which is what EJBCA 9.3.7 runs;
+  the compiler has to be 21 or newer for the `this-escape` lint category the warning gate excludes)
 
 ## Quick Start
 

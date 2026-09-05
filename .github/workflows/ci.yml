@@ -10,7 +10,13 @@ env:
   # ─── Versions (single source of truth) ────────────────────────────────────
   EJBCA_VERSION: "9.3.7"
   OPENSSL_VERSION: "3.6.0"
-  JAVA_VERSION: "17"
+  # The JDK that *builds*, not the one that runs. EJBCA 9.3.7 ships a Java 17 runtime and
+  # pom.xml pins <maven.compiler.release>17</maven.compiler.release>, which is what keeps the
+  # bytecode and the resolvable API surface compatible with it. The compiler itself has to be 21
+  # or newer: the strict-warning gate excludes the 'this-escape' lint category for the
+  # OpenAPI-generated REST client, and that category does not exist before JDK 21 — javac 17
+  # rejects the whole flag with "invalid flag: -Xlint:all,-this-escape,-serial".
+  JAVA_VERSION: "21"
   JAVA_DISTRIBUTION: "temurin"
 
   # ─── Docker ───────────────────────────────────────────────────────────────

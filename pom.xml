@@ -292,6 +292,15 @@
                 <artifactId>maven-assembly-plugin</artifactId>
                 <version>3.6.0</version>
                 <configuration>
+                    <!-- Deliberately version-free: the deployable is referenced by name from the
+                         Dockerfile, the justfile and the deploy recipe, and a version in the file
+                         name means every bump silently breaks all three. The version is not lost —
+                         addDefaultImplementationEntries below puts Implementation-Version in the
+                         manifest, which is where you read it off a deployed jar anyway.
+                         appendAssemblyId is left at its default so the output stays a secondary
+                         artifact: setting it to false makes the assembly replace the project's main
+                         artifact, which is not what we want and which mvn warns about. -->
+                    <finalName>kimbo11ng</finalName>
                     <descriptorRefs>
                         <descriptorRef>jar-with-dependencies</descriptorRef>
                     </descriptorRefs>

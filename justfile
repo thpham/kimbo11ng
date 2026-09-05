@@ -24,7 +24,7 @@ ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 c
 
 # Build configuration
 module_dir := "."
-artifact   := "kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar"
+artifact   := "kimbo11ng-jar-with-dependencies.jar"
 deps_dir   := "deps/ejbca"
 ejbca_lib  := "/opt/keyfactor/ejbca/dist/ejbca.ear/lib"
 

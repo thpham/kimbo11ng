@@ -19,7 +19,7 @@ env:
   PLATFORMS: linux/amd64,linux/arm64
 
   # ─── Build artifacts ──────────────────────────────────────────────────────
-  ARTIFACT: kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar
+  ARTIFACT: kimbo11ng-jar-with-dependencies.jar
   ARTIFACT_NAME: kimbo11ng-jar
 
 jobs:

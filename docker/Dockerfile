@@ -135,9 +135,9 @@ ENV SOFTHSM2_CONF=/etc/softhsmv3.conf
 ENV LD_LIBRARY_PATH=/opt/openssl/lib
 
 # kimbo11ng fat JAR — single COPY + symlink to avoid duplicating the layer
-COPY target/kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
+COPY target/kimbo11ng-jar-with-dependencies.jar \
      /opt/keyfactor/ejbca/dist/ejbca.ear/lib/
-RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/kimbo11ng-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
+RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/kimbo11ng-jar-with-dependencies.jar \
           /opt/keyfactor/ejbca/dist/clientToolBox/lib/
 
 # init-hsm.sh runs as root to fix volume permissions, link an optional Luna client and init the

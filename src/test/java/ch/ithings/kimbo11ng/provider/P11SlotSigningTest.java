@@ -45,7 +45,7 @@ class P11SlotSigningTest {
 
     @BeforeAll
     static void registerBouncyCastle() {
-        // Kimbo11ngPublicKey resolves KeyFactory by provider NAME ("BC"), so BouncyCastle must be
+        // PublicKeyReader resolves KeyFactory by provider NAME ("BC"), so BouncyCastle must be
         // registered in Security. In production EJBCA does this; nothing in kimbo11ng does, which
         // is an undocumented hard dependency worth pinning here.
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -96,7 +96,7 @@ class P11SlotSigningTest {
     void rsaRoundTrip() throws Exception {
         long[] handles = generateRsa(2048);
         PublicKey pub = fixture.onSession((ce, session) ->
-                Kimbo11ngPublicKey.readRsaPublicKey(ce, session, handles[0]));
+                PublicKeyReader.readRsaPublicKey(ce, session, handles[0]));
         assertNotNull(pub);
         assertEquals("RSA", pub.getAlgorithm());
         assertEquals(2048, ((RSAPublicKey) pub).getModulus().bitLength());
@@ -107,7 +107,7 @@ class P11SlotSigningTest {
     void rsaSignVerify() throws Exception {
         long[] handles = generateRsa(2048);
         PublicKey pub = fixture.onSession((ce, session) ->
-                Kimbo11ngPublicKey.readRsaPublicKey(ce, session, handles[0]));
+                PublicKeyReader.readRsaPublicKey(ce, session, handles[0]));
 
         byte[] data = "kimbo11ng".getBytes(StandardCharsets.UTF_8);
         byte[] signature = signWithProvider("SHA256withRSA", handles[1], "RSA", data);
@@ -124,7 +124,7 @@ class P11SlotSigningTest {
     void ecdsaSignatureIsReEncodedToDer() throws Exception {
         long[] handles = generateEc();
         PublicKey pub = fixture.onSession((ce, session) ->
-                Kimbo11ngPublicKey.readEcPublicKey(ce, session, handles[0]));
+                PublicKeyReader.readEcPublicKey(ce, session, handles[0]));
         assertEquals("EC", pub.getAlgorithm());
 
         byte[] data = "kimbo11ng".getBytes(StandardCharsets.UTF_8);

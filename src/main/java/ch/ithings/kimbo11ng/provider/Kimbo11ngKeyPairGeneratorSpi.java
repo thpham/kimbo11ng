@@ -57,8 +57,8 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             ce.GenerateKeyPair(session, new CKM(mechanism),
                     templates.pub(), templates.priv(), pubRef, privRef);
             java.security.PublicKey publicKey = "RSA".equals(algorithm)
-                    ? Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubRef.value())
-                    : Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubRef.value());
+                    ? PublicKeyReader.readRsaPublicKey(ce, session, pubRef.value())
+                    : PublicKeyReader.readEcPublicKey(ce, session, pubRef.value());
             Kimbo11ngPrivateKey privateKey = new Kimbo11ngPrivateKey(algorithm, slot,
                     new P11KeyRef(keyId, label, null), privRef.value());
             if (log.isDebugEnabled()) {

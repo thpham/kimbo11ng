@@ -268,6 +268,24 @@ class CryptoTokenLifecycleTest {
     }
 
     @Test
+    @DisplayName("enumerates leniently by default and strictly when asked")
+    void publicKeyPolicyComesFromProperties() throws Exception {
+        // Generation is always strict; this governs only reading keys that already exist, where a
+        // token using a pre-standard OID should not stop a CA from starting.
+        assertEquals(ch.ithings.kimbo11ng.provider.PublicKeyReader.Policy.LENIENT,
+                impl.getProvider().runtime().publicKeyPolicy());
+
+        Properties strict = tokenProperties();
+        strict.setProperty(
+                ch.ithings.kimbo11ng.provider.PublicKeyReader.STRICT_PUBLIC_KEY, "true");
+        CryptoTokenImpl configured = new CryptoTokenImpl(new RecordingBridge(),
+                new Pkcs11ModuleRegistry(path -> new FakeToken()));
+        configured.init(strict, null, 45);
+        assertEquals(ch.ithings.kimbo11ng.provider.PublicKeyReader.Policy.STRICT,
+                configured.getProvider().runtime().publicKeyPolicy());
+    }
+
+    @Test
     @DisplayName("honours a configured session ceiling")
     void sessionCeilingComesFromProperties() throws Exception {
         Properties properties = tokenProperties();

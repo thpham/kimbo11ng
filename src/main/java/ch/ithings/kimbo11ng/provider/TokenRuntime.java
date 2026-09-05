@@ -34,16 +34,34 @@ public final class TokenRuntime {
     private final P11Slot slot;
     private final PqcMechanismProfile profile;
     private final boolean backfillKeyIds;
+    private final PublicKeyReader.Policy publicKeyPolicy;
     private volatile Kimbo11ngKeyStoreSpi keyStoreSpi;
 
     public TokenRuntime(P11Slot slot, PqcMechanismProfile profile) {
-        this(slot, profile, true);
+        this(slot, profile, true, PublicKeyReader.Policy.LENIENT);
     }
 
     public TokenRuntime(P11Slot slot, PqcMechanismProfile profile, boolean backfillKeyIds) {
+        this(slot, profile, backfillKeyIds, PublicKeyReader.Policy.LENIENT);
+    }
+
+    public TokenRuntime(P11Slot slot, PqcMechanismProfile profile, boolean backfillKeyIds,
+            PublicKeyReader.Policy publicKeyPolicy) {
         this.slot = Objects.requireNonNull(slot, "slot");
         this.profile = Objects.requireNonNull(profile, "profile");
         this.backfillKeyIds = backfillKeyIds;
+        this.publicKeyPolicy = Objects.requireNonNull(publicKeyPolicy, "publicKeyPolicy");
+    }
+
+    /**
+     * How strictly to read public keys that already exist on the token.
+     *
+     * <p>Generation is always strict — see {@link PublicKeyReader.Policy}. This governs only
+     * enumeration, where the keys may predate kimbo11ng and a cosmetic disagreement should not stop
+     * a CA from starting.
+     */
+    public PublicKeyReader.Policy publicKeyPolicy() {
+        return publicKeyPolicy;
     }
 
     /** @see #BACKFILL_KEY_IDS */

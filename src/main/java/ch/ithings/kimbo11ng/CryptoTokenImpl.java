@@ -14,10 +14,11 @@ import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.P11KeyRef;
+import ch.ithings.kimbo11ng.provider.PublicKeyReader;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngPrivateKey;
-import ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey;
+import ch.ithings.kimbo11ng.provider.PublicKeyReader;
 import ch.ithings.kimbo11ng.provider.TokenRuntime;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException;
@@ -273,7 +274,7 @@ public class CryptoTokenImpl {
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.rsa(label, keyId, bits);
         generateAndRegister(current, templates, keyId, CKM.RSA_PKCS_KEY_PAIR_GEN, alias, "RSA",
-                null, Kimbo11ngPublicKey::readRsaPublicKey);
+                null, PublicKeyReader::readRsaPublicKey);
         log.info("Generated RSA-" + bits + " key pair '" + alias + "'");
     }
 
@@ -281,7 +282,7 @@ public class CryptoTokenImpl {
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.ec(label, keyId, curveName);
         generateAndRegister(current, templates, keyId, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
-                Kimbo11ngPublicKey::readEcPublicKey);
+                PublicKeyReader::readEcPublicKey);
         log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
     }
 
@@ -292,14 +293,14 @@ public class CryptoTokenImpl {
         // SubjectPublicKeyInfo is the one the key was actually generated as.
         generateAndRegister(current, templates, keyId, entry.ckmKeyPairGen(), alias,
                 entry.family().jcaName(), entry,
-                (ce, session, handle) -> Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handle,
+                (ce, session, handle) -> PublicKeyReader.readPqcPublicKey(ce, session, handle,
                         entry));
         log.info("Generated " + entry.canonicalName() + " key pair '" + alias + "'");
     }
 
     /** Reads a freshly generated public key from its object handle. */
     @FunctionalInterface
-    private interface PublicKeyReader {
+    private interface PublicKeyFetch {
         PublicKey read(CryptokiE ce, long session, long handle) throws Exception;
     }
 
@@ -312,7 +313,7 @@ public class CryptoTokenImpl {
      */
     private void generateAndRegister(TokenRuntime current, KeyTemplates.Pair templates,
             byte[] keyId, long mechanism, String alias, String algorithm, AlgorithmEntry entry,
-            PublicKeyReader reader) throws Exception {
+            PublicKeyFetch reader) throws Exception {
         long privHandle;
         PublicKey publicKey;
         try (SessionLease lease = current.slot().borrow()) {
@@ -407,7 +408,17 @@ public class CryptoTokenImpl {
         P11Slot slot = modules.get(libPath).slot(slotId, properties);
         boolean backfill = Boolean.parseBoolean(
                 properties.getProperty(TokenRuntime.BACKFILL_KEY_IDS, "true"));
-        TokenRuntime newRuntime = new TokenRuntime(slot, profile, backfill);
+        // Lenient by default, and only for enumeration — generation is always strict. The one
+        // thing this relaxes is a token that labels an existing key with a different OID than the
+        // one we resolved, which happens for real: a token from the NIST draft era uses the
+        // pre-standard ML-DSA OIDs. The length check still runs, so a key of the wrong parameter
+        // set is still refused; what is allowed through is a naming disagreement on a key whose
+        // material is right. An operator who wants that to be fatal sets the property.
+        PublicKeyReader.Policy policy = Boolean.parseBoolean(properties.getProperty(
+                PublicKeyReader.STRICT_PUBLIC_KEY, "false"))
+                ? PublicKeyReader.Policy.STRICT
+                : PublicKeyReader.Policy.LENIENT;
+        TokenRuntime newRuntime = new TokenRuntime(slot, profile, backfill, policy);
         // The signing path can see that the HSM is gone but cannot act on it; clearing EJBCA's
         // keystore is what stops work being routed to a CA whose token is not answering, and what
         // lets autoActivate() log in again with the PIN EJBCA holds and we do not.

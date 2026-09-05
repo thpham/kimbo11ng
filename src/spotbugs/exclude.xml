@@ -37,17 +37,6 @@
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
 
-    <!-- ===== scheduled: phase 4 (public-key construction) ===== -->
-
-    <!-- The catch(Exception) around the CKA_EC_POINT unwrap. Measured: this heuristic returns a
-         truncated point for ~23% of P-256 keys when a module reports a raw (unwrapped) point.
-         Phase 4 replaces it with a parse-and-consume check plus a length assertion. -->
-    <Match>
-        <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngPublicKey"/>
-        <Method name="readEcPublicKey"/>
-        <Bug pattern="REC_CATCH_EXCEPTION"/>
-    </Match>
-
     <!-- ===== permanent, justified ===== -->
 
     <!-- AbstractTableProfile validates its algorithm table in the constructor and throws if two

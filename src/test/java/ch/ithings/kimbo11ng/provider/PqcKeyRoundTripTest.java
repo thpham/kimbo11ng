@@ -80,7 +80,7 @@ class PqcKeyRoundTripTest {
     /** Reads a public key the way enumeration does, under its own lease. */
     private PublicKey read(long handle, AlgorithmEntry entry) throws Exception {
         return fixture.onSession(
-                (ce, session) -> Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handle, entry));
+                (ce, session) -> PublicKeyReader.readPqcPublicKey(ce, session, handle, entry));
     }
 
     @ParameterizedTest
@@ -179,6 +179,40 @@ class PqcKeyRoundTripTest {
         assertEquals(fromRaw.getAlgorithm(), fromSpki.getAlgorithm());
         assertEquals(fromRaw.getEncoded().length, fromSpki.getEncoded().length,
                 "both paths must produce the same encoding shape");
+    }
+
+    @Test
+    @DisplayName("a lenient read accepts the token's own OID but still checks the length")
+    void lenientPolicyWarnsOnOidButFailsOnLength() throws Exception {
+        AlgorithmEntry entry = profile.lookup("ML-DSA-65").orElseThrow();
+        // The token labels its key with a different OID than the one we resolved. Under LENIENT —
+        // enumeration of keys that may predate kimbo11ng — that is a warning, because the length
+        // check below it is what actually prevents a wrong OID reaching a certificate.
+        fake.pqcSpkiOid(profile.lookup("ML-DSA-44").orElseThrow().oid().getId());
+        long handle = generate(entry);
+
+        assertThrows(InvalidKeyException.class, () -> read(handle, entry),
+                "STRICT is the default and must refuse");
+
+        PublicKey lenient = fixture.onSession((ce, session) ->
+                PublicKeyReader.readPqcPublicKey(ce, session, handle, entry,
+                        PublicKeyReader.Policy.LENIENT));
+        assertInstanceOf(MLDSAKey.class, lenient);
+    }
+
+    @Test
+    @DisplayName("a length mismatch fails under either policy")
+    void lengthMismatchIsAlwaysFatal() throws Exception {
+        long handle = generate(profile.lookup("ML-DSA-44").orElseThrow());
+        AlgorithmEntry wrong = profile.lookup("ML-DSA-87").orElseThrow();
+
+        for (PublicKeyReader.Policy policy : PublicKeyReader.Policy.values()) {
+            InvalidKeyException e = assertThrows(InvalidKeyException.class,
+                    () -> fixture.onSession((ce, session) ->
+                            PublicKeyReader.readPqcPublicKey(ce, session, handle, wrong, policy)),
+                    () -> "policy " + policy + " must not accept a mislabelled key");
+            assertTrue(e.getMessage().contains("1312"), e.getMessage());
+        }
     }
 
     @Test

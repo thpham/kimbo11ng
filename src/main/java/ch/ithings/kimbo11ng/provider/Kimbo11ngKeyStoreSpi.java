@@ -365,14 +365,15 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             }
             long pubHandle = pubHandles[0];
             if (keyType == CKK.RSA) {
-                return Optional.of(Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubHandle));
+                return Optional.of(PublicKeyReader.readRsaPublicKey(ce, session, pubHandle));
             }
             if (keyType == CKK.EC) {
-                return Optional.of(Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubHandle));
+                return Optional.of(PublicKeyReader.readEcPublicKey(ce, session, pubHandle));
             }
             if (entry.isPresent()) {
                 return Optional.of(
-                        Kimbo11ngPublicKey.readPqcPublicKey(ce, session, pubHandle, entry.get()));
+                        PublicKeyReader.readPqcPublicKey(ce, session, pubHandle, entry.get(),
+                                runtime.publicKeyPolicy()));
             }
             return Optional.empty();
         } catch (Exception e) {

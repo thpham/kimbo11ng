@@ -276,7 +276,41 @@ backfills, and still resolves when `CKA_ID` is read-only · existing demo keys k
 - **4.4** SPKI detection by full parse-and-consume.
 - **4.5** Probe the container's BC for PQC `KeyFactory` support; WARN, never a silent debug line.
 
-**Gate** — RAW and DER EC matrix both at 0% failure · a missing `CKA_PARAMETER_SET` on an ML-DSA-44
+**Gate** — met. The matrix runs 250 keys per curve per encoding across P-256/P-384/P-521 plus
+secp256k1 and three Brainpool curves, at 0% failure. 250 rather than 2,000 because the old
+heuristic failed with p ≈ 0.25 per key, so 250 leaves it about a 10^-31 chance of passing by luck;
+2,000 would cost eight times the runtime to reach the same conclusion.
+
+### What the implementation changed, and why
+
+**The failure rate was re-measured, and its nature had been described wrongly.** Running the old
+heuristic against 2,000 freshly generated P-256 keys: 490 failed, 24.5% — consistent with the
+recorded 23.2% and with the 64/256 the arithmetic predicts. But **every one of the 490 threw**;
+none silently produced a wrong point. The earlier description of this defect, in this document and
+in the code comments, said it "returns a truncated point" that a caller would then use. In practice
+it does not: the truncated buffer is not a valid point length, so BouncyCastle rejects it. What an
+operator actually saw was a quarter of their EC keys refusing to load. The silent variant is
+possible — it needs the truncated content to be a valid encoding in its own right, which for a
+65-byte input means X[0] = 33 and X[1] ∈ {2, 3}, about 1 in 33,000 — but it was not what was
+happening. The severity is unchanged; the diagnosis is now accurate.
+
+**`CKA_EC_PARAMS` explicit parameters are now handled.** The old code cast the parsed object
+straight to an `ASN1ObjectIdentifier`, so a token reporting explicit curve parameters — which some
+HSMs do for curves they have no OID for — failed with a `ClassCastException` rather than anything
+diagnosable. Both arms of the X9.62 CHOICE are read, and `implicitlyCA` is refused by name.
+
+**Points are now checked to be on the curve.** BouncyCastle does not call `ECPoint.isValid()` for
+you. A point off the curve is the classic invalid-curve attack input, and the token's word for it
+was previously taken.
+
+**Enumeration defaults to lenient, generation is always strict.** `kimbo11ng.strict.publickey`
+governs only the reading of keys that already exist. The case it relaxes is real: a token from the
+NIST draft era labels an ML-DSA key with a pre-standard OID, and refusing to start a CA over a
+naming disagreement on a key whose material is correct is the wrong trade. The length check runs
+under both policies, so a key of the wrong parameter set is still refused — that is the check that
+keeps a wrong OID out of a certificate.
+
+**Gate detail** — RAW and DER EC matrix both at 0% failure · a missing `CKA_PARAMETER_SET` on an ML-DSA-44
 key yields a named error, never an ML-DSA-65 OID.
 
 ## Phase 5 — Capability probing and fail-fast

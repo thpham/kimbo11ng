@@ -143,6 +143,20 @@ public final class KeyTemplates {
     }
 
     /**
+     * True if {@link #resolveCurveOid} can turn this name into an OID.
+     *
+     * <p>Worth asking before generating rather than after: {@code resolveCurveOid} hands back an
+     * unrecognised name unchanged, so the failure otherwise happens inside
+     * {@code new ASN1ObjectIdentifier(...)} as an {@code IllegalArgumentException} reading
+     * "string not-a-curve not an OID" — accurate about the byte it choked on and silent about the
+     * curve name the caller supplied.
+     */
+    public static boolean isKnownCurve(String curveName) {
+        return curveName != null
+                && ASN1ObjectIdentifier.tryFromID(resolveCurveOid(curveName)) != null;
+    }
+
+    /**
      * Curve name to OID. The explicit cases cover the spellings EJBCA emits that BouncyCastle's
      * table does not answer to; anything else is looked up, then accepted as an OID literal.
      */

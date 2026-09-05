@@ -48,20 +48,33 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
 
     private final MechanismResolver resolver;
     private final boolean ecdsaDerEncoding;
+    private final byte[] mechanismParam;
 
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
     private P11Slot slot;
     private Kimbo11ngPrivateKey signingKey;
     private long mechanism = -1;
 
-    private Kimbo11ngSignatureSpi(MechanismResolver resolver, boolean ecdsaDerEncoding) {
+    private Kimbo11ngSignatureSpi(MechanismResolver resolver, boolean ecdsaDerEncoding,
+            byte[] mechanismParam) {
         this.resolver = resolver;
         this.ecdsaDerEncoding = ecdsaDerEncoding;
+        this.mechanismParam = mechanismParam;
     }
 
     /** RSA and ECDSA: the digest fixes the mechanism. */
     public static Kimbo11ngSignatureSpi fixed(long ckMechanism, boolean ecdsaDerEncoding) {
-        return new Kimbo11ngSignatureSpi(key -> ckMechanism, ecdsaDerEncoding);
+        return fixed(ckMechanism, ecdsaDerEncoding, null);
+    }
+
+    /**
+     * As {@link #fixed(long, boolean)}, with a mechanism parameter block.
+     *
+     * <p>Only RSA-PSS needs one. See {@link RsaPssParams} for why jacknji11 cannot supply it.
+     */
+    public static Kimbo11ngSignatureSpi fixed(long ckMechanism, boolean ecdsaDerEncoding,
+            byte[] mechanismParam) {
+        return new Kimbo11ngSignatureSpi(key -> ckMechanism, ecdsaDerEncoding, mechanismParam);
     }
 
     /** ML-DSA and SLH-DSA: the key's algorithm row fixes the mechanism. */
@@ -76,7 +89,7 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
                         + " is a key-encapsulation algorithm and cannot sign.");
             }
             return entry.ckmOperation();
-        }, false);
+        }, false, null);
     }
 
     @Override
@@ -162,7 +175,12 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
             CryptokiE ce = slot.ce();
             try {
                 long handle = signingKey.objectHandle(ce, lease.session());
-                ce.SignInit(lease.session(), new CKM(mechanism), handle);
+                // The one-argument CKM constructor fills in jacknji11's default parameter for the
+                // mechanism, which is what every mechanism here except PSS wants.
+                CKM ckm = mechanismParam == null
+                        ? new CKM(mechanism)
+                        : new CKM(mechanism, mechanismParam);
+                ce.SignInit(lease.session(), ckm, handle);
                 byte[] rawSig = ce.Sign(lease.session(), data);
                 return ecdsaDerEncoding ? convertRawEcdsaToDer(rawSig) : rawSig;
             } catch (Exception e) {
@@ -206,6 +224,43 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
     @SuppressWarnings("deprecation")
     protected void engineSetParameter(String param, Object value) {
         throw new InvalidParameterException("setParameter is not supported");
+    }
+
+    /**
+     * Accepts PSS parameters that match what the mechanism was built with, and refuses any others.
+     *
+     * <p>BouncyCastle's operator layer sets these when they differ from its defaults, and the
+     * inherited implementation throws {@code UnsupportedOperationException} — which would make an
+     * RSA-PSS CA with a non-default salt length fail at CA creation with nothing naming PSS.
+     * Accepting them silently would be worse: the mechanism parameter sent to the token is fixed
+     * when the service is created, so a caller asking for a different salt length would get a
+     * signature that is the right size, is not what was asked for, and fails only at the relying
+     * party.
+     */
+    @Override
+    protected void engineSetParameter(java.security.spec.AlgorithmParameterSpec params)
+            throws java.security.InvalidAlgorithmParameterException {
+        if (params == null) {
+            return;
+        }
+        if (!(params instanceof java.security.spec.PSSParameterSpec pss)) {
+            throw new java.security.InvalidAlgorithmParameterException(
+                    "Only PSSParameterSpec is supported, got " + params.getClass().getName());
+        }
+        if (mechanismParam == null) {
+            throw new java.security.InvalidAlgorithmParameterException(
+                    "PSS parameters were supplied for a mechanism that is not RSA-PSS (0x"
+                    + Long.toHexString(mechanism) + ")");
+        }
+        byte[] requested = RsaPssParams.forSpec(pss);
+        if (!java.util.Arrays.equals(mechanismParam, requested)) {
+            throw new java.security.InvalidAlgorithmParameterException(
+                    "This service signs with " + RsaPssParams.describe(mechanismParam)
+                    + " and was asked for " + RsaPssParams.describe(requested)
+                    + ". The mechanism parameter is fixed when the Signature is created, so the"
+                    + " token cannot honour a different salt length or digest here; request the"
+                    + " matching SHAnnnwithRSAandMGF1 algorithm instead.");
+        }
     }
 
     @Override

@@ -7,9 +7,15 @@ package ch.ithings.kimbo11ng.profile;
 /**
  * The post-quantum algorithm families this token can hold keys for.
  *
- * <p>The JCA name is the one BouncyCastle registers its {@code KeyFactory} under and the one
- * EJBCA's {@code AlgorithmConstants.KEYALGORITHM_*} uses, so it is what a {@code PublicKey} must
- * report from {@code getAlgorithm()} for EJBCA to resolve signature algorithms for it.
+ * <p>The JCA name is the one BouncyCastle registers its {@code KeyFactory} under, and the one
+ * {@code AlgorithmConstants.KEYALGORITHM_*} uses for the family.
+ *
+ * <p>It is <em>not</em> what the resulting key reports from {@code getAlgorithm()}: a key built
+ * through {@code KeyFactory.getInstance("ML-DSA")} names its parameter set, so an ML-DSA-44 key
+ * answers {@code "ML-DSA-44"}. Nothing depends on the family name matching — EJBCA's
+ * {@code AlgorithmTools.getSignatureAlgorithms} dispatches on {@code instanceof MLDSAKey} /
+ * {@code SLHDSAKey} / {@code MLKEMKey}, never on the string. Measured, and asserted in
+ * {@code AlgorithmMatrixTest}.
  */
 public enum PqcFamily {
 

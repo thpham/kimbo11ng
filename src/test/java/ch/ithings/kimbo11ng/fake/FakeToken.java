@@ -479,7 +479,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** What the token will actually do, which is not always what it admits to. */
     private List<Long> mechanismList() {
         List<Long> base = new ArrayList<>(List.of(
-                CKM.RSA_PKCS_KEY_PAIR_GEN, CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
+                CKM.RSA_PKCS_KEY_PAIR_GEN, CKM.SHA1_RSA_PKCS,
+                CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
+                // SoftHSMv3 advertises all three PSS mechanisms with CKF_SIGN|CKF_VERIFY.
+                CKM.SHA256_RSA_PKCS_PSS, CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
                 CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
                 CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA,
@@ -939,6 +942,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (!objects.containsKey(key)) {
             return CKR.KEY_HANDLE_INVALID;
         }
+        if (!pssParamIsValid(mechanism)) {
+            return CKR.MECHANISM_PARAM_INVALID;
+        }
         s.signKey = key;
         s.signMechanism = mechanism.mechanism;
         return CKR.OK;
@@ -1011,13 +1017,46 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
             return "SHA256withECDSA";
         }
+        if (ckm == CKM.SHA1_RSA_PKCS) {
+            return "SHA1withRSA";
+        }
         if (ckm == CKM.SHA384_RSA_PKCS) {
             return "SHA384withRSA";
         }
         if (ckm == CKM.SHA512_RSA_PKCS) {
             return "SHA512withRSA";
         }
+        // PSS through BouncyCastle's own SHAxxxwithRSAandMGF1, which uses a salt equal to the
+        // digest length — the same choice RsaPssParams encodes. If the two ever disagree, a
+        // signature produced here stops verifying and the round-trip test says so.
+        if (ckm == CKM.SHA256_RSA_PKCS_PSS) {
+            return "SHA256withRSAandMGF1";
+        }
+        if (ckm == CKM.SHA384_RSA_PKCS_PSS) {
+            return "SHA384withRSAandMGF1";
+        }
+        if (ckm == CKM.SHA512_RSA_PKCS_PSS) {
+            return "SHA512withRSAandMGF1";
+        }
         return "SHA256withRSA";
+    }
+
+    /**
+     * Rejects a PSS {@code C_SignInit} whose mechanism parameter is missing or the wrong size.
+     *
+     * <p>Real tokens answer {@code CKR_MECHANISM_PARAM_INVALID} here, and jacknji11 supplies no
+     * default for these mechanisms — so without this the fake would happily sign a PSS operation
+     * that every real HSM refuses, and the gap would only appear against hardware.
+     */
+    private static boolean pssParamIsValid(CKM mechanism) {
+        long ckm = mechanism.mechanism;
+        if (ckm != CKM.SHA256_RSA_PKCS_PSS && ckm != CKM.SHA384_RSA_PKCS_PSS
+                && ckm != CKM.SHA512_RSA_PKCS_PSS && ckm != CKM.RSA_PKCS_PSS
+                && ckm != CKM.SHA1_RSA_PKCS_PSS) {
+            return true;
+        }
+        // CK_RSA_PKCS_PSS_PARAMS is three CK_ULONGs: hashAlg, mgf, sLen.
+        return mechanism.ulParameterLen == 3L * ULong.ULONG_SIZE.size();
     }
 
     private int fieldSize(Map<Long, byte[]> key) {

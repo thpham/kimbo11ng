@@ -16,6 +16,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CKR;
 import org.pkcs11.jacknji11.LongRef;
@@ -53,6 +55,19 @@ class ConcurrentTokenAccessTest {
 
     private static final int THREADS = 32;
     private static final int ITERATIONS = 8;
+
+    /**
+     * How many times the fault-injection run repeats.
+     *
+     * <p>One in an ordinary build; the roadmap's acceptance criterion is 100 consecutive green
+     * runs, which is a soak rather than something to pay for on every {@code mvn test}. Run it with
+     * {@code mvn test -Dtest=ConcurrentTokenAccessTest -Dkimbo11ng.soak.runs=100}. A concurrency
+     * bug that reproduces once in fifty is not caught by a suite that runs the case once, and the
+     * point of a knob rather than a fixed number is that the soak uses the same code path as the
+     * build, not a separate harness that could drift from it.
+     */
+    private static final int SOAK_RUNS =
+            Integer.getInteger("kimbo11ng.soak.runs", 1);
 
     private TestSlot fixture;
     private final Pkcs11v32Profile profile = new Pkcs11v32Profile();
@@ -161,6 +176,85 @@ class ConcurrentTokenAccessTest {
         assertEquals(fixture.slot().pool().liveSessions(), fixture.slot().pool().idleSessions(),
                 "some session was borrowed and never returned");
         assertTrue(fixture.slot().pool().liveSessions() <= 6, "the ceiling must hold under load");
+    }
+
+    /** One entry per soak run; read at runtime, because an annotation needs a constant. */
+    static java.util.stream.IntStream soakRuns() {
+        return java.util.stream.IntStream.range(0, SOAK_RUNS);
+    }
+
+    @ParameterizedTest(name = "run {0}")
+    @MethodSource("soakRuns")
+    @Timeout(value = 120, unit = TimeUnit.SECONDS)
+    @DisplayName("survives sessions dying underneath the workload")
+    void survivesInjectedFaults(int run) throws Exception {
+        // The mix above with the connection dropping mid-flight, which is the failure a network
+        // HSM actually produces. What must hold is not that nothing fails — a delete racing a sign
+        // legitimately fails — but that nothing fails with CKR_OPERATION_ACTIVE, that the pool
+        // never wedges, and that every lease comes back.
+        FakeToken token = fixture.token();
+        long[] rsa = generateRsa("fault-rsa");
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(fixture.slot(), profile));
+        Kimbo11ngKeyStoreSpi keyStore = new Kimbo11ngKeyStoreSpi(
+                new TokenRuntime(fixture.slot(), profile));
+
+        ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService threads = Executors.newFixedThreadPool(THREADS);
+        try {
+            for (int t = 0; t < THREADS; t++) {
+                int kind = t % 5;
+                int id = t;
+                threads.submit(() -> {
+                    try {
+                        start.await();
+                        for (int i = 0; i < ITERATIONS; i++) {
+                            try {
+                                switch (kind) {
+                                    case 0 -> sign(provider, rsa[1]);
+                                    case 1 -> keyStore.engineLoad(null, null);
+                                    case 2 -> generateRsa("f-" + id + "-" + i);
+                                    case 3 -> deleteIfPresent(keyStore, "f-" + id + "-" + i);
+                                    default -> token.dropAllSessions();
+                                }
+                            } catch (Throwable expected) {
+                                // Recorded, then filtered: only the invariants below are asserted.
+                                failures.add(expected);
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+            }
+            start.countDown();
+            threads.shutdown();
+            assertTrue(threads.awaitTermination(90, TimeUnit.SECONDS),
+                    "the workload did not finish: a lease was most likely never returned");
+        } finally {
+            threads.shutdownNow();
+        }
+
+        List<Throwable> collided = failures.stream()
+                .filter(e -> Pkcs11Errors.is(e, CKR.OPERATION_ACTIVE))
+                .toList();
+        assertTrue(collided.isEmpty(),
+                () -> "two threads used the same session: " + describe(collided));
+
+        // The pool has to be usable afterwards. A broken session that went back into the pool, or
+        // a permit that was never released, shows up here and nowhere else.
+        try (var lease = fixture.slot().borrow()) {
+            assertTrue(lease.session() > 0);
+        }
+        assertEquals(fixture.slot().pool().liveSessions(), fixture.slot().pool().idleSessions(),
+                "some session was borrowed and never returned");
+    }
+
+    private void deleteIfPresent(Kimbo11ngKeyStoreSpi keyStore, String alias) {
+        if (keyStore.engineContainsAlias(alias)) {
+            keyStore.engineDeleteEntry(alias);
+        }
     }
 
     private static String describe(Iterable<Throwable> failures) {

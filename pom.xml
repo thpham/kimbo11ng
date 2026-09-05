@@ -34,10 +34,11 @@
              pool, module and lifecycle tests to 0.68 / 0.57, and phase 3's key-identity and
              recovery tests to 0.71 / 0.60, and phase 4's public-key tests to 0.72 / 0.61, and
              phase 5's capability-probe tests to 0.75 / 0.65, and phase 6's key-usage tests to
-             0.76 / 0.66.
+             0.76 / 0.66, and phase 7's algorithm matrix, signature round trips and
+             KeyPairGenerator coverage to 0.79 / 0.68.
              Each phase raises these; they must never be lowered. -->
-        <jacoco.line.min>0.76</jacoco.line.min>
-        <jacoco.branch.min>0.66</jacoco.branch.min>
+        <jacoco.line.min>0.79</jacoco.line.min>
+        <jacoco.branch.min>0.68</jacoco.branch.min>
     </properties>
 
     <dependencies>
@@ -88,6 +89,17 @@
             <artifactId>bcprov-jdk18on</artifactId>
             <version>${bouncycastle.version}</version>
             <scope>provided</scope>
+        </dependency>
+        <!-- Test scope only, and only so the tests can call EJBCA's real AlgorithmTools: its
+             static initializer needs DefaultSignatureAlgorithmIdentifierFinder from bcpkix.
+             Asserting against the class EJBCA actually uses to resolve signature algorithms is
+             worth a test dependency; nothing in src/main touches it, and ArtifactContentsIT still
+             asserts the shipped jar carries no BouncyCastle at all. Same version as the ear's. -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+            <scope>test</scope>
         </dependency>
         <!-- JNA backend for jacknji11. Provided: ejbca.ear/lib/jna-5.12.1.jar. -->
         <dependency>

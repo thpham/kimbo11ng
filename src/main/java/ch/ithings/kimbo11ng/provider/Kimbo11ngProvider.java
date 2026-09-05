@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
@@ -36,16 +37,51 @@ public final class Kimbo11ngProvider extends Provider {
     private static final ConcurrentMap<String, Kimbo11ngProvider> INSTANCES =
             new ConcurrentHashMap<>();
 
-    /** RSA and ECDSA services: {@code {jcaName, CKM, isEcdsa}}. Standard across tokens. */
-    private static final List<Object[]> CLASSICAL_SIGNATURES = List.of(
-            new Object[] {"SHA1withRSA",     CKM.SHA1_RSA_PKCS,   false},
-            new Object[] {"SHA256withRSA",   CKM.SHA256_RSA_PKCS, false},
-            new Object[] {"SHA384withRSA",   CKM.SHA384_RSA_PKCS, false},
-            new Object[] {"SHA512withRSA",   CKM.SHA512_RSA_PKCS, false},
-            new Object[] {"SHA1withECDSA",   CKM.ECDSA,           true},
-            new Object[] {"SHA256withECDSA", CKM.ECDSA_SHA256,    true},
-            new Object[] {"SHA384withECDSA", CKM.ECDSA_SHA384,    true},
-            new Object[] {"SHA512withECDSA", CKM.ECDSA_SHA512,    true});
+    /**
+     * A classical signature service: the JCA name EJBCA asks for, the mechanism behind it, whether
+     * the token's raw {@code r||s} output needs DER-wrapping, and the mechanism parameter block.
+     *
+     * @param mechanismParam non-null only for RSA-PSS; see {@link RsaPssParams}
+     */
+    private record ClassicalSignature(String jcaName, long mechanism, boolean ecdsaDerEncoding,
+            byte[] mechanismParam) {
+    }
+
+    /**
+     * RSA, RSA-PSS and ECDSA services. Standard across tokens, so unlike the post-quantum set these
+     * do not come from the profile.
+     *
+     * <p>The JCA names are the {@code AlgorithmConstants.SIGALG_*} spellings EJBCA uses. Provider
+     * lookup is case-insensitive, so {@code SHA256WithRSA} finds {@code SHA256withRSA}; the
+     * {@code andMGF1} suffix, however, is a distinct algorithm and had to be registered separately.
+     */
+    private static final List<ClassicalSignature> CLASSICAL_SIGNATURES = List.of(
+            new ClassicalSignature("SHA1withRSA",     CKM.SHA1_RSA_PKCS,   false, null),
+            new ClassicalSignature("SHA256withRSA",   CKM.SHA256_RSA_PKCS, false, null),
+            new ClassicalSignature("SHA384withRSA",   CKM.SHA384_RSA_PKCS, false, null),
+            new ClassicalSignature("SHA512withRSA",   CKM.SHA512_RSA_PKCS, false, null),
+            new ClassicalSignature("SHA256withRSAandMGF1", CKM.SHA256_RSA_PKCS_PSS, false,
+                    RsaPssParams.sha256()),
+            new ClassicalSignature("SHA384withRSAandMGF1", CKM.SHA384_RSA_PKCS_PSS, false,
+                    RsaPssParams.sha384()),
+            new ClassicalSignature("SHA512withRSAandMGF1", CKM.SHA512_RSA_PKCS_PSS, false,
+                    RsaPssParams.sha512()),
+            new ClassicalSignature("SHA1withECDSA",   CKM.ECDSA,           true,  null),
+            new ClassicalSignature("SHA256withECDSA", CKM.ECDSA_SHA256,    true,  null),
+            new ClassicalSignature("SHA384withECDSA", CKM.ECDSA_SHA384,    true,  null),
+            new ClassicalSignature("SHA512withECDSA", CKM.ECDSA_SHA512,    true,  null));
+
+    /**
+     * Digest services, as {@code {standardName, alias...}}.
+     *
+     * <p>The dashless spellings are the ones BouncyCastle's {@code MessageDigestUtils} asks for;
+     * the OIDs are what a {@code DigestAlgorithmIdentifier} resolves to.
+     */
+    private static final List<String[]> DIGESTS = List.of(
+            new String[] {"SHA-1",   "SHA1",   "SHA",  "1.3.14.3.2.26"},
+            new String[] {"SHA-256", "SHA256", "2.16.840.1.101.3.4.2.1"},
+            new String[] {"SHA-384", "SHA384", "2.16.840.1.101.3.4.2.2"},
+            new String[] {"SHA-512", "SHA512", "2.16.840.1.101.3.4.2.3"});
 
     private final transient AtomicReference<TokenRuntime> runtime = new AtomicReference<>();
 
@@ -102,23 +138,39 @@ public final class Kimbo11ngProvider extends Provider {
             }
         });
 
-        for (Object[] row : CLASSICAL_SIGNATURES) {
-            String jcaName = (String) row[0];
-            long mechanism = (Long) row[1];
-            boolean isEcdsa = (Boolean) row[2];
-            putService(new Service(this, "Signature", jcaName,
+        // A service is registered only if the token will sign with its mechanism. An unprobed
+        // token answers yes to everything, so nothing is lost when the probe could not run; what
+        // this avoids is advertising an algorithm the firmware does not have, which EJBCA would
+        // pick and then fail on. Signature.getInstance throwing NoSuchAlgorithmException is
+        // recoverable for SignWithWorkingAlgorithm — it tries the next algorithm — where a
+        // CKR_MECHANISM_INVALID mid-signature is not.
+        TokenCapabilities capabilities = initialRuntime.algorithms().capabilities();
+        int classical = 0;
+        for (ClassicalSignature row : CLASSICAL_SIGNATURES) {
+            if (!capabilities.canSign(row.mechanism())) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Not registering " + row.jcaName() + ": the token does not sign with "
+                            + TokenCapabilities.name(row.mechanism()));
+                }
+                continue;
+            }
+            putService(new Service(this, "Signature", row.jcaName(),
                     Kimbo11ngSignatureSpi.class.getName(), null, null) {
                 @Override
                 public Object newInstance(Object constructorParameter) {
-                    return Kimbo11ngSignatureSpi.fixed(mechanism, isEcdsa);
+                    return Kimbo11ngSignatureSpi.fixed(row.mechanism(), row.ecdsaDerEncoding(),
+                            row.mechanismParam());
                 }
             });
+            classical++;
         }
 
-        // One signature service per signing algorithm the profile describes. The mechanism is
-        // resolved from the key at init, so nothing here needs to know it.
+        // One signature service per signing algorithm the token can actually do — the profile
+        // table already intersected with the probe, so an algorithm the firmware lacks is not
+        // advertised here either. The mechanism is resolved from the key at init, so nothing here
+        // needs to know it.
         int registered = 0;
-        for (AlgorithmEntry entry : initialRuntime.profile().entries()) {
+        for (AlgorithmEntry entry : initialRuntime.algorithms().supported()) {
             if (!entry.canSign()) {
                 continue;
             }
@@ -130,6 +182,21 @@ public final class Kimbo11ngProvider extends Provider {
                 }
             });
             registered++;
+        }
+
+        // Digests, in software, because BouncyCastle's operator layer resolves every helper it
+        // needs from the provider it was handed — and building an RSA-PSS signer needs one. See
+        // DelegatingMessageDigestSpi for why they are not sent to the token.
+        for (String[] digest : DIGESTS) {
+            String standardName = digest[0];
+            List<String> aliases = List.of(digest).subList(1, digest.length);
+            putService(new Service(this, "MessageDigest", standardName,
+                    DelegatingMessageDigestSpi.class.getName(), aliases, null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return new DelegatingMessageDigestSpi(standardName);
+                }
+            });
         }
 
         putService(new Service(this, "KeyPairGenerator", "RSA",
@@ -148,7 +215,7 @@ public final class Kimbo11ngProvider extends Provider {
         });
 
         if (log.isDebugEnabled()) {
-            log.debug("Registered provider " + getName() + " with "
+            log.debug("Registered provider " + getName() + " with " + classical + " of "
                     + CLASSICAL_SIGNATURES.size() + " classical and " + registered
                     + " post-quantum signature services from profile "
                     + initialRuntime.profile().name());

@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–6 complete. Phases 7–8 not started.        |
+| **Status** | Phases 0–7 complete. Phase 8 not started.           |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -452,12 +452,75 @@ it is a log an operator wants, not one they have to filter.
 token does not implement does not lose the others · both halves found by `CKA_ID`, so a relabelled
 public key is still read · live `testkey` refuses ML-KEM and passes ML-DSA and RSA · 19 ITs green.
 
-## Phase 7 — Coverage that matches the claims
+## Phase 7 — Coverage that matches the claims ✅
 
 - Full algorithm matrix on the fake (3 ML-DSA, 3 ML-KEM, 12 SLH-DSA, RSA 2048/3072/4096, all curves).
 - Concurrency suite, 100 consecutive green runs.
 - IT: add ML-DSA-44 and ML-DSA-87 root CAs — either would have caught the parameter-set default.
 - README reconciled: ML-KEM is generation/enumeration only (no KEM SPI).
+- **RSA-PSS**, deferred from 1.5.
+
+**Gate** — met. 388 unit tests, 4 artifact tests, 23 ITs. The concurrency soak ran 100/100 green in
+475 s. Every algorithm the README lists has a test that generates it, re-enumerates it, and hands it
+to EJBCA's own `AlgorithmTools`.
+
+### What the implementation changed, and why
+
+**RSA-PSS needed three things, and only the first was in the plan.** The mechanism parameter was
+expected: `CKM_SHA*_RSA_PKCS_PSS` takes a `CK_RSA_PKCS_PSS_PARAMS` block and `CKM.DEFAULT_PARAMS`
+covers only the CBC IVs and OAEP, so `new CKM(SHA256_RSA_PKCS_PSS)` sends a null parameter and the
+token answers `CKR_MECHANISM_PARAM_INVALID`. The other two surfaced only by running it:
+
+1. *BouncyCastle asks this provider for a `MessageDigest`.* EJBCA signs a certificate through
+   `JcaContentSignerBuilder(...).setProvider(p)`, which resolves every helper from `p`, and for PSS
+   that includes `MessageDigest.getInstance("SHA256")`. CA creation failed with *"cannot create
+   signer: no such algorithm: SHA256 for provider Kimbo11ng-…"* — a message naming neither PSS nor
+   the missing service. The provider now registers SHA-1/256/384/512, computed in software:
+   digesting public data in an HSM protects nothing and costs a round trip, and the signing
+   mechanism digests on the token anyway. Found by the IT, then reproduced as a unit test.
+2. *`engineSetParameter(AlgorithmParameterSpec)` was inherited and throws.* BouncyCastle sets PSS
+   parameters when they differ from its defaults. It now accepts a spec matching what the service
+   will send and refuses any other by name — accepting silently would produce a signature of the
+   right size with the wrong salt, which fails only at the relying party.
+
+**The salt length is the digest length.** Nothing in this codebase can detect a wrong one: the
+provider never verifies. So every PSS test signs on the token and verifies with BouncyCastle, and
+the IT issues a real certificate and checks its OID is `1.2.840.113549.1.1.10`.
+
+**Signature services are now capability-gated.** A service is registered only if the token
+advertises its mechanism with `CKF_SIGN`. `Signature.getInstance` throwing
+`NoSuchAlgorithmException` is recoverable for `SignWithWorkingAlgorithm`, which moves to the next
+candidate; a `CKR_MECHANISM_INVALID` in the middle of signing is not.
+
+**Two of the matrix's expectations were wrong about real behaviour, and the code was right.**
+BouncyCastle names a post-quantum key by its parameter set, so an ML-DSA-44 key reports
+`getAlgorithm() == "ML-DSA-44"`, not `"ML-DSA"` — the `PqcFamily.jcaName()` javadoc claimed
+otherwise and has been corrected; nothing depends on it, because `AlgorithmTools` dispatches on
+`instanceof`. And EJBCA reports a curve by its X9.62 name, so a key generated as `secp256r1` comes
+back as `prime256v1`; the matrix compares curve OIDs rather than names.
+
+**`Kimbo11ngKeyPairGeneratorSpi` was registered and never executed — 0 of 24 lines.** Writing its
+first test found a real defect: an unknown curve name reached `new ASN1ObjectIdentifier(...)` and
+escaped `generateKeyPair` as a raw `IllegalArgumentException` reading "string not-a-curve not an
+OID". It is now refused at `initialize`, where the JCA gives a checked exception the caller can act
+on, and anything else inside `generateKeyPair` is wrapped as the `ProviderException` the contract
+requires. The curve check is shared with the phase-5 call site rather than duplicated.
+
+**The facade swap cannot be an integration test.** Only the admin UI's Save button reaches
+`saveCryptoToken`; `cryptotoken setpin --update` was tried and does not re-init. `ProviderIdentityTest`
+asserts it against the same code path instead — one provider object across ten init cycles, the
+name resolving to the live object rather than a zombie, and signing still working after a swap. The
+manual `just deploy` plus re-provision procedure from phase 2 remains the end-to-end check.
+
+**The soak is a knob, not a separate harness.** `-Dkimbo11ng.soak.runs=100` repeats the same
+fault-injection test the ordinary build runs once, so the soak cannot drift from what is tested
+every day. The invariants asserted are the ones that matter under fault: no `CKR_OPERATION_ACTIVE`,
+the pool still usable afterwards, every lease returned. Individual operations are allowed to
+fail — a delete racing a sign legitimately does.
+
+**Gate detail** — 34-case algorithm matrix at 0 failures · every registered signature algorithm
+verified by BouncyCastle, and through `JcaContentSignerBuilder` · concurrency soak 100/100 ·
+23 ITs including ML-DSA-44, ML-DSA-87, EC P-384 and RSA-PSS root CAs · coverage floor 0.79/0.68.
 
 ## Phase 8 — ThalesLunaProfile foundation
 

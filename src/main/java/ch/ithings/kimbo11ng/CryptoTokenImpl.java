@@ -443,8 +443,7 @@ public class CryptoTokenImpl {
      */
     private void requireCurveOrBetterProfile(TokenRuntime current, String keySpec, String curveName)
             throws InvalidAlgorithmParameterException {
-        if (org.bouncycastle.asn1.ASN1ObjectIdentifier.tryFromID(
-                KeyTemplates.resolveCurveOid(curveName)) != null) {
+        if (KeyTemplates.isKnownCurve(curveName)) {
             return;
         }
         // Only on the failure path, so the ServiceLoader scan costs nothing in normal operation.

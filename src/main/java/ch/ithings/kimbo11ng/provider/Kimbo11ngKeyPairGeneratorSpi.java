@@ -128,6 +128,14 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
                 throw new InvalidAlgorithmParameterException(
                         "Expected ECGenParameterSpec, got: " + params.getClass().getName());
             }
+            // Rejected here, where the JCA gives us a checked exception the caller can act on.
+            // Deferring it to generateKeyPair turns a typo into a ProviderException at a point
+            // where the curve name is no longer obviously the cause.
+            if (!KeyTemplates.isKnownCurve(ecSpec.getName())) {
+                throw new InvalidAlgorithmParameterException("Unknown curve '" + ecSpec.getName()
+                        + "'. Accepted spellings are the NIST (P-256), SEC (secp256r1), X9.62"
+                        + " (prime256v1) and Brainpool names, or a dotted OID.");
+            }
             curveName = ecSpec.getName();
         }
 
@@ -138,7 +146,11 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
                 String label = provisionalLabel();
                 return generate(KeyTemplates.ec(label.getBytes(StandardCharsets.UTF_8), keyId,
                         curveName), keyId, label, "EC", CKM.EC_KEY_PAIR_GEN);
-            } catch (java.io.IOException e) {
+            } catch (java.io.IOException | RuntimeException e) {
+                // generateKeyPair declares no checked exception, so the JCA contract is
+                // ProviderException for anything that goes wrong inside the provider. Letting an
+                // IllegalArgumentException out instead gives the caller no indication of which
+                // provider, or which curve, produced it.
                 throw new ProviderException("Cannot encode EC parameters for curve "
                         + curveName + ": " + e.getMessage(), e);
             }

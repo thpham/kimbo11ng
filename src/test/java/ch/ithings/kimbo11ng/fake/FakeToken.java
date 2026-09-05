@@ -509,7 +509,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
                 // SoftHSMv3 advertises all three PSS mechanisms with CKF_SIGN|CKF_VERIFY.
                 CKM.SHA256_RSA_PKCS_PSS, CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS,
-                CKM.EC_KEY_PAIR_GEN, CKM.ECDSA, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
+                CKM.EC_KEY_PAIR_GEN, CKM.ECDSA,
+                CKM.ECDSA_SHA1, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
                 // Symmetric: the generation mechanisms carry CKF_GENERATE and the HMAC mechanisms
                 // CKF_SIGN|CKF_VERIFY, which is what SoftHSM reports for them.
                 CKM.AES_KEY_GEN, CKM.GENERIC_SECRET_KEY_GEN,
@@ -1206,6 +1207,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     private static String signatureAlgorithm(long ckm, String keyAlgorithm) {
         if ("EC".equals(keyAlgorithm)) {
+            // CKM_ECDSA is the raw mechanism: its input is an already-computed hash, and a token
+            // signs it as it stands. Answering it with a digesting algorithm would hash on the
+            // token's behalf and hide a caller that picked the raw mechanism by mistake — the one
+            // thing a fake must never do for a mechanism whose whole distinction is that it does
+            // not digest.
+            if (ckm == CKM.ECDSA) {
+                return "NONEwithECDSA";
+            }
+            if (ckm == CKM.ECDSA_SHA1) {
+                return "SHA1withECDSA";
+            }
             if (ckm == CKM.ECDSA_SHA384) {
                 return "SHA384withECDSA";
             }

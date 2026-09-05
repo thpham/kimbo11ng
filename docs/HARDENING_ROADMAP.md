@@ -1,13 +1,13 @@
 # Hardening the PKCS#11 NG foundation
 
 Nine dependency-ordered phases taking the EJBCA PQC crypto token from a single-session SoftHSM
-prototype to a thread-safe, fail-fast, vendor-agnostic base that `ThalesLunaProfile` can drop into
-as a table of constants.
+prototype to a thread-safe, fail-fast, vendor-agnostic base where an HSM vendor is a table of
+constants and a conformance test.
 
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–7 complete. Phase 8 not started.           |
+| **Status** | Phases 0–8 complete.                                 |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -522,12 +522,70 @@ fail — a delete racing a sign legitimately does.
 verified by BouncyCastle, and through `JcaContentSignerBuilder` · concurrency soak 100/100 ·
 23 ITs including ML-DSA-44, ML-DSA-87, EC P-384 and RSA-PSS root CAs · coverage floor 0.79/0.68.
 
-## Phase 8 — ThalesLunaProfile foundation
+## Phase 8 — ThalesLunaProfile foundation ✅
 
 - **8.1** `ProfileConformanceKit`: an abstract test any profile must pass.
-- **8.2** `ThalesLunaProfile` as a table stub plus a checklist of the vendor constants needed.
+- **8.2** `ThalesLunaProfile`, populated from the vendor documentation.
 - **8.3** `HsmConformanceIT` (tag `hsm`) against any real library via `-Dkimbo11ng.it.lib`.
-- **8.4** Documented map from fake knobs to the Luna behaviours they simulate.
+- **8.4** [`docs/VENDOR_PROFILE_CHECKLIST.md`](VENDOR_PROFILE_CHECKLIST.md) — how to add a vendor,
+  and the map from fake knobs to the real behaviours they simulate.
+
+**Gate** — met. 583 unit tests, 4 artifact tests, 23 ITs. `Pkcs11v32Profile`, `ThalesLunaProfile`
+and `VendorTestProfile` all pass the kit, the last one unmodified. `HsmConformanceIT` skips cleanly
+without `-Dkimbo11ng.it.lib` and its twelve assertions run on every build against the fake as
+`HsmContractFakeTest`.
+
+### What the implementation changed, and why
+
+**The premise of 8.2 was wrong: Luna needs no vendor profile.** The plan assumed Luna would use
+vendor-defined constants and that the phase was about discovering them. It does not. Firmware 7.9.0
+(Luna HSM Client 10.9.0) implements ML-DSA and ML-KEM with the *standard* PKCS#11 v3.2 numbering —
+`CKK_ML_DSA` 0x4A, `CKK_ML_KEM` 0x49, `CKM_ML_DSA_KEY_PAIR_GEN` 0x1C, `CKM_ML_DSA` 0x1D,
+`CKM_ML_KEM_KEY_PAIR_GEN` 0x0F, `CKM_ML_KEM` 0x17, `CKA_PARAMETER_SET` 0x61D with `CKP_*` 1/2/3 —
+all identical to `Pkcs11v32Profile`. The only vendor mechanism found is `CKM_EXTMU_ML_DSA`
+(0x80000175) for external-mu signing, which kimbo11ng does not need; Luna's proprietary ML-KEM
+surface is the `CA_EncapsulateKey`/`CA_DecapsulateKey` *functions*, not different constants.
+
+So a Luna already works under the default profile, and this validates the Phase 5 design rather
+than needing anything from it: the probe keeps the six ML-DSA and ML-KEM rows and excludes the
+twelve SLH-DSA ones, because **Luna 7.9.x has no SLH-DSA** and no published roadmap for it.
+`ThalesLunaProfile` is therefore an *optional* profile that states the vendor's limits in code
+instead of leaving them to be discovered — six rows, no SLH-DSA — and its conformance test asserts
+that every row it shares with v3.2 is identical, so a future divergence has to be deliberate.
+Auto-detection will not pick it over `pkcs11v32`, which is correct: on any token they both fit,
+they agree.
+
+One other firmware limit worth recording: 7.9.0 cannot wrap or unwrap ML-DSA private keys.
+kimbo11ng never wraps one, so certificate signing is unaffected.
+
+**The kit needed the fake to become the profile.** A conformance test that only reads the table can
+check it for internal consistency, and a table that is perfectly self-consistent and wrong about
+the hardware passes every such check. `FakeToken.profile(PqcMechanismProfile)` rebuilds the fake out
+of the profile's own constants — its mechanism list, its flags, its key types, its parameter-set
+attribute, its public-key lengths — so the kit drives a real `CryptoTokenImpl` through generate,
+re-enumerate and sign against a token that answers *only* that numbering. That is what catches the
+realistic mistake: a table that shifts the generation mechanism and forgets the signing one.
+
+**`VendorTestProfile` is the acceptance criterion, not a fixture.** It disagrees with the standard
+on everything but the FIPS constants: vendor-defined key types and mechanisms above 0x80000000
+(so the values come back sign-extended), generation and signing mechanisms shifted independently,
+and parameter sets distinguished by mechanism rather than by a shared attribute. It passes the kit
+unmodified, which is the claim "adding a vendor is a table" made testable.
+
+**One existing test's premise died with the stub.** `wrongProfilePointsAtTheRightOne` asked for
+ML-DSA-65 under `thales-luna` and expected a refusal naming `pkcs11v32`. Luna knows ML-DSA-65 now,
+so the test asks for SLH-DSA-SHA2-128F instead — which is the better case anyway: a real, correct
+vendor table that simply has no row for what was asked. It also now asserts that `vendor-test` is
+*not* named, since that profile describes ML-DSA only and pointing an operator at it would not
+help.
+
+**`HsmConformanceIT` is split so the harness cannot rot.** The assertions live in an abstract
+`HsmContract`; `HsmContractFakeTest` runs them against the in-memory fake on every build, and
+`HsmConformanceIT` runs the same twelve against whatever `-Dkimbo11ng.it.lib` points at. A suite
+that only ran when someone had a Luna in front of them would stop compiling long before the day it
+mattered. The one thing the fake cannot do is verify a post-quantum signature — it returns
+synthetic ones by design — so `verifiesSignaturesFor` is overridden there for the ML/SLH names and
+classical signatures are still checked against BouncyCastle.
 
 ---
 
@@ -539,7 +597,8 @@ create-token, `mvn verify -Pit`). Both green before a phase merges.
 Additionally — after Phase 2, `just deploy` into a running stack and `just create-token` twice, to
 exercise the facade swap; after Phase 3, restart with keys generated by the _old_ JAR present, to
 prove the migration path; after Phase 5, set `kimbo11ng.pqc.profile=thales-luna` on the live token
-and confirm the refusal names `pkcs11v32`, then restore and confirm auto-detection reports 18/18.
+and confirm an SLH-DSA request is refused with `pkcs11v32` named, then restore and confirm
+auto-detection reports 18/18.
 
 ## Standing rules
 

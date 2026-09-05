@@ -388,7 +388,9 @@ class CryptoTokenLifecycleTest {
     void wrongProfilePointsAtTheRightOne() throws Exception {
         // The misconfiguration an operator following the vendor-profile path will actually make.
         // Everything not RSA and not in the profile falls through to the EC branch, which used to
-        // answer "string ML-DSA-65 is not an OID" — true of that branch, useless about the mistake.
+        // answer "string SLH-DSA-SHA2-128F is not an OID" — true of that branch, useless about the
+        // mistake. The Luna profile is the realistic case: it is a real, correct table that simply
+        // has no SLH-DSA row, because the firmware has no SLH-DSA.
         Properties properties = tokenProperties();
         properties.setProperty(ch.ithings.kimbo11ng.profile.ProfileResolver.PROFILE_PROPERTY,
                 "thales-luna");
@@ -396,13 +398,14 @@ class CryptoTokenLifecycleTest {
 
         InvalidAlgorithmParameterException e = assertThrows(
                 InvalidAlgorithmParameterException.class,
-                () -> configured.generateKeyPair("ML-DSA-65", "pqcKey"));
+                () -> configured.generateKeyPair("SLH-DSA-SHA2-128F", "pqcKey"));
         assertTrue(e.getMessage().contains("thales-luna"), e.getMessage());
         assertTrue(e.getMessage().contains("pkcs11v32"), e.getMessage());
         assertTrue(e.getMessage().contains(
                 ch.ithings.kimbo11ng.profile.ProfileResolver.PROFILE_PROPERTY), e.getMessage());
-        // Every profile that knows it, not the first one ServiceLoader happened to return.
-        assertTrue(e.getMessage().contains("vendor-test"), e.getMessage());
+        // Only the profiles that actually know it: vendor-test describes ML-DSA only, so naming it
+        // here would send the operator to a profile that cannot help either.
+        assertFalse(e.getMessage().contains("vendor-test"), e.getMessage());
     }
 
     @Test

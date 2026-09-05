@@ -163,11 +163,21 @@ class ProfileResolverTest {
     }
 
     @Test
-    @DisplayName("leaves the Thales table empty until vendor constants are supplied")
-    void thalesIsAnHonestStub() {
+    @DisplayName("the Thales table is v3.2 numbering minus SLH-DSA")
+    void thalesMatchesLunaFirmware() {
+        // Luna 7.9.0 implements ML-DSA and ML-KEM with the standard v3.2 constants, so the only
+        // thing this profile encodes that the probe would not discover is the absence of SLH-DSA.
+        // If these two tables ever diverge on a shared algorithm it is a real vendor difference,
+        // not a typo, and it has to be traceable to the firmware release notes.
         ThalesLunaProfile thales = new ThalesLunaProfile();
-        assertEquals(0, thales.entries().size());
-        assertTrue(thales.lookup("ML-DSA-65").isEmpty(),
-                "an unpopulated profile must report no support rather than guessing");
+        Pkcs11v32Profile v32 = new Pkcs11v32Profile();
+
+        assertEquals(6, thales.entries().size());
+        assertTrue(thales.lookup("SLH-DSA-SHA2-128F").isEmpty(),
+                "Luna firmware 7.9.x has no SLH-DSA support");
+        for (AlgorithmEntry entry : thales.entries()) {
+            assertEquals(v32.lookup(entry.canonicalName()).orElseThrow(), entry,
+                    entry.canonicalName() + " must match v3.2 exactly");
+        }
     }
 }

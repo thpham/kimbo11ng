@@ -147,8 +147,11 @@ class AlgorithmSupportTest {
     void scoring() throws Exception {
         TokenCapabilities full = capabilitiesOf(new FakeToken());
         assertEquals(18, AlgorithmSupport.score(profile, full));
-        assertEquals(0, AlgorithmSupport.score(new ThalesLunaProfile(), full),
-                "an unpopulated profile scores nothing and can never be auto-selected");
+        assertEquals(6, AlgorithmSupport.score(new ThalesLunaProfile(), full),
+                "Luna's six ML-DSA and ML-KEM rows; it has no SLH-DSA to score");
+        assertTrue(AlgorithmSupport.score(profile, full)
+                        > AlgorithmSupport.score(new ThalesLunaProfile(), full),
+                "so a token that also does SLH-DSA is never auto-detected as a Luna");
 
         FakeToken partial = new FakeToken().hideMechanism(FakeToken.CKM_SLH_DSA_KEY_PAIR_GEN);
         assertEquals(6, AlgorithmSupport.score(profile, capabilitiesOf(partial)));

@@ -4,6 +4,10 @@
  */
 package ch.ithings.kimbo11ng.fake;
 
+import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
+import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
+
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
@@ -41,6 +45,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -134,6 +139,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Map<Long, Long> mechanismFlags = new HashMap<>();
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
+    private PqcMechanismProfile profile;
     private long failNextCkr = -1;
     private int killSessionsAfter = -1;
     private int operationCount;
@@ -262,6 +268,25 @@ public final class FakeToken extends UnsupportedNativeProvider {
      */
     public FakeToken failMechanismList(long ckr) {
         this.mechanismListCkr = ckr;
+        return this;
+    }
+
+    /**
+     * Become the token this profile describes: advertise its mechanisms, generate keys of its key
+     * types and FIPS lengths, and read the parameter set from the attribute it names.
+     *
+     * <p>Without this the fake is hard-wired to the PKCS#11 v3.2 numbering, so a vendor table could
+     * only ever be checked for internal consistency — never for whether a key generated with its
+     * constants can be read back through it. That is the gap {@code ProfileConformanceKit} closes,
+     * and it is the one that matters: a table can be perfectly self-consistent and still describe a
+     * token that does not exist.
+     *
+     * <p>The built-in v3.2 post-quantum mechanisms are dropped when a profile is installed, so a
+     * vendor profile is tested against a token that answers <em>only</em> its own numbering. RSA and
+     * EC are untouched — no vendor renumbers those.
+     */
+    public FakeToken profile(PqcMechanismProfile profile) {
+        this.profile = profile;
         return this;
     }
 
@@ -487,11 +512,23 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
                 CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA,
                 CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM));
+        if (profile != null) {
+            // A profile-driven token answers only its own post-quantum numbering.
+            base.removeAll(List.of(CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
+                    CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA,
+                    CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM));
+            for (AlgorithmEntry entry : profile.entries()) {
+                base.add(CkULong.typeCode(entry.ckmKeyPairGen()));
+                base.add(CkULong.typeCode(entry.ckmOperation()));
+            }
+        }
         base.removeAll(hiddenMechanisms);
         // A vendor-remapped mechanism is advertised under its vendor value only.
         base.replaceAll(m -> vendorMechanisms.getOrDefault(m, m));
         base.addAll(extraMechanisms);
-        return base;
+        // Deduplicated, order preserved: several parameter sets legitimately share one mechanism,
+        // and C_GetMechanismList must not list it twice.
+        return new ArrayList<>(new LinkedHashSet<>(base));
     }
 
     @Override
@@ -514,6 +551,12 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (override != null) {
             return override;
         }
+        if (profile != null) {
+            Long fromProfile = profileFlagsFor(type);
+            if (fromProfile != null) {
+                return fromProfile;
+            }
+        }
         if (type == CKM.RSA_PKCS_KEY_PAIR_GEN || type == CKM.EC_KEY_PAIR_GEN
                 || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
                 || type == CKM_ML_KEM_KEY_PAIR_GEN) {
@@ -524,6 +567,23 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKF_KEM;
         }
         return CK_MECHANISM_INFO.CKF_SIGN | CK_MECHANISM_INFO.CKF_VERIFY;
+    }
+
+    /** Flags for a mechanism the installed profile names, or {@code null} if it names none. */
+    private Long profileFlagsFor(long type) {
+        long normalized = CkULong.typeCode(type);
+        long flags = 0;
+        for (AlgorithmEntry entry : profile.entries()) {
+            if (CkULong.typeCode(entry.ckmKeyPairGen()) == normalized) {
+                flags |= CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR;
+            }
+            if (CkULong.typeCode(entry.ckmOperation()) == normalized) {
+                flags |= entry.canSign()
+                        ? CK_MECHANISM_INFO.CKF_SIGN | CK_MECHANISM_INFO.CKF_VERIFY
+                        : CKF_KEM;
+            }
+        }
+        return flags == 0 ? null : flags;
     }
 
     // ---------------------------------------------------------------- sessions and login
@@ -785,6 +845,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (!mechanismList().contains(ckm)) {
             return CKR.MECHANISM_INVALID;
         }
+        // A profile's mechanisms are taken as advertised, before the vendorMechanisms knob rewrites
+        // anything: the profile is the vendor here, and its numbering is what is under test.
+        long advertisedCkm = ckm;
         // Undo any vendor remapping so the switch below reasons in standard terms.
         for (Map.Entry<Long, Long> e : vendorMechanisms.entrySet()) {
             if (e.getValue() == ckm) {
@@ -804,7 +867,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.ATTRIBUTE_READ_ONLY;
         }
         try {
-            if (ckm == CKM.RSA_PKCS_KEY_PAIR_GEN) {
+            AlgorithmEntry entry = profile == null ? null
+                    : entryForKeyPairGen(advertisedCkm, pub, priv);
+            if (entry != null) {
+                generateFromEntry(entry, pub, priv);
+            } else if (ckm == CKM.RSA_PKCS_KEY_PAIR_GEN) {
                 generateRsa(pub, priv);
             } else if (ckm == CKM.EC_KEY_PAIR_GEN) {
                 generateEc(pub, priv);
@@ -823,6 +890,59 @@ public final class FakeToken extends UnsupportedNativeProvider {
         pubOut.value = store(pub);
         privOut.value = store(priv);
         return CKR.OK;
+    }
+
+    /**
+     * The installed profile's row for a key-pair-generation mechanism plus the parameter set in the
+     * template, or {@code null} if the profile does not describe this mechanism.
+     *
+     * <p>An unresolvable parameter set is an exception rather than a {@code null}: falling through
+     * to the built-in v3.2 branches would generate a key of the wrong size and let a bad table pass.
+     */
+    private AlgorithmEntry entryForKeyPairGen(long ckm, Map<Long, byte[]> pub,
+            Map<Long, byte[]> priv) {
+        long normalized = CkULong.typeCode(ckm);
+        List<AlgorithmEntry> candidates = new ArrayList<>();
+        for (AlgorithmEntry entry : profile.entries()) {
+            if (CkULong.typeCode(entry.ckmKeyPairGen()) == normalized) {
+                candidates.add(entry);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        // Several parameter sets share the mechanism, so the attribute has to disambiguate — the
+        // v3.2 shape. A profile whose entries carry no CKP must give each one its own mechanism.
+        long ckaParameterSet = profile.ckaParameterSet();
+        byte[] psBytes = pub.containsKey(ckaParameterSet) ? pub.get(ckaParameterSet)
+                : priv.get(ckaParameterSet);
+        if (psBytes == null) {
+            throw new IllegalArgumentException("mechanism 0x" + Long.toHexString(normalized)
+                    + " is shared by " + candidates.size() + " parameter sets but the template has"
+                    + " no attribute 0x" + Long.toHexString(ckaParameterSet));
+        }
+        long ckp = decodeLong(psBytes);
+        for (AlgorithmEntry entry : candidates) {
+            if (entry.ckpParameterSet().orElse(-1L) == ckp) {
+                return entry;
+            }
+        }
+        throw new IllegalArgumentException("no entry for mechanism 0x"
+                + Long.toHexString(normalized) + " with parameter set " + ckp);
+    }
+
+    /** Generates post-quantum material of the length and key type the profile's row declares. */
+    private void generateFromEntry(AlgorithmEntry entry, Map<Long, byte[]> pub,
+            Map<Long, byte[]> priv) {
+        byte[] material = new byte[entry.publicKeyLength()];
+        RANDOM.nextBytes(material);
+        pub.put(CKA.VALUE, publicValue(material));
+        pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
+        priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
+        priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
     }
 
     private void generateRsa(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {

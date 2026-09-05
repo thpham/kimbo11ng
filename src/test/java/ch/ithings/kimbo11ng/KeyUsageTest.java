@@ -5,8 +5,8 @@
 package ch.ithings.kimbo11ng;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
+import ch.ithings.kimbo11ng.fake.TestBridge;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
-import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,9 +16,6 @@ import org.junit.jupiter.api.Test;
 import org.pkcs11.jacknji11.CKA;
 
 import java.security.InvalidKeyException;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.Provider;
 import java.security.Security;
 import java.util.Properties;
 import java.util.Set;
@@ -54,44 +51,6 @@ class KeyUsageTest {
     /** {@code CKA_SIGN}, the constant EJBCA hardcodes as 264. */
     private static final long SIGN = 264L;
 
-    /** Only the parts of {@code BaseCryptoToken} that {@code CryptoTokenImpl} calls back into. */
-    private static final class Bridge implements CryptoTokenBridge {
-        private Properties properties = new Properties();
-        private CachingKeyStoreWrapper keyStore;
-
-        @Override
-        public void bridgeSetKeyStore(KeyStore ks) throws KeyStoreException {
-            this.keyStore = ks == null ? null : new CachingKeyStoreWrapper(ks, true);
-        }
-
-        @Override
-        public CachingKeyStoreWrapper bridgeGetKeyStore() {
-            return keyStore;
-        }
-
-        @Override
-        public void bridgeSetJCAProvider(Provider provider) {
-        }
-
-        @Override
-        public void bridgeSetProperties(Properties properties) {
-            this.properties = properties;
-        }
-
-        @Override
-        public Properties bridgeGetProperties() {
-            return properties;
-        }
-
-        @Override
-        public void bridgeSetTokenName(String name) {
-        }
-
-        @Override
-        public void bridgeSetId(int id) {
-        }
-    }
-
     private FakeToken token;
     private CryptoTokenImpl impl;
 
@@ -110,7 +69,7 @@ class KeyUsageTest {
         properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, "SLOT_INDEX");
         properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, "0");
         properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
-        impl = new CryptoTokenImpl(new Bridge(), new Pkcs11ModuleRegistry(path -> token));
+        impl = new CryptoTokenImpl(new TestBridge(), new Pkcs11ModuleRegistry(path -> token));
         impl.init(properties, null, 60);
         impl.activate("1234".toCharArray());
     }

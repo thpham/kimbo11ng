@@ -4,41 +4,80 @@
  */
 package ch.ithings.kimbo11ng.profile;
 
+import ch.ithings.kimbo11ng.profile.AlgorithmEntry.KeyOp;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+
 import java.util.List;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /**
- * Thales Luna, awaiting vendor constants.
+ * Thales Luna Network/PCIe HSM, firmware 7.9.0 or later with Luna HSM Client 10.9.0 or later.
  *
- * <p>The table below is empty, so this profile currently supports nothing and reports so honestly
- * rather than throwing from ten methods. Populating it is the entire task — no logic is needed,
- * because {@link AbstractTableProfile} supplies every lookup.
+ * <p><b>This profile is optional.</b> Luna 7.9.0 implements post-quantum keys with the standard
+ * PKCS#11 v3.2 numbering — the same key types, mechanisms, parameter-set attribute and {@code CKP_*}
+ * values as {@link Pkcs11v32Profile} — so a Luna token works correctly under the default profile,
+ * with the capability probe narrowing the algorithm table to what the firmware actually advertises.
+ * The profile exists so that Luna can be named explicitly (<code>kimbo11ng.pqc.profile=thales-luna</code>)
+ * and so that the difference from a v3.2 token is stated in code rather than discovered at runtime:
+ * Luna supports ML-DSA and ML-KEM but <b>not SLH-DSA</b>, so the twelve SLH-DSA rows are absent
+ * here. Under the default profile the same twelve rows are excluded by the probe instead.
  *
- * <p><b>What to fill in.</b> For each algorithm the firmware supports, add one row giving:
+ * <p><b>Constants.</b> All identical to v3.2: {@code CKK_ML_DSA} 0x4A, {@code CKK_ML_KEM} 0x49,
+ * {@code CKM_ML_DSA_KEY_PAIR_GEN} 0x1C, {@code CKM_ML_DSA} 0x1D, {@code CKM_ML_KEM_KEY_PAIR_GEN}
+ * 0x0F, {@code CKM_ML_KEM} 0x17, {@code CKA_PARAMETER_SET} 0x61D with {@code CKP_*} 1/2/3 per
+ * family. Luna adds one vendor mechanism, {@code CKM_EXTMU_ML_DSA} (0x80000175) for external-mu
+ * signing, which kimbo11ng does not use; its proprietary surface for ML-KEM is the
+ * {@code CA_EncapsulateKey}/{@code CA_DecapsulateKey} functions rather than different constants,
+ * and kimbo11ng does not encapsulate.
  *
- * <ul>
- *   <li>{@code ckkKeyType} — Luna's {@code CKK_*} for the key type. Vendor-defined values live at
- *       or above {@code CKK_VENDOR_DEFINED} (0x80000000) and will not match the v3.2 numbers in
- *       {@link Pkcs11v32Profile}.
- *   <li>{@code ckmKeyPairGen} and {@code ckmOperation} — the generation and signing mechanisms.
- *       These are separate fields precisely because a vendor may shift one and not the other.
- *   <li>{@code ckpParameterSet} — {@code OptionalLong.empty()} if Luna encodes the parameter set
- *       in the mechanism rather than an attribute, which is the likelier arrangement on firmware
- *       predating v3.2. An empty value is fully supported.
- *   <li>{@code oid} and {@code publicKeyLength} — these are FIPS-defined, so copy them from
- *       {@link Pkcs11v32Profile}; they do not vary by vendor. The length is what lets a
- *       misresolved parameter set be caught before it reaches a certificate.
- * </ul>
+ * <p><b>Known firmware limits (7.9.x).</b> ML-DSA private keys cannot be wrapped or unwrapped, and
+ * there is no SLH-DSA support or published roadmap for it. Neither affects certificate signing.
  *
- * <p>Override {@link #ckaParameterSet()} if the attribute id differs from v3.2's {@code 0x61D}.
- *
- * <p>Once populated, the profile must pass the same conformance suite as
- * {@link Pkcs11v32Profile} — that suite is the acceptance criterion, and it runs against the
- * in-memory fake token, so it can be satisfied before hardware is available.
+ * <p>Sources: Luna HSM Firmware 7.9.0 Customer Release Notes; the ML-DSA and ML-KEM programming
+ * guides in the Luna SDK documentation. See {@code docs/VENDOR_PROFILE_CHECKLIST.md}.
  */
 public final class ThalesLunaProfile extends AbstractTableProfile {
 
+    // Firmware 7.9.0 uses the v3.2 values verbatim; they are repeated rather than imported so that
+    // a future divergence is a one-line edit here and not a change to the v3.2 profile.
+    private static final long CKK_ML_DSA = 0x0000004AL;
+    private static final long CKK_ML_KEM = 0x00000049L;
+
+    private static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001CL;
+    private static final long CKM_ML_DSA = 0x0000001DL;
+    private static final long CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000FL;
+    private static final long CKM_ML_KEM = 0x00000017L;
+
+    private static final String SIG_ARC = "2.16.840.1.101.3.4.3.";
+    private static final String KEM_ARC = "2.16.840.1.101.3.4.4.";
+
+    private static final Set<KeyOp> SIGNING = Set.of(KeyOp.SIGN, KeyOp.VERIFY);
+    private static final Set<KeyOp> KEM = Set.of(KeyOp.ENCAPSULATE, KeyOp.DECAPSULATE);
+
     public ThalesLunaProfile() {
-        super(List.of());
+        super(table());
+    }
+
+    private static List<AlgorithmEntry> table() {
+        return List.of(
+            mlDsa("ML-DSA-44", 1L, SIG_ARC + "17", 1312),
+            mlDsa("ML-DSA-65", 2L, SIG_ARC + "18", 1952),
+            mlDsa("ML-DSA-87", 3L, SIG_ARC + "19", 2592),
+
+            mlKem("ML-KEM-512",  1L, KEM_ARC + "1", 800),
+            mlKem("ML-KEM-768",  2L, KEM_ARC + "2", 1184),
+            mlKem("ML-KEM-1024", 3L, KEM_ARC + "3", 1568));
+    }
+
+    private static AlgorithmEntry mlDsa(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN,
+                CKM_ML_DSA, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, SIGNING);
+    }
+
+    private static AlgorithmEntry mlKem(String name, long ckp, String oid, int pubLen) {
+        return new AlgorithmEntry(name, PqcFamily.ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
+                CKM_ML_KEM, OptionalLong.of(ckp), new ASN1ObjectIdentifier(oid), pubLen, KEM);
     }
 
     @Override
@@ -49,10 +88,5 @@ public final class ThalesLunaProfile extends AbstractTableProfile {
     @Override
     public long ckaParameterSet() {
         return Pkcs11v32Profile.CKA_PARAMETER_SET;
-    }
-
-    @Override
-    public String toString() {
-        return name() + " (no algorithms — vendor constants not yet supplied)";
     }
 }

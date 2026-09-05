@@ -5,12 +5,12 @@
 package ch.ithings.kimbo11ng;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
+import ch.ithings.kimbo11ng.fake.TestBridge;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import com.keyfactor.util.crypto.algorithm.AlgorithmTools;
-import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
@@ -22,9 +22,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.Provider;
 import java.security.PublicKey;
 import java.security.Security;
 import java.security.interfaces.ECPublicKey;
@@ -57,44 +54,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("algorithm matrix")
 class AlgorithmMatrixTest {
 
-    /** The parts of {@code BaseCryptoToken} that {@code CryptoTokenImpl} calls back into. */
-    private static final class Bridge implements CryptoTokenBridge {
-        private Properties properties = new Properties();
-        private CachingKeyStoreWrapper keyStore;
-
-        @Override
-        public void bridgeSetKeyStore(KeyStore ks) throws KeyStoreException {
-            this.keyStore = ks == null ? null : new CachingKeyStoreWrapper(ks, true);
-        }
-
-        @Override
-        public CachingKeyStoreWrapper bridgeGetKeyStore() {
-            return keyStore;
-        }
-
-        @Override
-        public void bridgeSetJCAProvider(Provider provider) {
-        }
-
-        @Override
-        public void bridgeSetProperties(Properties properties) {
-            this.properties = properties;
-        }
-
-        @Override
-        public Properties bridgeGetProperties() {
-            return properties;
-        }
-
-        @Override
-        public void bridgeSetTokenName(String name) {
-        }
-
-        @Override
-        public void bridgeSetId(int id) {
-        }
-    }
-
     private static final Pkcs11v32Profile PROFILE = new Pkcs11v32Profile();
 
     private CryptoTokenImpl impl;
@@ -113,7 +72,7 @@ class AlgorithmMatrixTest {
         properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, "SLOT_INDEX");
         properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, "0");
         properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
-        impl = new CryptoTokenImpl(new Bridge(), new Pkcs11ModuleRegistry(path -> new FakeToken()));
+        impl = new CryptoTokenImpl(new TestBridge(), new Pkcs11ModuleRegistry(path -> new FakeToken()));
         impl.init(properties, null, 70);
         impl.activate("1234".toCharArray());
     }

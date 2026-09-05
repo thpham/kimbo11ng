@@ -10,7 +10,8 @@ Backed by [JackNJI11](https://github.com/joelhockey/jacknji11) (Apache 2.0 JNA P
 - RSA and EC key generation and signing via PKCS#11
 - **Post-quantum cryptography**: ML-DSA (FIPS 204), ML-KEM (FIPS 203), and SLH-DSA (FIPS 205)
 - Vendor-agnostic `PqcMechanismProfile` abstraction for HSM-specific PQC constants, selected
-  automatically by probing the token's mechanism list
+  automatically by probing the token's mechanism list — adding an HSM is a table of constants plus
+  a conformance test, see [docs/VENDOR_PROFILE_CHECKLIST.md](docs/VENDOR_PROFILE_CHECKLIST.md)
 - Bounded session pool, durable key identity by `CKA_ID`, and two-tier recovery from a dropped
   HSM connection
 - No SunPKCS11 dependency — pure JNA bindings, supports multiple HSM libraries simultaneously
@@ -122,6 +123,9 @@ hide or under-report a mechanism, refuse an attribute write.
 - Every registered signature algorithm signed on the token and verified with BouncyCastle,
   including through `JcaContentSignerBuilder` — the path EJBCA uses to sign a certificate
 - 32-thread sign/enumerate/generate/delete mix under injected session death
+- Every `PqcMechanismProfile` against `ProfileConformanceKit`, including one whose key types and
+  mechanisms disagree with the standard entirely — the fake is rebuilt from the profile's own
+  constants, so a vendor table is proved end to end and not merely for self-consistency
 - Build gates: enforcer, duplicate-finder, SpotBugs + findsecbugs, JaCoCo floor, `-Werror`
 
 **Integration tests** (`EjbcaContainerIT`) run against a full EJBCA CE stack managed by
@@ -133,11 +137,16 @@ Testcontainers:
 - `cryptotoken testkey` for each signing algorithm, and its refusal for ML-KEM
 
 ```bash
-mvn verify               # 388 unit tests + 4 artifact tests, no Docker (~2 min)
+mvn verify               # 583 unit tests + 4 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 23 integration tests (~4 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
+
+# Against real hardware: the same contract HsmContractFakeTest runs on every build.
+# Skipped when kimbo11ng.it.lib is absent.
+mvn verify -Pit -Dkimbo11ng.it.lib=/path/to/libCryptoki2_64.so \
+                -Dkimbo11ng.it.slot=0 -Dkimbo11ng.it.pin=userpin
 ```
 
 Integration tests require Docker. The test image is built by `just docker-build`; a hot-reloaded
@@ -174,7 +183,8 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 23 tests)
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 23 tests,
+                                     #   HsmConformanceIT — real-hardware contract)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config

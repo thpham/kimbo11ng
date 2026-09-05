@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
@@ -64,14 +65,14 @@ public final class Kimbo11ngProvider extends Provider {
     }
 
     private static String nameFor(TokenRuntime runtime) {
-        return "Kimbo11ng-" + runtime.device().getLibraryName()
-                + "-slot" + runtime.device().getSlotId();
+        return "Kimbo11ng-" + runtime.slot().libraryName()
+                + "-slot" + runtime.slot().slotId();
     }
 
     private Kimbo11ngProvider(String name, TokenRuntime initialRuntime) {
         super(name, "1.0", "kimbo11ng PKCS#11 provider for "
-                + initialRuntime.device().getLibPath()
-                + " slot " + initialRuntime.device().getSlotId());
+                + initialRuntime.slot().libPath()
+                + " slot " + initialRuntime.slot().slotId());
         this.runtime.set(initialRuntime);
         registerServices(initialRuntime);
     }
@@ -81,8 +82,8 @@ public final class Kimbo11ngProvider extends Provider {
         return runtime.get();
     }
 
-    public CryptokiDevice getDevice() {
-        return runtime.get().device();
+    public P11Slot getSlot() {
+        return runtime.get().slot();
     }
 
     public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
@@ -135,14 +136,14 @@ public final class Kimbo11ngProvider extends Provider {
                 Kimbo11ngKeyPairGeneratorSpi.RSA.class.getName(), null, null) {
             @Override
             public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngKeyPairGeneratorSpi.RSA(runtime.get().device());
+                return new Kimbo11ngKeyPairGeneratorSpi.RSA(runtime.get().slot());
             }
         });
         putService(new Service(this, "KeyPairGenerator", "EC",
                 Kimbo11ngKeyPairGeneratorSpi.EC.class.getName(), null, null) {
             @Override
             public Object newInstance(Object constructorParameter) {
-                return new Kimbo11ngKeyPairGeneratorSpi.EC(runtime.get().device());
+                return new Kimbo11ngKeyPairGeneratorSpi.EC(runtime.get().slot());
             }
         });
 

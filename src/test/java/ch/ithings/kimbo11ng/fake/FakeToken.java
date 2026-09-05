@@ -113,6 +113,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
     // ---- observability, for assertions ----
     private int initializeCalls;
     private int finalizeCalls;
+    private int sessionInfoCalls;
+    private int loginCalls;
 
     // ---- fault-injection knobs (0.3) ----
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
@@ -199,6 +201,15 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return this;
     }
 
+    /**
+     * Forget every open session, as a network HSM does when it drops an idle connection: the
+     * handles the client holds keep looking valid until it tries to use one.
+     */
+    public synchronized FakeToken dropAllSessions() {
+        sessions.clear();
+        return this;
+    }
+
     /** Fail the next PKCS#11 call with this CKR, once. */
     public FakeToken failNextWith(long ckr) {
         this.failNextCkr = ckr;
@@ -218,6 +229,16 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     public int initializeCalls() {
         return initializeCalls;
+    }
+
+    /** {@code C_GetSessionInfo} calls, to assert that validation happens only when it should. */
+    public synchronized int sessionInfoCalls() {
+        return sessionInfoCalls;
+    }
+
+    /** {@code C_Login} calls, to assert that login happens per token rather than per session. */
+    public synchronized int loginCalls() {
+        return loginCalls;
     }
 
     public int finalizeCalls() {
@@ -309,6 +330,12 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_GetSlotList(boolean tokenPresent, long[] list, LongRef count) {
+        // Gated: reading the slot list is where a library whose client has lost its connection
+        // reports itself, and caching that failure was a real defect.
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
         if (!initialized) {
             return CKR.CRYPTOKI_NOT_INITIALIZED;
         }
@@ -327,6 +354,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_GetTokenInfo(long slot, CK_TOKEN_INFO info) {
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
         if (slot != slotId) {
             return CKR.SLOT_ID_INVALID;
         }
@@ -397,6 +428,12 @@ public final class FakeToken extends UnsupportedNativeProvider {
     @Override
     public synchronized long C_OpenSession(long slot, long flags, NativePointer app,
             CK_NOTIFY notify, LongRef handle) {
+        // Gated like any other call: opening a session is exactly where a token that has been
+        // removed, or an HSM whose client has lost its connection, first reports itself.
+        long gated = gate();
+        if (gated != CKR.OK) {
+            return gated;
+        }
         if (!initialized) {
             return CKR.CRYPTOKI_NOT_INITIALIZED;
         }
@@ -425,6 +462,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_GetSessionInfo(long handle, CK_SESSION_INFO info) {
+        sessionInfoCalls++;
         Session s = session(handle);
         if (s == null) {
             return CKR.SESSION_HANDLE_INVALID;
@@ -436,6 +474,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_Login(long handle, long userType, byte[] suppliedPin, long pinLen) {
+        loginCalls++;
         long gated = gate();
         if (gated != CKR.OK) {
             return gated;

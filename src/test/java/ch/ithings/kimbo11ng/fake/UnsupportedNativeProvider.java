@@ -25,7 +25,7 @@ import org.pkcs11.jacknji11.NativeProvider;
  * implement therefore fails loudly as an unsupported function rather than silently returning
  * {@code CKR_OK} with an empty result — which is how a test double quietly starts lying.
  */
-abstract class UnsupportedNativeProvider implements NativeProvider {
+public abstract class UnsupportedNativeProvider implements NativeProvider {
 
     private static final long NOPE = CKR.FUNCTION_NOT_SUPPORTED;
 

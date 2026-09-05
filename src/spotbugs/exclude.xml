@@ -25,28 +25,13 @@
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
 
-    <!-- ===== scheduled: phase 2 (module lifecycle + session pool) ===== -->
-
-    <!-- CryptokiDevice and SlotListWrapper publish their live CryptokiE because every call site
-         needs it. Phase 2 retires both into Pkcs11Module + SessionPool, where the session is
-         reached only through an AutoCloseable lease and never handed out. -->
-    <Match>
-        <Class name="ch.ithings.kimbo11ng.provider.CryptokiDevice"/>
-        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
-    </Match>
-    <Match>
-        <Class name="ch.ithings.kimbo11ng.slot.SlotListWrapper"/>
-        <Bug pattern="EI_EXPOSE_REP"/>
-    </Match>
     <Match>
         <Class name="ch.ithings.kimbo11ng.CryptoTokenImpl"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
 
-    <!-- ===== scheduled: phase 3 (durable key identity) ===== -->
-
-    <!-- The key maps are published for the CryptoTokenImpl registration path and are plain
-         HashMaps. Phase 2 makes them concurrent; phase 3 removes the accessors. -->
+    <!-- The key maps are published for the CryptoTokenImpl registration path. Phase 3 removes the
+         accessors: keys are resolved from the token by CKA_ID instead of cached and handed out. -->
     <Match>
         <Class name="ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi"/>
         <Bug pattern="EI_EXPOSE_REP"/>
@@ -78,11 +63,36 @@
 
     <!-- The PKCS#11 library path is the operator-configured 'sharedLibrary' token property. An
          administrator naming the shared object to load is the feature, not untrusted input;
-         EJBCA additionally constrains it to cryptotoken.p11.lib.* entries in web.properties. -->
+         EJBCA additionally constrains it to cryptotoken.p11.lib.* entries in web.properties.
+         Canonicalizing it is what lets the registry recognise one library reached by two paths. -->
     <Match>
-        <Class name="ch.ithings.kimbo11ng.provider.CryptokiDevice"/>
-        <Method name="getLibraryName"/>
+        <Or>
+            <Class name="ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry"/>
+            <Class name="ch.ithings.kimbo11ng.p11.Pkcs11Module"/>
+            <Class name="ch.ithings.kimbo11ng.p11.P11Slot"/>
+            <Class name="ch.ithings.kimbo11ng.slot.SlotListWrapper"/>
+            <Class name="com.keyfactor.util.keys.token.pkcs11.JackNJI11SlotListWrapperFactory"/>
+        </Or>
         <Bug pattern="PATH_TRAVERSAL_IN"/>
+    </Match>
+
+    <!-- Pkcs11Module hands out its CryptokiE because every PKCS#11 call needs the library binding.
+         The hazard the detector is pointing at was the SESSION, and that is no longer reachable
+         this way: a session comes only from SessionPool.borrow() as an AutoCloseable lease. The
+         CryptokiE itself carries no per-caller state - it is the loaded library. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.p11.Pkcs11Module"/>
+        <Method name="ce"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- Pkcs11ModuleRegistry is deliberately both: one shared instance, so "initialize each library
+         exactly once" holds across the deployment, and constructible, so a test can hold its own
+         backed by a fake token instead of inheriting modules from whichever test ran first. That
+         is not the singleton pattern the detector is matching against. -->
+    <Match>
+        <Class name="ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry"/>
+        <Bug pattern="SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR"/>
     </Match>
 
     <!-- java.security.Provider extends Properties (Hashtable). No JCA provider overrides

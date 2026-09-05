@@ -30,10 +30,11 @@
         <!-- Coverage floor, as measured by jacoco:check on the bundle. Baseline at the start of
              phase 0 was LINE 0.09 / BRANCH 0.25, with every PKCS#11-touching class at 0% because
              nothing could be tested without an HSM; the fake token lifted it to 0.25 / 0.30, and
-             phase 1's registry, template and enumeration tests to 0.47 / 0.37.
+             phase 1's registry, template and enumeration tests to 0.47 / 0.37, and phase 2's
+             pool, module and lifecycle tests to 0.68 / 0.57.
              Each phase raises these; they must never be lowered. -->
-        <jacoco.line.min>0.45</jacoco.line.min>
-        <jacoco.branch.min>0.35</jacoco.branch.min>
+        <jacoco.line.min>0.66</jacoco.line.min>
+        <jacoco.branch.min>0.55</jacoco.branch.min>
     </properties>
 
     <dependencies>

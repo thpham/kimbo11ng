@@ -5,7 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
-import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
+import ch.ithings.kimbo11ng.fake.TestSlot;
 import ch.ithings.kimbo11ng.profile.AbstractTableProfile;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
@@ -74,8 +74,8 @@ class KeyStoreEnumerationTest {
         }
     }
 
+    private TestSlot fixture;
     private FakeToken fake;
-    private CryptokiDevice device;
     private final Pkcs11v32Profile profile = new Pkcs11v32Profile();
 
     @BeforeAll
@@ -86,11 +86,9 @@ class KeyStoreEnumerationTest {
     }
 
     @BeforeEach
-    void openDevice() throws Exception {
+    void openSlot() throws Exception {
         fake = new FakeToken();
-        NativeProviderFactory factory = path -> fake;
-        device = new CryptokiDevice("/nonexistent/libfake.so", 0L, factory);
-        device.login("1234".toCharArray());
+        fixture = new TestSlot(fake).loggedIn();
     }
 
     private Kimbo11ngKeyStoreSpi load() throws Exception {
@@ -99,32 +97,33 @@ class KeyStoreEnumerationTest {
 
     private Kimbo11ngKeyStoreSpi load(ch.ithings.kimbo11ng.profile.PqcMechanismProfile p)
             throws Exception {
-        Kimbo11ngKeyStoreSpi spi = new Kimbo11ngKeyStoreSpi(new TokenRuntime(device, p));
+        Kimbo11ngKeyStoreSpi spi = new Kimbo11ngKeyStoreSpi(new TokenRuntime(fixture.slot(), p));
         spi.engineLoad(null, null);
         return spi;
     }
 
+    private void generate(KeyTemplates.Pair t, long ckm) throws Exception {
+        fixture.onSession((ce, session) -> {
+            ce.GenerateKeyPair(session, new CKM(ckm), t.pub(), t.priv(),
+                    new LongRef(), new LongRef());
+            return null;
+        });
+    }
+
     private void generateRsa(String alias) throws Exception {
-        KeyTemplates.Pair t = KeyTemplates.rsa(alias.getBytes(StandardCharsets.UTF_8),
-                KeyTemplates.newKeyId(), 2048);
-        device.getCe().GenerateKeyPair(device.getOrOpenSession(),
-                new CKM(CKM.RSA_PKCS_KEY_PAIR_GEN), t.pub(), t.priv(),
-                new LongRef(), new LongRef());
+        generate(KeyTemplates.rsa(alias.getBytes(StandardCharsets.UTF_8),
+                KeyTemplates.newKeyId(), 2048), CKM.RSA_PKCS_KEY_PAIR_GEN);
     }
 
     private void generateEc(String alias, String curve) throws Exception {
-        KeyTemplates.Pair t = KeyTemplates.ec(alias.getBytes(StandardCharsets.UTF_8),
-                KeyTemplates.newKeyId(), curve);
-        device.getCe().GenerateKeyPair(device.getOrOpenSession(), new CKM(CKM.EC_KEY_PAIR_GEN),
-                t.pub(), t.priv(), new LongRef(), new LongRef());
+        generate(KeyTemplates.ec(alias.getBytes(StandardCharsets.UTF_8),
+                KeyTemplates.newKeyId(), curve), CKM.EC_KEY_PAIR_GEN);
     }
 
     private void generatePqc(String alias, AlgorithmEntry entry,
             ch.ithings.kimbo11ng.profile.PqcMechanismProfile p, long ckmKeyGen) throws Exception {
-        KeyTemplates.Pair t = KeyTemplates.pqc(alias.getBytes(StandardCharsets.UTF_8),
-                KeyTemplates.newKeyId(), entry, p);
-        device.getCe().GenerateKeyPair(device.getOrOpenSession(), new CKM(ckmKeyGen),
-                t.pub(), t.priv(), new LongRef(), new LongRef());
+        generate(KeyTemplates.pqc(alias.getBytes(StandardCharsets.UTF_8),
+                KeyTemplates.newKeyId(), entry, p), ckmKeyGen);
     }
 
     @Test
@@ -194,7 +193,6 @@ class KeyStoreEnumerationTest {
         generateRsa("rsaKey");
         // A key type no profile entry claims. Loading it under some default algorithm is how a
         // key ends up signing with the wrong mechanism, so it must be left out entirely.
-        long session = device.getOrOpenSession();
         CKA[] pub = {
             new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
             new CKA(CKA.KEY_TYPE, 0x0000_00FFL),
@@ -208,8 +206,11 @@ class KeyStoreEnumerationTest {
             new CKA(CKA.LABEL, "mysteryKey".getBytes(StandardCharsets.UTF_8)),
             new CKA(CKA.TOKEN, true),
         };
-        device.getCe().CreateObject(session, pub);
-        device.getCe().CreateObject(session, priv);
+        fixture.onSession((ce, session) -> {
+            ce.CreateObject(session, pub);
+            ce.CreateObject(session, priv);
+            return null;
+        });
 
         Kimbo11ngKeyStoreSpi spi = load();
 

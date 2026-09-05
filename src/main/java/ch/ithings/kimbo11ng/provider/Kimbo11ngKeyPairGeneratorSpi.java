@@ -4,6 +4,8 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.SessionLease;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CryptokiE;
@@ -29,10 +31,10 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
 
     private static final Logger log = Logger.getLogger(Kimbo11ngKeyPairGeneratorSpi.class);
 
-    protected final CryptokiDevice device;
+    protected final P11Slot slot;
 
-    protected Kimbo11ngKeyPairGeneratorSpi(CryptokiDevice device) {
-        this.device = device;
+    protected Kimbo11ngKeyPairGeneratorSpi(P11Slot slot) {
+        this.slot = slot;
     }
 
     /** Label for keys created through this path; EJBCA relabels via {@code setKeyEntry}. */
@@ -41,20 +43,18 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
     }
 
     KeyPair generate(KeyTemplates.Pair templates, String algorithm, long mechanism) {
-        try {
-            long session = device.getOrOpenSession();
-            CryptokiE ce = device.getCe();
+        try (SessionLease lease = slot.borrow()) {
+            long session = lease.session();
+            CryptokiE ce = slot.ce();
             LongRef pubRef = new LongRef();
             LongRef privRef = new LongRef();
-            synchronized (device) {
-                ce.GenerateKeyPair(session, new CKM(mechanism),
-                        templates.pub(), templates.priv(), pubRef, privRef);
-            }
+            ce.GenerateKeyPair(session, new CKM(mechanism),
+                    templates.pub(), templates.priv(), pubRef, privRef);
             java.security.PublicKey publicKey = "RSA".equals(algorithm)
                     ? Kimbo11ngPublicKey.readRsaPublicKey(ce, session, pubRef.value())
                     : Kimbo11ngPublicKey.readEcPublicKey(ce, session, pubRef.value());
             Kimbo11ngPrivateKey privateKey = new Kimbo11ngPrivateKey(privRef.value(), algorithm,
-                    new String(provisionalLabel(privRef.value()), StandardCharsets.UTF_8), device);
+                    new String(provisionalLabel(privRef.value()), StandardCharsets.UTF_8), slot);
             if (log.isDebugEnabled()) {
                 log.debug("Generated " + algorithm + " key pair: priv=" + privRef.value()
                         + " pub=" + pubRef.value());
@@ -73,8 +73,8 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
 
         private int keySize = 2048;
 
-        public RSA(CryptokiDevice device) {
-            super(device);
+        public RSA(P11Slot slot) {
+            super(slot);
         }
 
         @Override
@@ -102,8 +102,8 @@ public abstract class Kimbo11ngKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
 
         private String curveName = "P-256";
 
-        public EC(CryptokiDevice device) {
-            super(device);
+        public EC(P11Slot slot) {
+            super(slot);
         }
 
         @Override

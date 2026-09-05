@@ -5,7 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
-import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
+import ch.ithings.kimbo11ng.fake.TestSlot;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
 import org.bouncycastle.jcajce.interfaces.MLDSAKey;
@@ -46,8 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("PQC key round trip")
 class PqcKeyRoundTripTest {
 
+    private TestSlot fixture;
     private FakeToken fake;
-    private CryptokiDevice device;
     private final Pkcs11v32Profile profile = new Pkcs11v32Profile();
 
     @BeforeAll
@@ -58,11 +58,9 @@ class PqcKeyRoundTripTest {
     }
 
     @BeforeEach
-    void openDevice() throws Exception {
+    void openSlot() throws Exception {
         fake = new FakeToken();
-        NativeProviderFactory factory = path -> fake;
-        device = new CryptokiDevice("/nonexistent/libfake.so", 0L, factory);
-        device.login("1234".toCharArray());
+        fixture = new TestSlot(fake).loggedIn();
     }
 
     /** Generates through the production templates and returns the public handle. */
@@ -70,11 +68,19 @@ class PqcKeyRoundTripTest {
         KeyTemplates.Pair templates = KeyTemplates.pqc(
                 entry.canonicalName().getBytes(StandardCharsets.UTF_8),
                 KeyTemplates.newKeyId(), entry, profile);
-        LongRef pub = new LongRef();
-        LongRef priv = new LongRef();
-        device.getCe().GenerateKeyPair(device.getOrOpenSession(),
-                new CKM(entry.ckmKeyPairGen()), templates.pub(), templates.priv(), pub, priv);
-        return pub.value();
+        return fixture.onSession((ce, session) -> {
+            LongRef pub = new LongRef();
+            LongRef priv = new LongRef();
+            ce.GenerateKeyPair(session, new CKM(entry.ckmKeyPairGen()),
+                    templates.pub(), templates.priv(), pub, priv);
+            return pub.value();
+        });
+    }
+
+    /** Reads a public key the way enumeration does, under its own lease. */
+    private PublicKey read(long handle, AlgorithmEntry entry) throws Exception {
+        return fixture.onSession(
+                (ce, session) -> Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handle, entry));
     }
 
     @ParameterizedTest
@@ -82,8 +88,7 @@ class PqcKeyRoundTripTest {
     @DisplayName("materialises an ML-DSA key BouncyCastle recognises")
     void mlDsa(String keySpec) throws Exception {
         AlgorithmEntry entry = profile.lookup(keySpec).orElseThrow();
-        PublicKey key = Kimbo11ngPublicKey.readPqcPublicKey(
-                device.getCe(), device.getOrOpenSession(), generate(entry), entry);
+        PublicKey key = read(generate(entry), entry);
 
         assertInstanceOf(MLDSAKey.class, key,
                 "EJBCA resolves signature algorithms by instanceof MLDSAKey");
@@ -100,8 +105,7 @@ class PqcKeyRoundTripTest {
     @DisplayName("materialises an SLH-DSA key BouncyCastle recognises")
     void slhDsa(String keySpec) throws Exception {
         AlgorithmEntry entry = profile.lookup(keySpec).orElseThrow();
-        PublicKey key = Kimbo11ngPublicKey.readPqcPublicKey(
-                device.getCe(), device.getOrOpenSession(), generate(entry), entry);
+        PublicKey key = read(generate(entry), entry);
         assertInstanceOf(SLHDSAKey.class, key);
     }
 
@@ -110,8 +114,7 @@ class PqcKeyRoundTripTest {
     @DisplayName("materialises an ML-KEM key BouncyCastle recognises")
     void mlKem(String keySpec) throws Exception {
         AlgorithmEntry entry = profile.lookup(keySpec).orElseThrow();
-        PublicKey key = Kimbo11ngPublicKey.readPqcPublicKey(
-                device.getCe(), device.getOrOpenSession(), generate(entry), entry);
+        PublicKey key = read(generate(entry), entry);
         assertInstanceOf(MLKEMKey.class, key);
     }
 
@@ -122,8 +125,7 @@ class PqcKeyRoundTripTest {
         AlgorithmEntry wrong = profile.lookup("ML-DSA-87").orElseThrow();
 
         InvalidKeyException e = assertThrows(InvalidKeyException.class, () ->
-                Kimbo11ngPublicKey.readPqcPublicKey(device.getCe(), device.getOrOpenSession(),
-                        handle, wrong));
+                read(handle, wrong));
         assertTrue(e.getMessage().contains("1312"), () -> "message: " + e.getMessage());
         assertTrue(e.getMessage().contains("ML-DSA-87"), () -> "message: " + e.getMessage());
     }
@@ -156,8 +158,7 @@ class PqcKeyRoundTripTest {
         long handle = generate(entry);
 
         InvalidKeyException e = assertThrows(InvalidKeyException.class, () ->
-                Kimbo11ngPublicKey.readPqcPublicKey(device.getCe(), device.getOrOpenSession(),
-                        handle, entry));
+                read(handle, entry));
         assertTrue(e.getMessage().contains("Refusing to guess"), () -> "message: " + e.getMessage());
     }
 
@@ -168,13 +169,11 @@ class PqcKeyRoundTripTest {
         // tokens differ. Both must work without configuration.
         AlgorithmEntry entry = profile.lookup("ML-DSA-65").orElseThrow();
         long rawHandle = generate(entry);
-        PublicKey fromRaw = Kimbo11ngPublicKey.readPqcPublicKey(
-                device.getCe(), device.getOrOpenSession(), rawHandle, entry);
+        PublicKey fromRaw = read(rawHandle, entry);
 
         fake.pqcSpkiOid(entry.oid().getId());
         long spkiHandle = generate(entry);
-        PublicKey fromSpki = Kimbo11ngPublicKey.readPqcPublicKey(
-                device.getCe(), device.getOrOpenSession(), spkiHandle, entry);
+        PublicKey fromSpki = read(spkiHandle, entry);
 
         assertInstanceOf(MLDSAKey.class, fromSpki);
         assertEquals(fromRaw.getAlgorithm(), fromSpki.getAlgorithm());
@@ -190,8 +189,7 @@ class PqcKeyRoundTripTest {
         fake.emptyAttribute(org.pkcs11.jacknji11.CKA.VALUE);
 
         InvalidKeyException e = assertThrows(InvalidKeyException.class, () ->
-                Kimbo11ngPublicKey.readPqcPublicKey(device.getCe(), device.getOrOpenSession(),
-                        handle, entry));
+                read(handle, entry));
         assertTrue(e.getMessage().contains("CKA_VALUE is empty"), () -> "message: " + e.getMessage());
     }
 }

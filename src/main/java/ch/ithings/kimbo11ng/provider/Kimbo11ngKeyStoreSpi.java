@@ -5,6 +5,8 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import org.apache.log4j.Logger;
@@ -50,8 +52,8 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         this.runtime = runtime;
     }
 
-    private CryptokiDevice device() {
-        return runtime.device();
+    private P11Slot slot() {
+        return runtime.slot();
     }
 
     @Override
@@ -83,9 +85,9 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         if (!(key instanceof Kimbo11ngPrivateKey p11Key)) {
             return;
         }
-        try {
-            long session = device().getOrOpenSession();
-            CryptokiE ce = device().getCe();
+        try (SessionLease lease = slot().borrow()) {
+            long session = lease.session();
+            CryptokiE ce = slot().ce();
             byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
 
             ce.SetAttributeValue(session, p11Key.getObjectHandle(), new CKA(CKA.LABEL, labelBytes));
@@ -105,7 +107,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             }
 
             privateKeys.put(alias, new Kimbo11ngPrivateKey(p11Key.getObjectHandle(),
-                    p11Key.getAlgorithm(), alias, device(), p11Key.entry().orElse(null)));
+                    p11Key.getAlgorithm(), alias, slot(), p11Key.entry().orElse(null)));
         } catch (Exception e) {
             log.error("Failed to label key entry '" + alias + "': " + e.getMessage(), e);
         }
@@ -136,9 +138,9 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public void engineDeleteEntry(String alias) {
-        try {
-            long session = device().getOrOpenSession();
-            CryptokiE ce = device().getCe();
+        try (SessionLease lease = slot().borrow()) {
+            long session = lease.session();
+            CryptokiE ce = slot().ce();
             byte[] labelBytes = alias.getBytes(StandardCharsets.UTF_8);
             // TODO(phase-3): scope deletion by CKA_ID so unrelated objects sharing a label
             // survive, and remove certificate objects too.
@@ -198,7 +200,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
         privateKeys.clear();
         publicKeys.clear();
 
-        if (!device().isLoggedIn()) {
+        if (!slot().isLoggedIn()) {
             if (password == null || password.length == 0) {
                 if (log.isDebugEnabled()) {
                     log.debug("engineLoad without a PIN on a logged-out token; no keys enumerated");
@@ -206,7 +208,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                 return;
             }
             try {
-                device().login(password);
+                slot().login(password);
             } catch (Exception e) {
                 throw new IOException("Failed to log in to the PKCS#11 token: "
                         + e.getMessage(), e);
@@ -221,8 +223,16 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     }
 
     private void enumerateKeys() throws Exception {
-        long session = device().getOrOpenSession();
-        CryptokiE ce = device().getCe();
+        // One lease for the whole enumeration: the outer FindObjects and the per-key attribute
+        // reads and public-key lookups are a single logical scan, and splitting them across
+        // sessions would let another thread delete a key between the two halves.
+        try (SessionLease lease = slot().borrow()) {
+            enumerateKeys(lease.session());
+        }
+    }
+
+    private void enumerateKeys(long session) {
+        CryptokiE ce = slot().ce();
         PqcMechanismProfile profile = runtime.profile();
 
         long[] privHandles = ce.FindObjects(session, new CKA(CKA.CLASS, CKO.PRIVATE_KEY));
@@ -264,7 +274,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                 }
 
                 privateKeys.put(alias, new Kimbo11ngPrivateKey(handle, algorithm, alias,
-                        device(), entry.orElse(null)));
+                        slot(), entry.orElse(null)));
                 readMatchingPublicKey(ce, session, alias, labelBytes, keyType, entry)
                         .ifPresent(pub -> publicKeys.put(alias, pub));
 
@@ -322,7 +332,7 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     public void registerGeneratedKeyPair(String alias, long privHandle, String algorithm,
             AlgorithmEntry entry, PublicKey publicKey) {
         privateKeys.put(alias,
-                new Kimbo11ngPrivateKey(privHandle, algorithm, alias, device(), entry));
+                new Kimbo11ngPrivateKey(privHandle, algorithm, alias, slot(), entry));
         if (publicKey != null) {
             publicKeys.put(alias, publicKey);
         }

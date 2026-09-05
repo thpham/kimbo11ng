@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 
 import java.io.NotSerializableException;
@@ -25,24 +26,23 @@ public final class Kimbo11ngPrivateKey implements PrivateKey {
     private final long objectHandle;
     private final String algorithm;
     private final String alias;
-    private final transient CryptokiDevice device;
+    private final transient P11Slot slot;
     private final transient AlgorithmEntry entry;
 
-    public Kimbo11ngPrivateKey(long objectHandle, String algorithm, String alias,
-            CryptokiDevice device) {
-        this(objectHandle, algorithm, alias, device, null);
+    public Kimbo11ngPrivateKey(long objectHandle, String algorithm, String alias, P11Slot slot) {
+        this(objectHandle, algorithm, alias, slot, null);
     }
 
     /**
      * @param entry the post-quantum algorithm this key was generated as, or {@code null} for RSA
      *              and EC, whose signing mechanism follows from the requested digest instead
      */
-    public Kimbo11ngPrivateKey(long objectHandle, String algorithm, String alias,
-            CryptokiDevice device, AlgorithmEntry entry) {
+    public Kimbo11ngPrivateKey(long objectHandle, String algorithm, String alias, P11Slot slot,
+            AlgorithmEntry entry) {
         this.objectHandle = objectHandle;
         this.algorithm = algorithm;
         this.alias = alias;
-        this.device = device;
+        this.slot = slot;
         this.entry = entry;
     }
 
@@ -69,8 +69,9 @@ public final class Kimbo11ngPrivateKey implements PrivateKey {
         return alias;
     }
 
-    public CryptokiDevice getDevice() {
-        return device;
+    /** The slot this handle belongs to, or {@code null} on a deserialized key. */
+    public P11Slot slot() {
+        return slot;
     }
 
     /** The algorithm row for a post-quantum key; empty for RSA and EC. */
@@ -79,7 +80,7 @@ public final class Kimbo11ngPrivateKey implements PrivateKey {
     }
 
     /**
-     * Refuses serialization. The device and algorithm row are transient, so a deserialized key
+     * Refuses serialization. The slot and algorithm row are transient, so a deserialized key
      * would carry a handle into a session that no longer exists and fail at signing time with a
      * {@code NullPointerException} far from the cause.
      */

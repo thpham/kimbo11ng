@@ -4,6 +4,9 @@
  */
 package ch.ithings.kimbo11ng.provider;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
+import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.DERSequence;
@@ -44,7 +47,7 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
     private final boolean ecdsaDerEncoding;
 
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-    private CryptokiDevice device;
+    private P11Slot slot;
     private Kimbo11ngPrivateKey signingKey;
     private long mechanism = -1;
 
@@ -79,13 +82,13 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
             throw new InvalidKeyException("Key must be a Kimbo11ngPrivateKey, got: "
                     + privateKey.getClass().getName());
         }
-        if (p11Key.getDevice() == null) {
+        if (p11Key.slot() == null) {
             throw new InvalidKeyException("Key " + p11Key.getAlias()
-                    + " has no device; it was probably deserialized.");
+                    + " has no slot; it was probably deserialized.");
         }
         mechanism = resolver.resolve(p11Key);
         signingKey = p11Key;
-        device = p11Key.getDevice();
+        slot = p11Key.slot();
         buffer.reset();
     }
 
@@ -114,20 +117,26 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
         }
         byte[] data = buffer.toByteArray();
         buffer.reset();
-        try {
-            long session = device.getOrOpenSession();
-            CryptokiE ce = device.getCe();
-            // TODO(phase-2): the device still exposes one shared session, so the mutual exclusion
-            // has to live here. A borrowed session lease replaces this and allows real parallelism.
-            synchronized (device) {
-                ce.SignInit(session, new CKM(mechanism), signingKey.getObjectHandle());
-                byte[] rawSig = ce.Sign(session, data);
+        // One session, held for exactly the C_SignInit/C_Sign pair that must not be interleaved
+        // with anything else. Threads signing with other keys proceed in parallel on their own
+        // sessions; previously every signature in the JVM queued behind one lock.
+        try (SessionLease lease = slot.borrow()) {
+            CryptokiE ce = slot.ce();
+            try {
+                ce.SignInit(lease.session(), new CKM(mechanism), signingKey.getObjectHandle());
+                byte[] rawSig = ce.Sign(lease.session(), data);
                 return ecdsaDerEncoding ? convertRawEcdsaToDer(rawSig) : rawSig;
+            } catch (Exception e) {
+                // C_SignInit may have succeeded, leaving an operation live on this session. It
+                // cannot be returned to the pool: the next borrower's C_SignInit would answer
+                // CKR_OPERATION_ACTIVE and the failure would surface on an unrelated thread.
+                lease.invalidate();
+                throw e;
             }
         } catch (Exception e) {
             throw new SignatureException("PKCS#11 signing failed with mechanism 0x"
                     + Long.toHexString(mechanism) + " for key " + signingKey.getAlias()
-                    + ": " + e.getMessage(), e);
+                    + Pkcs11Errors.describe(e), e);
         }
     }
 

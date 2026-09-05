@@ -7,7 +7,7 @@ as a table of constants.
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
-| **Status** | Phases 0–1 complete. Phases 2–8 not started.        |
+| **Status** | Phases 0–2 complete. Phases 3–8 not started.        |
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).
@@ -167,7 +167,11 @@ only and the token derives the private copy, so this sets a read-only attribute:
 `CKR_ATTRIBUTE_READ_ONLY` and fails the whole generation. The fake accepted it, so the unit suite
 passed a template no real token would take. The fake now enforces the rule.
 
-## Phase 2 — Module lifecycle and session pool
+## Phase 2 — Module lifecycle and session pool ✅
+
+**Landed.** 208 unit tests and the 18-test `EjbcaContainerIT` green; coverage floor raised from
+LINE 0.45 / BRANCH 0.35 to 0.66 / 0.55. `CryptokiDevice` is gone, replaced by
+`Pkcs11Module` + `SessionPool` + `P11Slot`; no `synchronized (device)` remains anywhere.
 
 - **2.1** `Pkcs11Module` per canonical path, refcounted; `C_Initialize` once; caches that never cache
   failures. **No `C_Finalize`** except an optional shutdown hook.
@@ -178,8 +182,39 @@ passed a template no real token would take. The fake now enforces the rule.
 - **2.5** `Pkcs11Errors` keyed on `CKRException.getCKR()`, always preserving the cause.
 - **2.6** Truthful `deactivate()`: drain, logout, close, clear, `setKeyStore(null)`.
 
-**Gate** — 32-thread mix: 0 `CKR_OPERATION_ACTIVE` · `C_Initialize` once for N devices · `C_Finalize`
-never · transient slot-list failure recovers.
+**Gate** — met. `ConcurrentTokenAccessTest` runs 32 threads signing, enumerating and generating
+against a 6-session pool with zero `CKR_OPERATION_ACTIVE` and no leaked leases;
+`Pkcs11ModuleRegistryTest` pins one `C_Initialize` per library (including under a 16-thread race),
+zero `C_Finalize`, and slot-list failures that recover on the next call.
+
+### What the implementation changed, and why
+
+**`kimbo11ng.sessions.min` was dropped.** The plan specified it so the pool could not evict itself
+to zero and lose the token's login state. The pool has no eviction policy at all — a session it
+opens is kept until it breaks or the pool drains — so the property would have guarded against
+nothing. A knob that changes no behaviour is worse than no knob, because someone will eventually
+set it and believe it did something. The invariant it was meant to protect is now structural and
+asserted in `SessionPoolTest`. `kimbo11ng.sessions.max` (8) ships as planned, plus
+`kimbo11ng.sessions.borrowTimeoutSeconds` (30), which the plan's "borrow timeout" required but did
+not name.
+
+**PIN handling was pulled forward from 6.1.** The pool owns `C_Login` now, so the choice was to
+write `new String(pin).getBytes(UTF_8)` into new code and undo it two phases later, or do it once.
+`Pins.encodeUtf8` encodes through a `CharBuffer`, never constructs a String, zeroes its
+intermediate buffer, and rejects rather than substitutes an unencodable character — a `?` silently
+replacing a character sends the token a different secret than the operator typed and reports the
+result as a wrong PIN.
+
+**A slot has to be reopenable after `reset()`.** Caught by a test, not by review: `P11Slot` first
+cached its `SessionPool` in a field, and `reset()` drains that pool and drops it from the module.
+EJBCA calls `reset()` and then `activate()` on the same crypto token object, so the cached
+reference left the token permanently offline until the application server restarted. The pool is
+now looked up per use.
+
+**Two more gaps in the fake, both found by tests that should have failed and did not.** The fake
+did not apply fault injection to `C_OpenSession`, `C_GetSlotList` or `C_GetTokenInfo` — exactly the
+three calls where a missing token or a disconnected HSM client first reports itself, so none of
+those scenarios could be simulated at all. All three are gated now.
 
 ## Phase 3 — Durable key identity and recovery
 

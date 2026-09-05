@@ -4,89 +4,63 @@
  */
 package ch.ithings.kimbo11ng.slot;
 
-import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
+import ch.ithings.kimbo11ng.p11.Pkcs11Module;
+import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
 import com.keyfactor.util.keys.token.pkcs11.PKCS11SlotListWrapper;
+import com.keyfactor.util.keys.token.CryptoTokenOfflineException;
 import org.apache.log4j.Logger;
-import org.pkcs11.jacknji11.CK_TOKEN_INFO;
-import org.pkcs11.jacknji11.CryptokiE;
-import org.pkcs11.jacknji11.Cryptoki;
-
-import java.util.HashMap;
-import java.util.Map;
 
 /**
- * PKCS11SlotListWrapper implementation using JackNJI11 JNA backend.
- * Uses a specific PKCS#11 library path rather than the global SunPKCS11 provider,
- * enabling multiple HSM libraries simultaneously.
+ * EJBCA's slot-list view of a PKCS#11 library, backed by the shared {@link Pkcs11Module}.
+ *
+ * <p>Holds no state of its own. It used to own a second {@code Cryptoki} and a second
+ * {@code C_Initialize} for a library a crypto token had already initialised, plus its own caches —
+ * one of which cached failure: a slot list that could not be read once was remembered as "no
+ * slots" for the life of the JVM.
+ *
+ * <p>The interface it implements cannot report failure, only emptiness, which is why the module's
+ * exceptions are turned into an empty answer here and logged loudly. That is EJBCA's contract, not
+ * a choice: {@code PKCS11SlotListWrapper.getSlotList()} returns {@code long[]}.
  */
-public class SlotListWrapper implements PKCS11SlotListWrapper {
+public final class SlotListWrapper implements PKCS11SlotListWrapper {
 
     private static final Logger log = Logger.getLogger(SlotListWrapper.class);
 
-    private final String libPath;
-    private final CryptokiE ce;
-    private long[] cachedSlots;
-    private final Map<Long, char[]> labelCache = new HashMap<>();
+    private final Pkcs11Module module;
 
-    public SlotListWrapper(String libPath) {
-        this(libPath, NativeProviderFactory.jna());
+    public SlotListWrapper(String libPath) throws CryptoTokenOfflineException {
+        this(Pkcs11ModuleRegistry.shared().get(libPath));
     }
 
-    public SlotListWrapper(String libPath, NativeProviderFactory providerFactory) {
-        this.libPath = libPath;
-        Cryptoki cryptoki = new Cryptoki(providerFactory.create(libPath));
-        this.ce = new CryptokiE(cryptoki);
+    public SlotListWrapper(Pkcs11Module module) {
+        this.module = module;
+    }
+
+    @Override
+    public long[] getSlotList() {
         try {
-            ce.Initialize();
-            if (log.isDebugEnabled()) {
-                log.debug("Initialized PKCS#11 library: " + libPath);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to initialize PKCS#11 library " + libPath + ": " + e.getMessage());
+            return module.slotList();
+        } catch (CryptoTokenOfflineException e) {
+            // Not cached: the next call asks the token again, so a library whose client daemon was
+            // not yet up recovers without restarting the application server.
+            log.error("Could not read the slot list from " + module.path()
+                    + "; reporting no slots for this attempt: " + e.getMessage(), e);
+            return new long[0];
         }
     }
 
     @Override
-    public synchronized long[] getSlotList() {
-        if (cachedSlots != null) {
-            return cachedSlots;
-        }
+    public char[] getTokenLabel(long slotId) {
         try {
-            cachedSlots = ce.GetSlotList(true);
-            if (log.isDebugEnabled()) {
-                log.debug("Got " + (cachedSlots != null ? cachedSlots.length : 0) +
-                        " slots from library: " + libPath);
-            }
-            return cachedSlots;
-        } catch (Exception e) {
-            log.error("Failed to get slot list from " + libPath + ": " + e.getMessage(), e);
-            cachedSlots = new long[0];
-            return cachedSlots;
-        }
-    }
-
-    @Override
-    public synchronized char[] getTokenLabel(long slotId) {
-        if (labelCache.containsKey(slotId)) {
-            return labelCache.get(slotId);
-        }
-        try {
-            CK_TOKEN_INFO info = ce.GetTokenInfo(slotId);
-            String labelStr = (info.label != null) ? new String(info.label, "UTF-8").trim() : "";
-            char[] trimmed = labelStr.toCharArray();
-            labelCache.put(slotId, trimmed);
-            return trimmed;
-        } catch (Exception e) {
-            log.error("Failed to get token info for slot " + slotId + ": " + e.getMessage(), e);
+            return module.tokenLabel(slotId);
+        } catch (CryptoTokenOfflineException e) {
+            log.error("Could not read the token label for slot " + slotId + " of "
+                    + module.path() + ": " + e.getMessage(), e);
             return new char[0];
         }
     }
 
-    public CryptokiE getCryptokiE() {
-        return ce;
-    }
-
     public String getLibPath() {
-        return libPath;
+        return module.path();
     }
 }

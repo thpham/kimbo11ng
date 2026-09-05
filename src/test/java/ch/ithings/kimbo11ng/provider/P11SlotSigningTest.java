@@ -5,7 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
-import ch.ithings.kimbo11ng.p11.NativeProviderFactory;
+import ch.ithings.kimbo11ng.fake.TestSlot;
 import ch.ithings.kimbo11ng.profile.Pkcs11v32Profile;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.BeforeAll;
@@ -16,7 +16,6 @@ import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKK;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CKO;
-import org.pkcs11.jacknji11.CryptokiE;
 import org.pkcs11.jacknji11.LongRef;
 
 import java.nio.charset.StandardCharsets;
@@ -32,20 +31,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Drives the production classes against {@link FakeToken} through the injection seam.
+ * The signing path end to end against a fake token: generate on the token, read the public key
+ * back, sign through the JCA provider, verify with BouncyCastle.
  *
- * <p>Until this existed, every class touching PKCS#11 sat at 0% coverage and could only be
- * exercised by booting EJBCA and SoftHSM under Docker. The round trips here — generate on the
- * token, read the public key back, sign through the JCA provider, verify with BouncyCastle —
- * are the ones the later phases rewrite, so they need a guard that runs in milliseconds.
+ * <p>Pool mechanics live in {@code SessionPoolTest} and module lifecycle in
+ * {@code Pkcs11ModuleRegistryTest}; what is checked here is that the pieces compose — that a
+ * signature produced through a borrowed session verifies against the key the token reported.
  */
-@DisplayName("CryptokiDevice against a fake token")
-class CryptokiDeviceTest {
+@DisplayName("signing through a slot")
+class P11SlotSigningTest {
 
-    private static final String LIB = "/nonexistent/libfake.so";
-
-    private FakeToken fake;
-    private CryptokiDevice device;
+    private TestSlot fixture;
 
     @BeforeAll
     static void registerBouncyCastle() {
@@ -58,46 +54,49 @@ class CryptokiDeviceTest {
     }
 
     @BeforeEach
-    void openDevice() throws Exception {
-        fake = new FakeToken();
-        NativeProviderFactory factory = path -> fake;
-        device = new CryptokiDevice(LIB, 0L, factory);
-        device.login("1234".toCharArray());
+    void openSlot() throws Exception {
+        fixture = new TestSlot(new FakeToken()).loggedIn();
     }
 
     @Test
-    @DisplayName("initializes the library and opens exactly one session")
-    void initializesAndOpensSession() throws Exception {
-        assertEquals(1, fake.initializeCalls(), "C_Initialize should be called once per device");
-        assertTrue(device.isLoggedIn());
-        long first = device.getOrOpenSession();
-        long second = device.getOrOpenSession();
-        assertEquals(first, second, "the device reuses its single session");
-        assertEquals(1, fake.openSessionCount());
+    @DisplayName("initializes the library once and reuses pooled sessions")
+    void initializesOnceAndPoolsSessions() throws Exception {
+        assertEquals(1, fixture.token().initializeCalls(),
+                "C_Initialize should be called once per library");
+
+        long first = fixture.onSession((ce, session) -> session);
+        long second = fixture.onSession((ce, session) -> session);
+        assertEquals(first, second, "a returned session is handed out again rather than reopened");
+        assertEquals(1, fixture.slot().pool().liveSessions());
     }
 
     @Test
-    @DisplayName("logout then close leaves no session behind")
-    void closeReleasesSession() throws Exception {
-        device.getOrOpenSession();
-        device.close();
-        assertEquals(0, fake.openSessionCount());
-        assertEquals(0, fake.finalizeCalls(),
-                "C_Finalize must not be called: SunPKCS11 may share this library");
+    @DisplayName("closing the slot releases every session but never finalizes the library")
+    void closeReleasesSessionsOnly() throws Exception {
+        fixture.onSession((ce, session) -> session);
+        fixture.slot().close();
+
+        assertEquals(0, fixture.token().openSessionCount());
+        assertEquals(0, fixture.token().finalizeCalls(),
+                "C_Finalize must not be called: SunPKCS11 may be sharing this library");
     }
 
     @Test
     @DisplayName("derives the provider name from the library filename")
     void libraryNameIsSanitized() {
-        assertEquals("libfake_so", device.getLibraryName());
+        assertTrue(fixture.slot().libraryName().startsWith("libfake-"),
+                fixture.slot().libraryName());
+        assertTrue(fixture.slot().libraryName().endsWith("_so"),
+                "dots become underscores so the name is a legal JCA provider name: "
+                        + fixture.slot().libraryName());
     }
 
     @Test
     @DisplayName("generates RSA on the token and reads the public key back")
     void rsaRoundTrip() throws Exception {
         long[] handles = generateRsa(2048);
-        PublicKey pub = Kimbo11ngPublicKey.readRsaPublicKey(
-                device.getCe(), device.getOrOpenSession(), handles[0]);
+        PublicKey pub = fixture.onSession((ce, session) ->
+                Kimbo11ngPublicKey.readRsaPublicKey(ce, session, handles[0]));
         assertNotNull(pub);
         assertEquals("RSA", pub.getAlgorithm());
         assertEquals(2048, ((RSAPublicKey) pub).getModulus().bitLength());
@@ -107,13 +106,14 @@ class CryptokiDeviceTest {
     @DisplayName("signs RSA through the JCA provider and BouncyCastle verifies it")
     void rsaSignVerify() throws Exception {
         long[] handles = generateRsa(2048);
-        PublicKey pub = Kimbo11ngPublicKey.readRsaPublicKey(
-                device.getCe(), device.getOrOpenSession(), handles[0]);
+        PublicKey pub = fixture.onSession((ce, session) ->
+                Kimbo11ngPublicKey.readRsaPublicKey(ce, session, handles[0]));
 
         byte[] data = "kimbo11ng".getBytes(StandardCharsets.UTF_8);
         byte[] signature = signWithProvider("SHA256withRSA", handles[1], "RSA", data);
 
-        Signature verifier = Signature.getInstance("SHA256withRSA", BouncyCastleProvider.PROVIDER_NAME);
+        Signature verifier = Signature.getInstance("SHA256withRSA",
+                BouncyCastleProvider.PROVIDER_NAME);
         verifier.initVerify(pub);
         verifier.update(data);
         assertTrue(verifier.verify(signature), "signature produced via PKCS#11 must verify");
@@ -123,8 +123,8 @@ class CryptokiDeviceTest {
     @DisplayName("converts the token's raw r||s ECDSA output into DER that verifies")
     void ecdsaSignatureIsReEncodedToDer() throws Exception {
         long[] handles = generateEc();
-        PublicKey pub = Kimbo11ngPublicKey.readEcPublicKey(
-                device.getCe(), device.getOrOpenSession(), handles[0]);
+        PublicKey pub = fixture.onSession((ce, session) ->
+                Kimbo11ngPublicKey.readEcPublicKey(ce, session, handles[0]));
         assertEquals("EC", pub.getAlgorithm());
 
         byte[] data = "kimbo11ng".getBytes(StandardCharsets.UTF_8);
@@ -133,23 +133,40 @@ class CryptokiDeviceTest {
         // PKCS#11 hands back the bare r||s pair; the SPI must wrap it in an ASN.1 SEQUENCE
         // before anything in the JCA world can verify it.
         assertEquals(0x30, signature[0] & 0xFF, "DER SEQUENCE tag");
-        Signature verifier = Signature.getInstance("SHA256withECDSA", BouncyCastleProvider.PROVIDER_NAME);
+        Signature verifier = Signature.getInstance("SHA256withECDSA",
+                BouncyCastleProvider.PROVIDER_NAME);
         verifier.initVerify(pub);
         verifier.update(data);
         assertTrue(verifier.verify(signature), "re-encoded ECDSA signature must verify");
     }
 
-    // ---- helpers ----
+    @Test
+    @DisplayName("returns the session to the pool after a successful signature")
+    void signatureReturnsItsSession() throws Exception {
+        long[] handles = generateRsa(2048);
+        signWithProvider("SHA256withRSA", handles[1], "RSA", new byte[] {1, 2, 3});
 
-    private byte[] signWithProvider(String algorithm, long privateHandle, String keyAlgorithm,
-            byte[] data) throws Exception {
-        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
-                new TokenRuntime(device, new Pkcs11v32Profile()));
-        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(privateHandle, keyAlgorithm, "test", device);
-        Signature signer = Signature.getInstance(algorithm, provider);
-        signer.initSign(key);
-        signer.update(data);
-        return signer.sign();
+        assertEquals(0, fixture.slot().pool().liveSessions() - fixture.slot().pool().idleSessions(),
+                "no session may be left checked out after signing");
+    }
+
+    @Test
+    @DisplayName("discards the session when signing fails, rather than pooling a live operation")
+    void failedSignatureDiscardsItsSession() throws Exception {
+        long[] handles = generateRsa(2048);
+        // Warm the pool so there is a session to lose.
+        fixture.onSession((ce, session) -> session);
+        assertEquals(1, fixture.slot().pool().idleSessions());
+
+        fixture.token().failNextWith(org.pkcs11.jacknji11.CKR.DEVICE_ERROR);
+        try {
+            signWithProvider("SHA256withRSA", handles[1], "RSA", new byte[] {1, 2, 3});
+        } catch (Exception expected) {
+            // The failure is the point; what matters is what happened to the session.
+        }
+        assertEquals(0, fixture.slot().pool().idleSessions(),
+                "a session whose C_SignInit may have succeeded must not be reused: the next "
+                        + "borrower's C_SignInit would answer CKR_OPERATION_ACTIVE");
     }
 
     @Test
@@ -157,11 +174,11 @@ class CryptokiDeviceTest {
     void providerIsStableAcrossReinit() {
         // EJBCA registers the provider in java.security.Security under its name and only adds a
         // name once, so a second instance would leave the first registered and pointing at a
-        // closed device. The facade must therefore be reused and merely re-pointed.
-        TokenRuntime first = new TokenRuntime(device, new Pkcs11v32Profile());
+        // released slot. The facade must therefore be reused and merely re-pointed.
+        TokenRuntime first = new TokenRuntime(fixture.slot(), new Pkcs11v32Profile());
         Kimbo11ngProvider a = Kimbo11ngProvider.forToken(first);
 
-        TokenRuntime second = new TokenRuntime(device, new Pkcs11v32Profile());
+        TokenRuntime second = new TokenRuntime(fixture.slot(), new Pkcs11v32Profile());
         Kimbo11ngProvider b = Kimbo11ngProvider.forToken(second);
 
         assertSame(a, b, "one provider instance per (library, slot)");
@@ -172,8 +189,7 @@ class CryptokiDeviceTest {
     @DisplayName("registers a Signature service for every signing algorithm in the profile")
     void registersProfileSignatureServices() {
         Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
-                new TokenRuntime(device, new Pkcs11v32Profile()));
-        // 3 ML-DSA + 12 SLH-DSA sign; the 3 ML-KEM parameter sets must not appear.
+                new TokenRuntime(fixture.slot(), new Pkcs11v32Profile()));
         for (String algorithm : new String[] {"ML-DSA-44", "ML-DSA-65", "ML-DSA-87",
                 "SLH-DSA-SHA2-128S", "SLH-DSA-SHAKE-256F", "SHA256withRSA", "SHA256withECDSA"}) {
             assertNotNull(provider.getService("Signature", algorithm),
@@ -183,10 +199,22 @@ class CryptokiDeviceTest {
                 "ML-KEM is key establishment; registering it as a Signature would be wrong");
     }
 
+    // ---- helpers ----
+
+    private byte[] signWithProvider(String algorithm, long privateHandle, String keyAlgorithm,
+            byte[] data) throws Exception {
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(fixture.slot(), new Pkcs11v32Profile()));
+        Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(privateHandle, keyAlgorithm, "test",
+                fixture.slot());
+        Signature signer = Signature.getInstance(algorithm, provider);
+        signer.initSign(key);
+        signer.update(data);
+        return signer.sign();
+    }
+
     /** @return {@code {publicHandle, privateHandle}} */
     private long[] generateRsa(int bits) throws Exception {
-        CryptokiE ce = device.getCe();
-        long session = device.getOrOpenSession();
         CKA[] pub = {
             new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
             new CKA(CKA.KEY_TYPE, CKK.RSA),
@@ -199,17 +227,11 @@ class CryptokiDeviceTest {
             new CKA(CKA.TOKEN, true),
             new CKA(CKA.SIGN, true),
         };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        ce.GenerateKeyPair(session, new CKM(CKM.RSA_PKCS_KEY_PAIR_GEN),
-                pub, priv, pubRef, privRef);
-        return new long[] {pubRef.value(), privRef.value()};
+        return generatePair(CKM.RSA_PKCS_KEY_PAIR_GEN, pub, priv);
     }
 
     /** @return {@code {publicHandle, privateHandle}} for prime256v1 */
     private long[] generateEc() throws Exception {
-        CryptokiE ce = device.getCe();
-        long session = device.getOrOpenSession();
         byte[] prime256v1 = new org.bouncycastle.asn1.ASN1ObjectIdentifier("1.2.840.10045.3.1.7")
                 .getEncoded();
         CKA[] pub = {
@@ -224,10 +246,15 @@ class CryptokiDeviceTest {
             new CKA(CKA.TOKEN, true),
             new CKA(CKA.SIGN, true),
         };
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        ce.GenerateKeyPair(session, new CKM(CKM.EC_KEY_PAIR_GEN),
-                pub, priv, pubRef, privRef);
-        return new long[] {pubRef.value(), privRef.value()};
+        return generatePair(CKM.EC_KEY_PAIR_GEN, pub, priv);
+    }
+
+    private long[] generatePair(long mechanism, CKA[] pub, CKA[] priv) throws Exception {
+        return fixture.onSession((ce, session) -> {
+            LongRef pubRef = new LongRef();
+            LongRef privRef = new LongRef();
+            ce.GenerateKeyPair(session, new CKM(mechanism), pub, priv, pubRef, privRef);
+            return new long[] {pubRef.value(), privRef.value()};
+        });
     }
 }

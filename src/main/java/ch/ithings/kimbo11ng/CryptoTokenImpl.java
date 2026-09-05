@@ -4,10 +4,14 @@
  */
 package ch.ithings.kimbo11ng;
 
+import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
+import ch.ithings.kimbo11ng.p11.Pkcs11Module;
+import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
+import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
-import ch.ithings.kimbo11ng.provider.CryptokiDevice;
 import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
@@ -19,7 +23,6 @@ import com.keyfactor.util.keys.token.CryptoTokenOfflineException;
 import com.keyfactor.util.keys.token.KeyGenParams;
 import com.keyfactor.util.keys.token.pkcs11.NoSuchSlotException;
 import com.keyfactor.util.keys.token.pkcs11.Pkcs11SlotLabelType;
-import ch.ithings.kimbo11ng.slot.SlotListWrapper;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 import org.pkcs11.jacknji11.CryptokiE;
@@ -59,11 +62,18 @@ public class CryptoTokenImpl {
     public static final String TOKEN_FRIENDLY_NAME = "tokenFriendlyName";
 
     private final CryptoTokenBridge bridge;
+    private final Pkcs11ModuleRegistry modules;
     private volatile TokenRuntime runtime;
     private volatile Kimbo11ngProvider p11Provider;
 
     public CryptoTokenImpl(CryptoTokenBridge bridge) {
+        this(bridge, Pkcs11ModuleRegistry.shared());
+    }
+
+    /** For tests, which supply a registry backed by a fake token. */
+    public CryptoTokenImpl(CryptoTokenBridge bridge, Pkcs11ModuleRegistry modules) {
         this.bridge = bridge;
+        this.modules = modules;
     }
 
     public void init(Properties properties, byte[] data, int id)
@@ -93,42 +103,55 @@ public class CryptoTokenImpl {
             }
         }
         try {
-            runtime.device().login(authCode);
+            // P11Slot.login classifies the CKR itself, so a missing token surfaces as offline and
+            // only a rejected credential surfaces as an authentication failure. Previously every
+            // failure here — including "no token in slot" — was reported as a bad PIN.
+            runtime.slot().login(authCode);
             KeyStore ks = KeyStore.getInstance("PKCS11", p11Provider);
             ks.load(null, authCode);
             bridge.bridgeSetKeyStore(ks);
-        } catch (CryptoTokenOfflineException e) {
+        } catch (CryptoTokenOfflineException | CryptoTokenAuthenticationFailedException e) {
             throw e;
         } catch (Exception e) {
-            // TODO(phase-6): distinguish offline from bad credentials on the CKR code, and keep
-            // the cause. CryptoTokenAuthenticationFailedException has no cause-carrying ctor.
-            throw new CryptoTokenAuthenticationFailedException(
-                    "Failed to activate the PKCS#11 NG token: " + e.getMessage());
+            throw Pkcs11Errors.offline("Failed to activate the PKCS#11 NG token", e);
         }
     }
 
+    /**
+     * Takes the token offline for real.
+     *
+     * <p>Order matters and is the point of the method. The keystore goes first so nothing new can
+     * be started, then the cached key handles are dropped, then the token is logged out. Doing it
+     * the other way round leaves a window in which EJBCA hands out a key whose session has already
+     * lost its authentication, and the signature fails somewhere unrelated.
+     *
+     * <p>Sessions are deliberately left open: logout ends the authentication, which is what
+     * "deactivated" means, and keeping the sessions means a later activate does not have to
+     * rebuild the pool. {@link #reset()} is what releases them.
+     */
     public void deactivate() {
-        TokenRuntime current = runtime;
-        if (current != null) {
-            current.device().logout();
-            Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
-            if (spi != null) {
-                // Otherwise a deactivated token keeps handing out usable key handles.
-                spi.clear();
-            }
-        }
         try {
             bridge.bridgeSetKeyStore(null);
         } catch (KeyStoreException e) {
             log.warn("Failed to clear the keystore on deactivate: " + e.getMessage());
         }
+        TokenRuntime current = runtime;
+        if (current != null) {
+            Kimbo11ngKeyStoreSpi spi = current.keyStoreSpi();
+            if (spi != null) {
+                // Otherwise a deactivated token keeps handing out usable key handles.
+                spi.clear();
+            }
+            current.slot().logout();
+        }
     }
 
+    /** Deactivates, then drains the session pool. The library itself stays initialized. */
     public void reset() {
         deactivate();
         TokenRuntime current = runtime;
         if (current != null) {
-            current.device().close();
+            current.slot().close();
         }
     }
 
@@ -218,52 +241,59 @@ public class CryptoTokenImpl {
     private void generateRsa(TokenRuntime current, byte[] label, byte[] keyId, int bits,
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.rsa(label, keyId, bits);
-        long[] handles = generatePair(current, templates, CKM.RSA_PKCS_KEY_PAIR_GEN);
-        CryptokiE ce = current.device().getCe();
-        long session = current.device().getOrOpenSession();
-        PublicKey publicKey = Kimbo11ngPublicKey.readRsaPublicKey(ce, session, handles[0]);
-        register(current, alias, handles[1], "RSA", null, publicKey);
+        generateAndRegister(current, templates, CKM.RSA_PKCS_KEY_PAIR_GEN, alias, "RSA", null,
+                Kimbo11ngPublicKey::readRsaPublicKey);
         log.info("Generated RSA-" + bits + " key pair '" + alias + "'");
     }
 
     private void generateEc(TokenRuntime current, byte[] label, byte[] keyId, String curveName,
             String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.ec(label, keyId, curveName);
-        long[] handles = generatePair(current, templates, CKM.EC_KEY_PAIR_GEN);
-        CryptokiE ce = current.device().getCe();
-        long session = current.device().getOrOpenSession();
-        PublicKey publicKey = Kimbo11ngPublicKey.readEcPublicKey(ce, session, handles[0]);
-        register(current, alias, handles[1], "EC", null, publicKey);
+        generateAndRegister(current, templates, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
+                Kimbo11ngPublicKey::readEcPublicKey);
         log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
     }
 
     private void generatePqc(TokenRuntime current, byte[] label, byte[] keyId,
             AlgorithmEntry entry, String alias) throws Exception {
         KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile());
-        long[] handles = generatePair(current, templates, entry.ckmKeyPairGen());
-        CryptokiE ce = current.device().getCe();
-        long session = current.device().getOrOpenSession();
         // The entry is passed rather than re-derived from the token, so the OID recorded in the
         // SubjectPublicKeyInfo is the one the key was actually generated as.
-        PublicKey publicKey = Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handles[0], entry);
-        register(current, alias, handles[1], entry.family().jcaName(), entry, publicKey);
+        generateAndRegister(current, templates, entry.ckmKeyPairGen(), alias,
+                entry.family().jcaName(), entry,
+                (ce, session, handle) -> Kimbo11ngPublicKey.readPqcPublicKey(ce, session, handle,
+                        entry));
         log.info("Generated " + entry.canonicalName() + " key pair '" + alias + "'");
     }
 
-    /** @return {@code {publicHandle, privateHandle}} */
-    private long[] generatePair(TokenRuntime current, KeyTemplates.Pair templates, long mechanism)
-            throws Exception {
-        CryptokiDevice device = current.device();
-        long session = device.getOrOpenSession();
-        CryptokiE ce = device.getCe();
-        LongRef pubRef = new LongRef();
-        LongRef privRef = new LongRef();
-        // TODO(phase-2): replaced by a borrowed session lease.
-        synchronized (device) {
-            ce.GenerateKeyPair(session, new CKM(mechanism),
+    /** Reads a freshly generated public key from its object handle. */
+    @FunctionalInterface
+    private interface PublicKeyReader {
+        PublicKey read(CryptokiE ce, long session, long handle) throws Exception;
+    }
+
+    /**
+     * Generates a pair and reads its public key under a single session lease.
+     *
+     * <p>One lease for both steps, because the public-key handle is only meaningful in the session
+     * that produced it: reading it on a different session is a different object table and, on some
+     * modules, a different handle entirely.
+     */
+    private void generateAndRegister(TokenRuntime current, KeyTemplates.Pair templates,
+            long mechanism, String alias, String algorithm, AlgorithmEntry entry,
+            PublicKeyReader reader) throws Exception {
+        long privHandle;
+        PublicKey publicKey;
+        try (SessionLease lease = current.slot().borrow()) {
+            CryptokiE ce = current.slot().ce();
+            LongRef pubRef = new LongRef();
+            LongRef privRef = new LongRef();
+            ce.GenerateKeyPair(lease.session(), new CKM(mechanism),
                     templates.pub(), templates.priv(), pubRef, privRef);
+            privHandle = privRef.value();
+            publicKey = reader.read(ce, lease.session(), pubRef.value());
         }
-        return new long[] {pubRef.value(), privRef.value()};
+        register(current, alias, privHandle, algorithm, entry, publicKey);
     }
 
     private void register(TokenRuntime current, String alias, long privHandle, String algorithm,
@@ -331,7 +361,8 @@ public class CryptoTokenImpl {
         }
 
         PqcMechanismProfile profile = ProfileResolver.resolve(properties);
-        TokenRuntime newRuntime = new TokenRuntime(new CryptokiDevice(libPath, slotId), profile);
+        P11Slot slot = modules.get(libPath).slot(slotId, properties);
+        TokenRuntime newRuntime = new TokenRuntime(slot, profile);
         // Same provider object per (library, slot); only the runtime behind it changes.
         Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(newRuntime);
         this.runtime = newRuntime;
@@ -346,9 +377,11 @@ public class CryptoTokenImpl {
 
     private long resolveSlotId(String libPath, Pkcs11SlotLabelType labelType, String labelValue)
             throws Exception {
-        // TODO(phase-2): route through the module registry so the library is initialized once.
-        SlotListWrapper wrapper = new SlotListWrapper(libPath);
-        long[] slots = wrapper.getSlotList();
+        // Through the registry, so this shares one C_Initialize with the slot-list wrapper EJBCA
+        // asks for separately. Previously resolving a slot and then opening it initialized the
+        // same library two or three times.
+        Pkcs11Module module = modules.get(libPath);
+        long[] slots = module.slotList();
         if (slots == null || slots.length == 0) {
             throw new NoSuchSlotException("No slots found in library: " + libPath);
         }
@@ -365,7 +398,7 @@ public class CryptoTokenImpl {
         }
         if (labelType == Pkcs11SlotLabelType.SLOT_LABEL) {
             for (long slotId : slots) {
-                char[] label = wrapper.getTokenLabel(slotId);
+                char[] label = module.tokenLabel(slotId);
                 if (label != null && new String(label).trim().equals(labelValue.trim())) {
                     return slotId;
                 }
@@ -396,9 +429,9 @@ public class CryptoTokenImpl {
         return p11Provider;
     }
 
-    public CryptokiDevice getDevice() {
+    public P11Slot getSlot() {
         TokenRuntime current = runtime;
-        return current == null ? null : current.device();
+        return current == null ? null : current.slot();
     }
 
     public PqcMechanismProfile getPqcProfile() {

@@ -15,7 +15,7 @@ openssl_version := "3.6.0"
 # image and today.
 # NOTE: v0.4.7 and v0.4.8 are unbuildable upstream (gitlinks without .gitmodules); moving to
 # v0.5.0+ additionally requires --recurse-submodules in docker/Dockerfile. See that file.
-softhsm_version := "v0.4.4"
+softhsm_version := "v0.28.1"
 
 # EJBCA dependency JARs: "filename groupId artifactId version"
 # Extracted from the base image and installed to local Maven repo.

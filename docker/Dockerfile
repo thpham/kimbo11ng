@@ -40,21 +40,34 @@ WORKDIR /build
 # re-creates that name, so depend on the real one. Cloned into softhsmv3/ explicitly so the
 # repository rename does not change the build directory.
 #
-# Pinned to a release tag: an unpinned HEAD makes this image unreproducible, and upstream
-# has moved past the layout these cmake flags expect.
+# Pinned to a release tag: an unpinned HEAD makes this image unreproducible, and upstream ships
+# roughly weekly (28 tags in the five months to 2026-09) with same-day hotfixes.
 #
 # Choosing the tag is not free — upstream has three eras:
-#   v0.4.4 and earlier  no stateful/ sources; builds from a plain clone.   <- pinned here
+#   v0.4.4 and earlier  no stateful/ sources; builds from a plain clone.
 #   v0.4.7, v0.4.8      reference stateful/hash-sigs/*.c, but those are gitlinks with NO
 #                       .gitmodules, so neither a plain clone nor --recurse-submodules can
 #                       populate them. Unbuildable; cmake fails with
 #                       "Cannot find source file: stateful/hash-sigs/endian.c".
-#   v0.5.0 and later    same sources, but .gitmodules is present, so moving up to one of
-#                       these requires adding --recurse-submodules to the clone below.
-ARG SOFTHSM_VERSION=v0.4.4
+#   v0.5.0 and later    .gitmodules is present, so --recurse-submodules populates them.
+#
+# Moving from v0.4.4 to v0.28.1 needed exactly two changes: the submodule flags below and dropping
+# the two ENABLE_* flags. Measured across that jump, the mechanism list went from 109 to 165, but
+# all six mechanisms Pkcs11v32Profile uses (0x1c/0x1d ML-DSA, 0x0f/0x17 ML-KEM, 0x2d/0x2e SLH-DSA)
+# are byte-identical, and the only removals were three vendor-defined slots nothing here referenced
+# (0x80000001, 0x80000002, 0x80000010). The additions are legacy digests, HMAC_GENERAL variants,
+# KDFs, symmetric modes and XMSS/XMSSMT — nothing kimbo11ng uses. Composite signatures are NOT in
+# the PKCS#11 mechanism surface at v0.28.1; upstream exposes those through its OpenSSL provider.
+ARG SOFTHSM_VERSION=v0.28.1
+# --recurse-submodules from v0.5.0 on: src/lib/crypto/stateful/ pulls in hash-sigs (LMS/HSS) and
+# xmss-reference, both referenced unconditionally by the build.
 RUN git clone --depth 1 --branch ${SOFTHSM_VERSION} \
+        --recurse-submodules --shallow-submodules \
         https://github.com/pqctoday-org/pqctoday-hsm.git softhsmv3
 
+# ENABLE_MLKEM / ENABLE_MLDSA were dropped as options: post-quantum support is unconditional now,
+# and ENABLE_ECC / ENABLE_EDDSA are forced ON in CMakeLists ("required for PQC roadmap").
+# OpenSSL >= 3.5.0 is a hard requirement as of this tag, which is why stage 1 builds 3.6.0.
 RUN cd softhsmv3 && \
     mkdir build && cd build && \
     cmake .. \
@@ -66,9 +79,7 @@ RUN cd softhsmv3 && \
         -DOPENSSL_SSL_LIBRARY=/opt/openssl/lib/libssl.so \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_INSTALL_LIBDIR=lib \
-        -DBUILD_TESTS=OFF \
-        -DENABLE_MLKEM=ON \
-        -DENABLE_MLDSA=ON && \
+        -DBUILD_TESTS=OFF && \
     make -j$(nproc) && \
     make install
 

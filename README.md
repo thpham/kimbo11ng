@@ -100,7 +100,7 @@ OpenSSL and SoftHSMv3 are compiled from source, but not on every image build —
 matching tag, so `just toolchain-build` is also how to build with no access to GHCR.
 
 ```
-EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7)
+EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7@sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a)
 OpenSSL:   3.6.0
 SoftHSMv3: v0.28.1 (pqctoday-org/pqctoday-hsm)
 Toolchain: ghcr.io/thpham/ejbca-ce-toolchain:openssl3.6.0-softhsmv0.28.1
@@ -114,7 +114,9 @@ Dependencies:
   com.keyfactor:x509-common-util:5.3.5
 ```
 
-To upgrade EJBCA, update `ejbca_version` and `ejbca_deps` in the justfile, then:
+To upgrade EJBCA, update `ejbca_version`, `ejbca_digest` and `ejbca_deps` in the justfile and the
+matching `FROM` in `docker/Dockerfile` — the base image is pinned by digest in both places so that
+the JARs extracted for the build and the image they run in are the same bytes. Then:
 
 ```bash
 just extract-jars-fresh setup docker-build

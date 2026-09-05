@@ -6,6 +6,7 @@ package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.CkULong;
 import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.SessionLease;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
@@ -20,6 +21,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.Key;
+import java.security.KeyStoreException;
 import java.security.KeyStoreSpi;
 import java.security.PublicKey;
 import java.security.UnrecoverableKeyException;
@@ -106,7 +108,8 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
     }
 
     @Override
-    public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) {
+    public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain)
+            throws KeyStoreException {
         if (key instanceof Kimbo11ngSecretKey secretKey) {
             setSecretKeyEntry(alias, secretKey);
             return;
@@ -149,8 +152,17 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
      *
      * <p>Unlike the key-pair case there is one object to relabel, not two — a secret key has no
      * public half to keep in step.
+     *
+     * <p>Failure is thrown, never logged. Returning quietly does not keep EJBCA from holding the
+     * alias: {@code CachingKeyStoreWrapper.setKeyEntry} adds it to its cache after the delegate
+     * returns, so a silent return produces exactly the state it was meant to avoid — a name for a
+     * key the token does not have under it, discovered on first use. Only an exception stops the
+     * cache write.
+     *
+     * @throws KeyStoreException if the token would not give the object the caller's alias
      */
-    private void setSecretKeyEntry(String alias, Kimbo11ngSecretKey secretKey) {
+    private void setSecretKeyEntry(String alias, Kimbo11ngSecretKey secretKey)
+            throws KeyStoreException {
         try (SessionLease lease = slot().borrow()) {
             long session = lease.session();
             CryptokiE ce = slot().ce();
@@ -163,18 +175,20 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             }
             if (relabelled == 0) {
                 // The generator wrote a CKA_ID and this search uses it, so finding nothing means
-                // the object is gone. Registering the alias anyway would leave EJBCA holding a name
-                // for a key the token does not have, and the failure would surface on first use.
-                log.error("Not registering secret key '" + alias + "': no CKO_SECRET_KEY object"
-                        + " matches " + ref + " on the token.");
-                return;
+                // the object is gone.
+                throw new KeyStoreException("Cannot name secret key '" + alias + "': no"
+                        + " CKO_SECRET_KEY object matches " + ref + " on the token.");
             }
             secretKeys.put(alias,
                     new Kimbo11ngSecretKey(secretKey.getAlgorithm(), slot(),
                             new P11KeyRef(ref.ckaId(), alias, null)));
             log.info("Registered secret key '" + alias + "' (" + secretKey.getAlgorithm() + ")");
+        } catch (KeyStoreException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("Failed to label secret key entry '" + alias + "': " + e.getMessage(), e);
+            throw new KeyStoreException("Failed to label secret key entry '" + alias + "'"
+                    + Pkcs11Errors.describe(e) + ". The key exists on the token under the"
+                    + " generator's provisional label " + secretKey.ref() + ".", e);
         }
     }
 
@@ -197,9 +211,19 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
      * destroys every object that happens to share the name, and a label is an EJBCA alias that an
      * operator may reuse. Deleting one CA's key because another CA's key was named the same is not
      * recoverable.
+     *
+     * <h2>A refusal has to reach the caller</h2>
+     *
+     * <p>A partition that answers {@code CKR_ACTION_PROHIBITED} leaves the key on the token. If that
+     * is swallowed, {@code CachingKeyStoreWrapper.deleteEntry} still drops the alias from its cache
+     * once this returns, and EJBCA then holds no name for a key the HSM does — so nothing will ever
+     * delete it, and the next generation under that alias produces an indistinguishable twin. The
+     * in-memory maps are therefore cleared only when every object found was actually destroyed.
+     *
+     * @throws KeyStoreException if the token refused to destroy any of the alias's objects
      */
     @Override
-    public void engineDeleteEntry(String alias) {
+    public void engineDeleteEntry(String alias) throws KeyStoreException {
         Kimbo11ngPrivateKey key = privateKeys.get(alias);
         if (key == null) {
             if (secretKeys.containsKey(alias)) {
@@ -209,6 +233,10 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             log.warn("Not deleting '" + alias + "': no such key in this keystore");
             return;
         }
+        // The certificate too: leaving it behind means the next key generated under this alias
+        // enumerates with the previous key's certificate attached to it.
+        long[] classes = {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY, CKO.CERTIFICATE};
+        int[] destroyed = new int[classes.length];
         try (SessionLease lease = slot().borrow()) {
             long session = lease.session();
             CryptokiE ce = slot().ce();
@@ -217,28 +245,34 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                 log.warn("Deleting '" + alias + "' by label: it carries no CKA_ID, so any other"
                         + " object with the same label will be removed with it.");
             }
-            int destroyed = 0;
-            // The certificate too: leaving it behind means the next key generated under this alias
-            // enumerates with the previous key's certificate attached to it.
-            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.PUBLIC_KEY, CKO.CERTIFICATE}) {
-                for (long handle : ref.findAll(ce, session, objectClass)) {
+            for (int i = 0; i < classes.length; i++) {
+                for (long handle : ref.findAll(ce, session, classes[i])) {
                     ce.DestroyObject(session, handle);
-                    destroyed++;
+                    destroyed[i]++;
                 }
             }
-            log.info("Deleted " + destroyed + " token object(s) for alias '" + alias + "'");
+            log.info("Deleted " + summarize(classes, destroyed) + " for alias '" + alias + "'");
         } catch (Exception e) {
-            log.error("Failed to delete entry '" + alias + "': " + e.getMessage(), e);
-        } finally {
-            privateKeys.remove(alias);
-            publicKeys.remove(alias);
+            // The alias stays: whatever survived on the token is still findable under it.
             slot().invalidateHandles();
+            throw new KeyStoreException("Failed to delete '" + alias + "' from the token"
+                    + Pkcs11Errors.describe(e) + ". Destroyed before the failure: "
+                    + summarize(classes, destroyed) + ". The alias is kept, because the objects"
+                    + " that remain would otherwise be unreachable.", e);
         }
+        privateKeys.remove(alias);
+        publicKeys.remove(alias);
+        slot().invalidateHandles();
     }
 
-    /** The secret-key half of {@link #engineDeleteEntry}: one object class, no public half. */
-    private void deleteSecretEntry(String alias) {
+    /**
+     * The secret-key half of {@link #engineDeleteEntry}: one object class, no public half.
+     *
+     * @throws KeyStoreException if the token refused to destroy the key
+     */
+    private void deleteSecretEntry(String alias) throws KeyStoreException {
         Kimbo11ngSecretKey key = secretKeys.get(alias);
+        int destroyed = 0;
         try (SessionLease lease = slot().borrow()) {
             long session = lease.session();
             CryptokiE ce = slot().ce();
@@ -247,18 +281,30 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                 log.warn("Deleting secret key '" + alias + "' by label: it carries no CKA_ID, so"
                         + " any other object with the same label will be removed with it.");
             }
-            int destroyed = 0;
             for (long handle : ref.findAll(ce, session, CKO.SECRET_KEY)) {
                 ce.DestroyObject(session, handle);
                 destroyed++;
             }
             log.info("Deleted " + destroyed + " secret-key object(s) for alias '" + alias + "'");
         } catch (Exception e) {
-            log.error("Failed to delete secret key '" + alias + "': " + e.getMessage(), e);
-        } finally {
-            secretKeys.remove(alias);
             slot().invalidateHandles();
+            throw new KeyStoreException("Failed to delete secret key '" + alias + "' from the"
+                    + " token" + Pkcs11Errors.describe(e) + ". Destroyed before the failure: "
+                    + destroyed + " secret-key object(s). The alias is kept, because the key is"
+                    + " still there.", e);
         }
+        secretKeys.remove(alias);
+        slot().invalidateHandles();
+    }
+
+    /** {@code "1 CKO_PRIVATE_KEY, 1 CKO_PUBLIC_KEY, 0 CKO_CERTIFICATE object(s)"}. */
+    private static String summarize(long[] classes, int[] destroyed) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < classes.length; i++) {
+            sb.append(i == 0 ? "" : ", ").append(destroyed[i]).append(' ')
+                    .append(CKO.L2S(classes[i]));
+        }
+        return sb.append(" object(s)").toString();
     }
 
     /**

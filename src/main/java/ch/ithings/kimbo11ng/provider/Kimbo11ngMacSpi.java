@@ -109,15 +109,29 @@ public final class Kimbo11ngMacSpi extends MacSpi {
                 try {
                     return macOnce(data);
                 } catch (Exception second) {
-                    throw failure(second);
+                    throw offlineIfGone(second);
                 }
             }
-            if (Pkcs11Errors.classify(first) == Pkcs11Errors.Kind.OFFLINE) {
-                slot.reportOffline("computing a MAC with '" + macKey.getAlias() + "' failed"
-                        + Pkcs11Errors.describe(first), first);
-            }
-            throw failure(first);
+            throw offlineIfGone(first);
         }
+    }
+
+    /**
+     * Builds the failure to throw, first telling the slot if the token is gone.
+     *
+     * <p>Applied to the retry as well as to the first attempt. A dropped connection shows up as a
+     * stale handle on the first call and as the token being gone on the next, so the OFFLINE code
+     * routinely arrives only on the retry; leaving that one unreported keeps the crypto token
+     * "online" over a dead HSM, with EJBCA's keystore never cleared and {@code autoActivate()}
+     * never asked to log in again. That matters most here: the database-protection HMAC runs on
+     * every write, so this is the path most likely to meet the HSM first.
+     */
+    private ProviderException offlineIfGone(Throwable cause) {
+        if (Pkcs11Errors.classify(cause) == Pkcs11Errors.Kind.OFFLINE) {
+            slot.reportOffline("computing a MAC with '" + macKey.getAlias() + "' failed"
+                    + Pkcs11Errors.describe(cause), cause);
+        }
+        return failure(cause);
     }
 
     private byte[] macOnce(byte[] data) throws Exception {

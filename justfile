@@ -7,7 +7,13 @@ set dotenv-load := false
 # Change these when upgrading EJBCA or its dependencies.
 
 ejbca_version   := "9.3.7"
-ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version
+# Multi-arch index digest of keyfactor/ejbca-ce:9.3.7, and the same value docker/Dockerfile
+# FROMs. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
+# and a tag that moved between `just setup` and the image build would compile against one EJBCA
+# and run against another. Resolve a new one with
+# `docker buildx imagetools inspect keyfactor/ejbca-ce:<version>` when bumping ejbca_version.
+ejbca_digest    := "sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a"
+ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version + "@" + ejbca_digest
 openssl_version := "3.6.0"
 # softhsmv3 (now pqctoday-org/pqctoday-hsm) is built from source. Pinned to a release tag:
 # upstream is under heavy development and building an unpinned HEAD makes the image

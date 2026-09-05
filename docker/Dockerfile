@@ -23,8 +23,14 @@ FROM ${TOOLCHAIN} AS toolchain
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Final EJBCA image
+#
+# Digest-pinned, as the block above claims for every external reference here. The tag is kept
+# alongside it only so the version is readable; the digest is what resolves. `keyfactor/ejbca-ce`
+# publishes a multi-arch index and this is the index digest, so amd64 and arm64 both build from
+# it. Bumping EJBCA means changing `ejbca_version` and `ejbca_digest` in the justfile and this
+# line together — the JARs kimbo11ng compiles against are extracted from this exact image.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM keyfactor/ejbca-ce:9.3.7
+FROM keyfactor/ejbca-ce:9.3.7@sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a
 
 USER root
 
@@ -61,11 +67,30 @@ RUN chmod +x /opt/keyfactor/bin/init-hsm.sh
 RUN mkdir -p /var/lib/softhsmv3/tokens && \
     chown -R 10001:0 /var/lib/softhsmv3
 
-# Install gosu for privilege drop in init-hsm.sh (root → 10001)
+# Install gosu for privilege drop in init-hsm.sh (root → 10001).
+#
+# The checksum is not ceremony: GitHub release assets are mutable, so GOSU_VERSION alone names a
+# URL and not a set of bytes, and this binary is exec'd as root as the last step of container
+# startup. Everything else external here is pinned to immutable content — Actions by commit SHA,
+# the toolchain by digest, SoftHSMv3 by tag — and this was the one hole.
+#
+# Digests are per architecture because the release ships one asset per arch and both are built.
+# They were taken from the published assets and cross-checked against tianon's detached OpenPGP
+# signatures (gosu-<arch>.asc, key B42F6819007F00F88E364FD4036A9C25BF357DD4). Verification
+# happens before chmod, so a mismatched download never becomes executable, and an architecture
+# with no pinned digest fails the build rather than silently skipping the check.
 ARG GOSU_VERSION=1.17
 ARG TARGETARCH
-RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${TARGETARCH}" \
-    -o /usr/local/bin/gosu && chmod +x /usr/local/bin/gosu
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) gosu_sha256='bbc4136d03ab138b1ad66fa4fc051bafc6cc7ffae632b069a53657279a450de3' ;; \
+      arm64) gosu_sha256='c3805a85d17f4454c23d7059bcb97e1ec1af272b90126e79ed002342de08389b' ;; \
+      *) echo "no gosu SHA-256 pinned for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/gosu \
+      "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${TARGETARCH}"; \
+    printf '%s  %s\n' "${gosu_sha256}" /usr/local/bin/gosu | sha256sum -c -; \
+    chmod +x /usr/local/bin/gosu
 
 ENV SOFTHSM2_CONF=/etc/softhsmv3.conf
 ENV LD_LIBRARY_PATH=/opt/openssl/lib

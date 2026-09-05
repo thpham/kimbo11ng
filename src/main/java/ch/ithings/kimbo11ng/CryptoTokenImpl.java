@@ -18,6 +18,7 @@ import ch.ithings.kimbo11ng.provider.KeyTemplates;
 import ch.ithings.kimbo11ng.provider.P11KeyRef;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngKeyStoreSpi;
 import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider;
+import ch.ithings.kimbo11ng.provider.Kimbo11ngSecretKey;
 import ch.ithings.kimbo11ng.provider.PublicKeyReader;
 import ch.ithings.kimbo11ng.provider.SecretKeyType;
 import ch.ithings.kimbo11ng.provider.TokenRuntime;
@@ -317,9 +318,44 @@ public class CryptoTokenImpl {
                     + " token: " + e.getMessage(), e);
         }
         // Names the key and puts the alias into the wrapper's cache in one step, so unlike the
-        // key-pair path this needs no cache rebuild afterwards.
-        keyStore.setKeyEntry(alias, key, null, null);
+        // key-pair path this needs no cache rebuild afterwards. The cache write happens only if the
+        // naming succeeded, which is why the failure must not be swallowed further down.
+        try {
+            keyStore.setKeyEntry(alias, key, null, null);
+        } catch (KeyStoreException e) {
+            destroyUnnamed(current, key, alias);
+            throw e;
+        }
         log.info("Generated a " + type.jcaName() + " secret key '" + alias + "'");
+    }
+
+    /**
+     * Destroys a secret key that was generated here and could not then be named.
+     *
+     * <p>Done here rather than inside {@code setSecretKeyEntry}, and the distinction is the whole
+     * safety argument: this method created the object seconds ago, under a provisional
+     * {@code generated-<uuid>} label, and nothing holds a reference to it. The keystore's naming
+     * path cannot know that — a caller may equally be renaming a key that has served a CA for
+     * years, and destroying that because a relabel was refused would be unrecoverable.
+     *
+     * <p>Best effort: a token that will not accept an attribute write may not accept a destroy
+     * either. What is left then is an unusable {@code CKA_SENSITIVE} object under a label no alias
+     * names, so the log has to carry that label for the operator to clean up by hand.
+     */
+    private void destroyUnnamed(TokenRuntime current, SecretKey key, String alias) {
+        if (!(key instanceof Kimbo11ngSecretKey p11Key)) {
+            return;
+        }
+        try (SessionLease lease = current.slot().borrow()) {
+            CryptokiE ce = current.slot().ce();
+            ce.DestroyObject(lease.session(), p11Key.objectHandle(ce, lease.session()));
+            current.slot().invalidateHandles();
+        } catch (Exception e) {
+            log.error("Generated a secret key for '" + alias + "', could not name it, and could"
+                    + " not destroy it either" + Pkcs11Errors.describe(e) + ". An unusable object"
+                    + " is left on the token as " + p11Key.ref() + "; remove it with a vendor"
+                    + " tool.", e);
+        }
     }
 
     /**
@@ -591,18 +627,25 @@ public class CryptoTokenImpl {
      *
      * <p>The token is asked, not the local cache: another node, or an operator with a vendor tool,
      * may have created the key since this instance last enumerated.
+     *
+     * <p>Secret keys are checked too, exactly as {@link #requireSecretAliasFree} checks private
+     * ones: one alias must not name two different kinds of key. {@code engineAliases} answers a
+     * union and {@code engineSize} a sum, so an alias in both maps makes EJBCA see a keystore with
+     * two entries and only one alias to reach them by.
      */
     private void requireAliasFree(TokenRuntime current, String alias)
             throws InvalidAlgorithmParameterException, CryptoTokenOfflineException {
         try (SessionLease lease = current.slot().borrow()) {
-            long[] existing = current.slot().ce().FindObjects(lease.session(),
-                    new CKA(CKA.CLASS, CKO.PRIVATE_KEY),
-                    new CKA(CKA.LABEL, alias.getBytes(StandardCharsets.UTF_8)));
-            if (existing != null && existing.length > 0) {
-                throw new InvalidAlgorithmParameterException("The token already holds a private"
-                        + " key with the alias '" + alias + "'. Delete it first, or choose another"
-                        + " alias; generating a second key with the same label would leave two"
-                        + " keys that cannot be told apart.");
+            byte[] label = alias.getBytes(StandardCharsets.UTF_8);
+            for (long objectClass : new long[] {CKO.PRIVATE_KEY, CKO.SECRET_KEY}) {
+                long[] existing = current.slot().ce().FindObjects(lease.session(),
+                        new CKA(CKA.CLASS, objectClass), new CKA(CKA.LABEL, label));
+                if (existing != null && existing.length > 0) {
+                    throw new InvalidAlgorithmParameterException("The token already holds a key"
+                            + " with the alias '" + alias + "'. Delete it first, or choose another"
+                            + " alias; generating a second key with the same label would leave two"
+                            + " keys that cannot be told apart.");
+                }
             }
         }
     }

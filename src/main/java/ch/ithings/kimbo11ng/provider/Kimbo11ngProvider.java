@@ -86,7 +86,10 @@ public final class Kimbo11ngProvider extends Provider {
                     RsaPssParams.sha384()),
             new ClassicalSignature("SHA512withRSAandMGF1", CKM.SHA512_RSA_PKCS_PSS, false,
                     RsaPssParams.sha512()),
-            new ClassicalSignature("SHA1withECDSA",   CKM.ECDSA,           true,  null),
+            // ECDSA_SHA1, not the raw ECDSA: this provider never digests — engineUpdate buffers and
+            // engineSign hands the buffer to C_Sign — so the raw mechanism would have the token
+            // treat a whole TBSCertificate as if it were the SHA-1 of one.
+            new ClassicalSignature("SHA1withECDSA",   CKM.ECDSA_SHA1,      true,  null),
             new ClassicalSignature("SHA256withECDSA", CKM.ECDSA_SHA256,    true,  null),
             new ClassicalSignature("SHA384withECDSA", CKM.ECDSA_SHA384,    true,  null),
             new ClassicalSignature("SHA512withECDSA", CKM.ECDSA_SHA512,    true,  null));

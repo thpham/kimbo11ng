@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
 
 import java.security.InvalidKeyException;
 import java.security.PrivateKey;
@@ -237,6 +238,24 @@ class CryptoTokenContractTest {
             // needing activation again, or a stale session survives a credential change.
             cryptoToken.reset();
             assertFalse(cryptoToken.isActive());
+        }
+
+        @ParameterizedTest
+        @org.junit.jupiter.params.provider.ValueSource(strings = {"Ed25519", "Ed448"})
+        @DisplayName("generates an Edwards key, enumerates it and tests it")
+        void edwards(String keySpec) throws Exception {
+            activate();
+            cryptoToken.generateKeyPair(keySpec, "edKey");
+
+            // Enumeration is the half that can silently go wrong: the algorithm has to be settled
+            // from CKA_EC_PARAMS on the private object, because Ed25519 and Ed448 are distinct JCA
+            // algorithms and only the token knows which this is.
+            assertEquals(keySpec, cryptoToken.getPublicKey("edKey").getAlgorithm());
+            assertTrue(cryptoToken.doesPrivateKeyExist("edKey"));
+            assertTrue(cryptoToken.getAliases().contains("edKey"));
+
+            // And the whole of BaseCryptoToken.testKeyPair: sign, then verify with BouncyCastle.
+            cryptoToken.testKeyPair("edKey");
         }
 
         @Test

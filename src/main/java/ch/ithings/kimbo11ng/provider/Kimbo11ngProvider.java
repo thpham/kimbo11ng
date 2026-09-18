@@ -125,7 +125,15 @@ public final class Kimbo11ngProvider extends Provider {
             new ClassicalSignature("SHA3-384withECDSA", Pkcs11v30.CKM_ECDSA_SHA3_384, true, null,
                     List.of("2.16.840.1.101.3.4.3.11")),
             new ClassicalSignature("SHA3-512withECDSA", Pkcs11v30.CKM_ECDSA_SHA3_512, true, null,
-                    List.of("2.16.840.1.101.3.4.3.12")));
+                    List.of("2.16.840.1.101.3.4.3.12")),
+            // EdDSA is pure: CKM_EDDSA takes the message, not a digest, and returns R||S as a
+            // fixed-width pair that goes into a certificate unchanged — so no DER re-wrap, unlike
+            // ECDSA. One mechanism serves both curves; the key decides which, and the two services
+            // exist because Ed25519 and Ed448 are distinct JCA algorithms.
+            new ClassicalSignature("Ed25519", CKM.EDDSA, false, null,
+                    List.of("1.3.101.112")),
+            new ClassicalSignature("Ed448", CKM.EDDSA, false, null,
+                    List.of("1.3.101.113")));
 
     /**
      * Digest services, as {@code {standardName, alias...}}.

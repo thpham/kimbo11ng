@@ -191,6 +191,101 @@ class SignatureAlgorithmTest {
     }
 
     @Nested
+    @DisplayName("EdDSA")
+    class Eddsa {
+
+        private long[] generateEdwards(String alias, String curve) throws Exception {
+            return generate(KeyTemplates.edwards(alias.getBytes(StandardCharsets.UTF_8),
+                    KeyTemplates.newKeyId(), curve), CKM.EC_EDWARDS_KEY_PAIR_GEN);
+        }
+
+        private PublicKey readEdwards(long handle) throws Exception {
+            return fixture.onSession((ce, s) ->
+                    PublicKeyReader.readEdwardsPublicKey(ce, s, handle));
+        }
+
+        @ParameterizedTest
+        @CsvSource({"Ed25519, 64", "Ed448, 114"})
+        @DisplayName("signs and verifies, with no DER re-wrap")
+        void roundTrip(String jcaName, int signatureLength) throws Exception {
+            long[] handles = generateEdwards("ed-" + jcaName, jcaName);
+            PublicKey pub = readEdwards(handles[0]);
+            assertEquals(jcaName, pub.getAlgorithm());
+
+            byte[] message = "kimbo11ng eddsa round trip".getBytes(StandardCharsets.UTF_8);
+            Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(jcaName, fixture.slot(),
+                    new P11KeyRef(null, "ed-key", null), handles[1]);
+            Signature signer = Signature.getInstance(jcaName, provider);
+            signer.initSign(key);
+            signer.update(message);
+            byte[] signature = signer.sign();
+
+            // EdDSA signatures are fixed width and are not DER-wrapped. Applying the ECDSA
+            // conversion here would produce something the size of a SEQUENCE, so the length is
+            // worth asserting and not only the verification.
+            assertEquals(signatureLength, signature.length,
+                    jcaName + " signatures are a fixed-width R||S pair");
+
+            Signature verifier = Signature.getInstance(jcaName,
+                    BouncyCastleProvider.PROVIDER_NAME);
+            verifier.initVerify(pub);
+            verifier.update(message);
+            assertTrue(verifier.verify(signature),
+                    jcaName + " produced a signature BouncyCastle will not verify");
+        }
+
+        @ParameterizedTest
+        @CsvSource({"Ed25519, 1.3.101.112", "Ed448, 1.3.101.113"})
+        @DisplayName("builds a content signer, which is how EJBCA signs a certificate")
+        void contentSigner(String jcaName, String expectedOid) throws Exception {
+            long[] handles = generateEdwards("cs-" + jcaName, jcaName);
+            Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey(jcaName, fixture.slot(),
+                    new P11KeyRef(null, "cs-ed", null), handles[1]);
+            byte[] message = "certificate to be signed".getBytes(StandardCharsets.UTF_8);
+
+            org.bouncycastle.operator.ContentSigner signer =
+                    new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder(jcaName)
+                            .setProvider(provider).build(key);
+            signer.getOutputStream().write(message);
+            signer.getOutputStream().close();
+
+            assertEquals(expectedOid, signer.getAlgorithmIdentifier().getAlgorithm().getId());
+
+            Signature verifier = Signature.getInstance(jcaName,
+                    BouncyCastleProvider.PROVIDER_NAME);
+            verifier.initVerify(readEdwards(handles[0]));
+            verifier.update(message);
+            assertTrue(verifier.verify(signer.getSignature()));
+        }
+
+        @Test
+        @DisplayName("the public key reads back whichever way the token wraps CKA_EC_POINT")
+        void bothPointEncodings() throws Exception {
+            // 32 bytes bare against 34 DER-wrapped: the two lengths are distinct, which is what
+            // makes accepting both safe rather than a guess.
+            for (FakeToken.EcPointEncoding encoding : FakeToken.EcPointEncoding.values()) {
+                FakeToken token = new FakeToken().ecPointEncoding(encoding);
+                try (TestSlot slot = new TestSlot(token)) {
+                    slot.loggedIn();
+                    KeyTemplates.Pair templates = KeyTemplates.edwards(
+                            "ed".getBytes(StandardCharsets.UTF_8), KeyTemplates.newKeyId(),
+                            "Ed25519");
+                    long pubHandle = slot.onSession((ce, session) -> {
+                        LongRef pub = new LongRef();
+                        LongRef priv = new LongRef();
+                        ce.GenerateKeyPair(session, new CKM(CKM.EC_EDWARDS_KEY_PAIR_GEN),
+                                templates.pub(), templates.priv(), pub, priv);
+                        return pub.value();
+                    });
+                    PublicKey key = slot.onSession((ce, session) ->
+                            PublicKeyReader.readEdwardsPublicKey(ce, session, pubHandle));
+                    assertEquals("Ed25519", key.getAlgorithm(), "encoding " + encoding);
+                }
+            }
+        }
+    }
+
+    @Nested
     @DisplayName("BouncyCastle content signer")
     class ContentSigner {
 

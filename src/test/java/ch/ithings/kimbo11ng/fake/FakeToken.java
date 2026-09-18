@@ -617,6 +617,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 // this provider registers go untested.
                 Pkcs11v30.CKM_SHA3_256_RSA_PKCS, Pkcs11v30.CKM_SHA3_384_RSA_PKCS,
                 Pkcs11v30.CKM_SHA3_512_RSA_PKCS,
+                CKM.EC_EDWARDS_KEY_PAIR_GEN, CKM.EDDSA,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA,
                 CKM.ECDSA_SHA1, CKM.ECDSA_SHA224, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384,
                 CKM.ECDSA_SHA512,
@@ -675,6 +676,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
         }
         if (type == CKM.RSA_PKCS_KEY_PAIR_GEN || type == CKM.EC_KEY_PAIR_GEN
+                || type == CKM.EC_EDWARDS_KEY_PAIR_GEN
                 || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
                 || type == CKM_ML_KEM_KEY_PAIR_GEN) {
             return CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR;
@@ -1036,6 +1038,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (ckm == CKM.EC_KEY_PAIR_GEN && priv.containsKey(CKA.EC_PARAMS)) {
             return CKR.ATTRIBUTE_READ_ONLY;
         }
+        if (ckm == CKM.EC_EDWARDS_KEY_PAIR_GEN && priv.containsKey(CKA.EC_PARAMS)) {
+            return CKR.ATTRIBUTE_READ_ONLY;
+        }
         try {
             AlgorithmEntry entry = profile == null ? null
                     : entryForKeyPairGen(advertisedCkm, pub, priv);
@@ -1045,6 +1050,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 generateRsa(pub, priv);
             } else if (ckm == CKM.EC_KEY_PAIR_GEN) {
                 generateEc(pub, priv);
+            } else if (ckm == CKM.EC_EDWARDS_KEY_PAIR_GEN) {
+                generateEdwards(pub, priv);
             } else if (ckm == CKM_ML_DSA_KEY_PAIR_GEN) {
                 generatePqc(pub, priv, CKK_ML_DSA, ML_DSA_PUBLIC_KEY_LEN, 1952);
             } else if (ckm == CKM_ML_KEM_KEY_PAIR_GEN) {
@@ -1234,6 +1241,38 @@ public final class FakeToken extends UnsupportedNativeProvider {
         priv.put(SIGN_ALGORITHM, "EC".getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * An Edwards key pair, real enough to sign with.
+     *
+     * <p>{@code CKA_EC_POINT} is the algorithm's own public-key encoding — 32 bytes for Ed25519,
+     * 57 for Ed448 — not a {@code 04 || X || Y} curve point, and it goes through the same
+     * {@link #ecPointEncoding} knob so a test can present either the bare or the DER-wrapped form.
+     * {@code CKA_EC_PARAMS} is put on the private object too, which is where the enumeration path
+     * has to read it to tell Ed25519 from Ed448 before the public half is available.
+     */
+    private void generateEdwards(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
+        byte[] ecParams = pub.get(CKA.EC_PARAMS);
+        if (ecParams == null) {
+            throw new IllegalArgumentException("CKA_EC_PARAMS missing");
+        }
+        String oid = ASN1ObjectIdentifier.getInstance(ecParams).getId();
+        String algorithm = switch (oid) {
+            case "1.3.101.112" -> "Ed25519";
+            case "1.3.101.113" -> "Ed448";
+            default -> throw new IllegalArgumentException("not an Edwards curve: " + oid);
+        };
+        KeyPair kp = KeyPairGenerator.getInstance(algorithm, BC).generateKeyPair();
+        byte[] raw = SubjectPublicKeyInfo.getInstance(kp.getPublic().getEncoded())
+                .getPublicKeyData().getOctets();
+
+        pub.put(CKA.EC_POINT, encodeEcPoint(raw));
+        pub.put(CKA.KEY_TYPE, encodeLong(CKK.CKK_EC_EDWARDS));
+        priv.put(CKA.KEY_TYPE, encodeLong(CKK.CKK_EC_EDWARDS));
+        priv.put(CKA.EC_PARAMS, ecParams);
+        priv.put(PRIVATE_MATERIAL, kp.getPrivate().getEncoded());
+        priv.put(SIGN_ALGORITHM, algorithm.getBytes(StandardCharsets.UTF_8));
+    }
+
     private byte[] encodeEcPoint(byte[] rawPoint) throws IOException {
         return ecPointEncoding == EcPointEncoding.DER
                 ? new DEROctetString(rawPoint).getEncoded()
@@ -1406,6 +1445,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     private static String signatureAlgorithm(long ckm, String keyAlgorithm) {
+        if ("Ed25519".equals(keyAlgorithm) || "Ed448".equals(keyAlgorithm)) {
+            // CKM_EDDSA is pure EdDSA: the signature covers the message itself, which is what
+            // BouncyCastle's bare "Ed25519" does.
+            return keyAlgorithm;
+        }
         if ("ML-DSA".equals(keyAlgorithm)) {
             // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest
             // and no context string, which is what BouncyCastle's bare "ML-DSA" does.

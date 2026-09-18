@@ -29,6 +29,7 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 | RSA       | 2048, 3072, 4096                             | generate, sign         | PKCS#1 v1.5     |
 | RSA-PSS   | 2048, 3072, 4096                             | generate, sign         | PKCS#1 v2.1     |
 | EC        | P-256/384/521, secp256k1, brainpoolP256/384/512r1 | generate, sign    | NIST / RFC 5639 |
+| EdDSA     | Ed25519, Ed448                               | generate, sign         | RFC 8032        |
 | ML-DSA    | ML-DSA-44, ML-DSA-65, ML-DSA-87              | generate, sign         | FIPS 204        |
 | ML-KEM    | ML-KEM-512, ML-KEM-768, ML-KEM-1024          | generate, enumerate    | FIPS 203        |
 | SLH-DSA   | SHA2/SHAKE x 128/192/256 x S/F (12 variants) | generate, sign         | FIPS 205        |
@@ -36,9 +37,17 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 
 ### Signature algorithms registered by the JCA provider
 
-`SHA{1,256,384,512}withRSA`, `SHA{256,384,512}withRSAandMGF1`, `SHA{1,256,384,512}withECDSA`, and
-one service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A
-service is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
+`SHA{1,256,384,512}withRSA`, `SHA3-{256,384,512}withRSA`, `SHA{256,384,512}withRSAandMGF1`,
+`SHA{1,224,256,384,512}withECDSA`, `SHA3-{256,384,512}withECDSA`, `Ed25519`, `Ed448`, and one
+service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A service
+is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
+
+The set is chosen to match what EJBCA offers, not what is convenient: `AlgorithmTools`
+`.getSignatureAlgorithms` returns the SHA-3 and `SHA224withECDSA` spellings for every RSA and EC
+key, so an administrator can pick one when creating a CA. Each is registered under its OID as well
+as its name — BouncyCastle's operator layer resolves a signer from an `AlgorithmIdentifier` and asks
+the provider for the OID as the algorithm name, so a name-only registration is invisible to the
+path EJBCA signs certificates through.
 
 ### Symmetric keys
 
@@ -315,7 +324,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 800 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 807 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

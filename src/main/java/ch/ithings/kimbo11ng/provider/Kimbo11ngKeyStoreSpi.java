@@ -479,6 +479,15 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                     algorithm = "RSA";
                 } else if (keyType == CKK.EC) {
                     algorithm = "EC";
+                } else if (keyType == CKK.CKK_EC_EDWARDS) {
+                    algorithm = edwardsAlgorithm(ce, session, handle);
+                    if (algorithm == null) {
+                        log.warn("Skipping key '" + alias + "' (handle " + handle + "): it is an"
+                                + " Edwards key whose CKA_EC_PARAMS the token does not report, so"
+                                + " there is no way to tell Ed25519 from Ed448. Signing with the"
+                                + " wrong one produces a signature nothing verifies.");
+                        continue;
+                    }
                 } else {
                     entry = profile.lookupByKeyType(keyType,
                             readParameterSet(ce, session, handle, profile));
@@ -504,6 +513,37 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             } catch (Exception e) {
                 log.warn("Failed to process key handle " + handle + ": " + e.getMessage());
             }
+        }
+    }
+
+    /**
+     * {@code "Ed25519"}, {@code "Ed448"}, or {@code null} when the token does not say.
+     *
+     * <p>Unlike EC — where one JCA algorithm covers every curve and the parameters travel with the
+     * public key — Ed25519 and Ed448 are separate algorithms, so the name has to be settled before
+     * the private key object is built. PKCS#11 v3.0 puts {@code CKA_EC_PARAMS} on the private half
+     * of an Edwards pair, which is what makes this readable without the public object; a token that
+     * withholds it leaves the key unusable rather than defaulted.
+     */
+    private static String edwardsAlgorithm(CryptokiE ce, long session, long handle) {
+        try {
+            CKA attr = ce.GetAttributeValue(session, handle, CKA.EC_PARAMS);
+            byte[] value = attr == null ? null : attr.getValue();
+            if (value == null) {
+                return null;
+            }
+            String oid = org.bouncycastle.asn1.ASN1ObjectIdentifier.getInstance(value).getId();
+            return switch (oid) {
+                case "1.3.101.112" -> "Ed25519";
+                case "1.3.101.113" -> "Ed448";
+                default -> null;
+            };
+        } catch (Exception e) {
+            if (log.isDebugEnabled()) {
+                log.debug("No readable CKA_EC_PARAMS on Edwards handle " + handle + ": "
+                        + e.getMessage());
+            }
+            return null;
         }
     }
 
@@ -572,6 +612,9 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
             }
             if (keyType == CKK.EC) {
                 return Optional.of(PublicKeyReader.readEcPublicKey(ce, session, pubHandle));
+            }
+            if (keyType == CKK.CKK_EC_EDWARDS) {
+                return Optional.of(PublicKeyReader.readEdwardsPublicKey(ce, session, pubHandle));
             }
             if (entry.isPresent()) {
                 return Optional.of(

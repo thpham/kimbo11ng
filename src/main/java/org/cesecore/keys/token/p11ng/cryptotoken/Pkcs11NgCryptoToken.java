@@ -12,8 +12,9 @@ import ch.ithings.kimbo11ng.Kimbo11ngCryptoToken;
  * <p>This FQN is what EJBCA registers and looks for:
  * {@code CryptoTokenFactory}'s constructor calls
  * {@code addAvailableCryptoToken("org.cesecore.keys.token.p11ng.cryptotoken.Pkcs11NgCryptoToken",
- * "PKCS#11 NG", true, true)}, and CE 9.3.7 ships no class under it. So this file occupies a package
- * belonging to Keyfactor, which is what makes the integration work and also what makes it fragile:
+ * "PKCS#11 NG", true, true)}, and CE 9.3.7 and 9.6.3 ship no class under it. So this file occupies
+ * a package belonging to Keyfactor, which is what makes the integration work and also what makes it
+ * fragile:
  * a single stub class in a future CE would claim the name, and which of the two jars in
  * {@code ejbca.ear/lib} the classloader picks is unspecified.
  *

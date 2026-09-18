@@ -6,8 +6,12 @@ constants and a conformance test.
 
 |            |                                                      |
 | ---------- | ---------------------------------------------------- |
-| **Target** | EJBCA CE 9.3.7, JackNJI11 1.3.1, BouncyCastle 1.80.2 |
+| **Target** | EJBCA CE 9.6.3, JackNJI11 1.3.1, BouncyCastle 1.84 (phases 0–8 were built against 9.3.7 / BC 1.80.2) |
 | **Status** | Phases 0–8 complete.                                 |
+
+> Measurements below dated to phases 0–8 (BC 1.80.2, `release=17`, EJBCA 9.3.7) are kept as they were
+> taken. The current baseline, and what moved between the two releases, is in
+> [EJBCA_UPSTREAM_WATCH.md](EJBCA_UPSTREAM_WATCH.md).
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in
 > `deps/ejbca/*.jar`. The review changed it materially — see [Plan revisions](#plan-revisions).

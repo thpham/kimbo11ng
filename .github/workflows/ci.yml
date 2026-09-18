@@ -15,11 +15,11 @@ concurrency:
 
 env:
   # ─── Versions (single source of truth) ────────────────────────────────────
-  EJBCA_VERSION: "9.3.7"
+  EJBCA_VERSION: "9.6.3"
   # OpenSSL and SoftHSMv3 versions live in .github/workflows/toolchain.yml and the justfile:
   # they are inputs to the toolchain image, which this workflow only consumes.
-  # The JDK that *builds*, not the one that runs. EJBCA 9.3.7 ships a Java 17 runtime and
-  # pom.xml pins <maven.compiler.release>17</maven.compiler.release>, which is what keeps the
+  # The JDK that *builds*, not the one that runs. EJBCA 9.6.3 ships a Java 21 runtime and
+  # pom.xml pins <maven.compiler.release>21</maven.compiler.release>, which keeps the
   # bytecode and the resolvable API surface compatible with it. The compiler itself has to be 21
   # or newer: the strict-warning gate excludes the 'this-escape' lint category for the
   # OpenAPI-generated REST client, and that category does not exist before JDK 21 — javac 17
@@ -31,7 +31,7 @@ env:
   # The platform list is not an env var any more: each architecture is built by its own
   # matrix leg on a native runner, so the platform belongs to the leg. See the push job.
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/thpham/ejbca-ce
+  IMAGE: ghcr.io/thpham/kimbo11ng-ejbca
 
   # ─── Build artifacts ──────────────────────────────────────────────────────
   ARTIFACT: kimbo11ng-jar-with-dependencies.jar
@@ -80,7 +80,7 @@ jobs:
 
   # ─── Build Docker image + integration tests (main only) ─────────────────────
   # Builds amd64 image into local daemon, runs the full test suite against it.
-  # Image is NOT pushed — that only happens in the push job after tests pass.
+  # Image is NOT pushed. The push job that would publish it is disabled, see its comment.
   test:
     needs: build
     runs-on: ubuntu-latest
@@ -166,7 +166,11 @@ jobs:
   # just slow again.
   push:
     needs: test
-    if: github.ref == 'refs/heads/main'
+    # DISABLED: publishing is off until the licensing question is decided (docs/EJBCA_UPSTREAM_WATCH.md,
+    # W11). The image built from this branch contains a modified Keyfactor ejbca-ejb.jar and the
+    # restored LGPL crypto token classes, on top of base jars whose source Keyfactor does not publish,
+    # and this repository is public. Restore `github.ref == 'refs/heads/main'` only once that is settled.
+    if: false
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -237,7 +241,11 @@ jobs:
   merge:
     needs: push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # DISABLED: publishing is off until the licensing question is decided (docs/EJBCA_UPSTREAM_WATCH.md,
+    # W11). The image built from this branch contains a modified Keyfactor ejbca-ejb.jar and the
+    # restored LGPL crypto token classes, on top of base jars whose source Keyfactor does not publish,
+    # and this repository is public. Restore `github.ref == 'refs/heads/main'` only once that is settled.
+    if: false
     permissions:
       contents: read
       packages: write

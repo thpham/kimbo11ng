@@ -23,10 +23,15 @@ upstream.
 ## Why this matters
 
 [ejbca.org](https://www.ejbca.org/) states: *"As of EJBCA 9.6.2, all use of HSM Crypto Tokens
-requires EJBCA Enterprise Edition."* No CE 9.6.2 exists — Docker Hub and the GitHub source releases
-both stop at 9.3.7 (2025-12-16), and CE has had no release in the nine months since — but the
-direction of travel is clear. If a future CE drops HSM support, jacknji11 may stop shipping in the
-EAR, and `provided` scope stops being tenable.
+requires EJBCA Enterprise Edition."* When this was first written, no CE 9.6.x had been published
+(the last release was 9.3.7, 2025-12-16). **CE 9.6.3 now exists and does what that sentence says**:
+it moves `PKCS11CryptoToken` and `AzureCryptoToken` out of `cryptotokens-impl` and refuses to start
+when the database holds any token type but Soft or Null (see
+[EJBCA_UPSTREAM_WATCH.md](EJBCA_UPSTREAM_WATCH.md), W1).
+
+The contingency this document rehearses has not been triggered, though: 9.6.3 still ships
+`jacknji11-1.3.1.jar` and `jna-5.12.1.jar` in `ejbca.ear/lib`, byte-identical to 9.3.7's. If a later
+CE drops jacknji11 from the EAR, `provided` scope stops being tenable.
 
 ## The rehearsal, and its result
 

@@ -71,7 +71,7 @@ class CliContainerIT {
      */
     @org.testcontainers.junit.jupiter.Container
     static final GenericContainer<?> HSM = new GenericContainer<>(
-            DockerImageName.parse("ghcr.io/thpham/ejbca-ce:latest"))
+            DockerImageName.parse("ghcr.io/thpham/kimbo11ng-ejbca:latest"))
             // Overrides the image's CMD, which would initialise the token and then exec EJBCA.
             .withCommand("sleep", "infinity");
 

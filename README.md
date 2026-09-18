@@ -8,7 +8,7 @@ see [provenance](docs/JACKNJI11_PROVENANCE.md)) and tested against
 
 ## Features
 
-- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.3.7
+- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.6.3 (9.3.7 on `main`; 9.6.3 needs the [HSM overlay](#ejbca-ce-96-and-the-hsm-overlay))
 - RSA and EC key generation and signing via PKCS#11
 - **Post-quantum cryptography**: ML-DSA (FIPS 204), ML-KEM (FIPS 203), and SLH-DSA (FIPS 205)
 - Vendor-agnostic `PqcMechanismProfile` abstraction for HSM-specific PQC constants, selected
@@ -54,8 +54,10 @@ an AES key on the token would be one nothing could use.
 ### What is not supported
 
 - **ML-KEM is generation and enumeration only.** It has no signature or KEM operation here: EJBCA
-  CE has no key-encapsulation path, and `cryptotoken testkey` on an ML-KEM alias is refused with an
-  explanation rather than being run through an RSA-style encryption test that cannot succeed.
+  CE has no key-encapsulation path, and `cryptotoken testkey` on an ML-KEM alias fails rather than
+  passing an RSA-style encryption test it cannot run. On 9.3.7 the failure carried kimbo11ng's
+  explanation; on 9.6.3 EJBCA wraps every token in a wrapper that skips the token's own test, so the
+  message is EJBCA's (see [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md), W3).
 - **Verification.** The provider signs; it does not verify. EJBCA verifies with BouncyCastle from
   the public key, so `Signature.initVerify` through this provider is refused by name.
 - **Symmetric encryption.** There is no `Cipher` service, so the token's AES mechanisms are not
@@ -134,12 +136,32 @@ Not implemented: the Utimaco CP5 key-authorisation commands (`initializekey`, `a
 `unblockkey`, `backupobject`, `restoreobject`) — vendor extensions with no hardware here to develop
 or verify against.
 
+## EJBCA CE 9.6 and the HSM overlay
+
+EJBCA Community Edition 9.6 refuses to start when its database holds a crypto token that is not Soft
+or Null, and that includes `Pkcs11NgCryptoToken`. `docker/Dockerfile` therefore builds an overlay
+into the image ([docker/ejbca-hsm/](docker/ejbca-hsm/README.md)):
+
+- the one method that enforces the check is emptied in Keyfactor's own `ejbca-ejb.jar`, by a
+  bytecode patch that fails the build if the method is not where it expects it. Measured on 9.6.3:
+  with the patch the CA starts with a `Pkcs11NgCryptoToken` in the database; with the stock jar, the
+  same image and database refuse with *"EJBCA Community Edition does not support HSM crypto tokens"*;
+- the classic `PKCS11CryptoToken` and `AzureCryptoToken`, which 9.6 removed, are restored from their
+  last Community Edition sources (adapted by [ejbca-custom](https://github.com/3keyroman/ejbca-custom)).
+  kimbo11ng does not need them; they are there so existing SunPKCS11 tokens keep working. Checked
+  on 9.6.3 against SoftHSMv3: create, generate an RSA key and test it.
+
+**The image is for local use and must not be published**: it contains a modified Keyfactor jar and
+LGPL code, on top of base jars whose source Keyfactor does not publish. See
+[docker/ejbca-hsm/NOTICE](docker/ejbca-hsm/NOTICE).
+
 ## Prerequisites
 
 - Docker
 - [just](https://github.com/casey/just) command runner
-- Maven 3.8+ and JDK 21+ to build (the artifact targets Java 17, which is what EJBCA 9.3.7 runs;
-  the compiler has to be 21 or newer for the `this-escape` lint category the warning gate excludes)
+- Maven 3.8+ and JDK 21+ to build. The artifact targets Java 21, which is the runtime of the pinned
+  EJBCA image (`keyfactor/ejbca-ce:9.6.3` runs OpenJDK 21; the 9.3.7 line ran 17). The target moves with
+  the image — see [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md#compile-target)
 
 ## Quick Start
 
@@ -150,8 +172,19 @@ just ci
 # Or step by step:
 just setup          # extract JARs from EJBCA image + install + build
 just docker-build   # build Docker image (EJBCA + softhsmv3 + kimbo11ng)
-just up             # start EJBCA + PostgreSQL
-just create-token   # provision TestHSM as Pkcs11NgCryptoToken
+just up             # start EJBCA + PostgreSQL (host ports 8080/8443/9443)
+just create-token   # provision TestHSM as Pkcs11NgCryptoToken (restarts EJBCA, waits until it is back)
+
+# Admin UI: https://localhost:8443/ejbca/adminweb/  — HTTPS, and accept the self-signed certificate.
+# The plain-HTTP port (8080) answers "Authorization Denied": the UI needs the TLS session. This dev
+# stack sets EJBCA_ADMIN_ALLOW_ANY_IP, so anyone who reaches the HTTPS port is a super administrator.
+# Do not expose it beyond your own machine.
+
+# Port 8080, 8443 or 9443 already taken? Move the host side; the container is unchanged.
+# Shell variables work, and so does a git-ignored `.env` next to docker-compose.yml:
+echo 'EJBCA_HTTP_PORT=18080
+EJBCA_HTTPS_PORT=18443
+EJBCA_RA_PORT=19443' > .env
 
 # Run integration tests (Testcontainers — starts a fresh stack automatically)
 mvn verify -Pit
@@ -169,23 +202,26 @@ OpenSSL and SoftHSMv3 are compiled from source, but not on every image build —
 matching tag, so `just toolchain-build` is also how to build with no access to GHCR.
 
 ```
-EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7@sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a)
+EJBCA:     9.6.3 (keyfactor/ejbca-ce:9.6.3@sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164)
 OpenSSL:   3.6.0
 SoftHSMv3: v0.28.1 (pqctoday-org/pqctoday-hsm)
 Toolchain: ghcr.io/thpham/ejbca-ce-toolchain:openssl3.6.0-softhsmv0.28.1
 Artifact:  kimbo11ng-jar-with-dependencies.jar
 
 Dependencies:
-  com.keyfactor:cryptotokens-api:3.0.0
-  com.keyfactor:cryptotokens-impl:3.0.0
+  com.keyfactor:cryptotokens-api:4.1.0
+  com.keyfactor:cryptotokens-impl:4.1.0
   org.pkcs11:jacknji11:1.3.1
-  org.cesecore:cesecore-common:9.3.7
-  com.keyfactor:x509-common-util:5.3.5
+  org.cesecore:cesecore-common:9.6.3
+  com.keyfactor:x509-common-util:5.11.1
 ```
 
 To upgrade EJBCA, update `ejbca_version`, `ejbca_digest` and `ejbca_deps` in the justfile and the
 matching `FROM` in `docker/Dockerfile` — the base image is pinned by digest in both places so that
-the JARs extracted for the build and the image they run in are the same bytes. Then:
+the JARs extracted for the build and the image they run in are the same bytes — and move
+`maven.compiler.release` to the new image's Java version. What to check first, and what has broken
+before, is in [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md);
+`scripts/api-diff.sh OLD_LIB NEW_LIB` compares the EJBCA API surface between two releases. Then:
 
 ```bash
 just extract-jars-fresh setup docker-build
@@ -242,6 +278,12 @@ Testcontainers:
 - Root CAs at ML-DSA-44, ML-DSA-65, ML-DSA-87, SLH-DSA-SHA2-128F, EC P-384, RSA-PSS and Hybrid
   (RSA + ML-DSA alternative), each issuing a certificate whose signature algorithm OID is checked
 - `cryptotoken testkey` for each signing algorithm, and its refusal for ML-KEM
+- A token created through EJBCA's own CLI is stored as `Pkcs11NgCryptoToken`, and the restored classic
+  `PKCS11CryptoToken` creates, generates and tests a key (the HSM overlay, on 9.6)
+
+`scripts/upgrade-swap.sh OLD_IMAGE NEW_IMAGE` covers what none of these can, because they all start
+from an empty database: it starts the new image on an old deployment's database and token, and passes
+only if the CA signs again with the same keys.
 
 **CLI integration tests** (`CliContainerIT`) run the tool from `PATH` inside the same image, against
 real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA and a symmetric key, each generated, signed with,
@@ -253,8 +295,8 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 655 unit tests + 4 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 24 EJBCA + 21 CLI integration tests (~5 min)
+mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
@@ -323,11 +365,14 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 24 tests,
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 26 tests,
                                      #   HsmConformanceIT — real-hardware contract)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
+  docker/ejbca-hsm/                  # EJBCA 9.6 overlay: start-up check patcher + restored classic tokens (LGPL, see NOTICE)
+  scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
+  docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)
   pom.xml                            # Maven build (ch.ithings:kimbo11ng)

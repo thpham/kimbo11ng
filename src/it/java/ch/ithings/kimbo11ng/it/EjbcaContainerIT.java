@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Integration tests against a full EJBCA + SoftHSMv3 stack.
  *
  * Prerequisites:
- *   - just docker-build  (image ghcr.io/thpham/ejbca-ce:latest must exist locally)
+ *   - just docker-build  (image ghcr.io/thpham/kimbo11ng-ejbca:latest must exist locally)
  *
  * Run with:
  *   mvn verify -Pit
@@ -68,15 +68,15 @@ class EjbcaContainerIT {
     // docker-compose.it.yml — IT-specific compose file without fixed host port bindings.
     // Testcontainers maps container ports to random ephemeral host ports; use
     // getServiceHost/getServicePort to discover them.  This avoids conflicts with
-    // a running dev stack (docker-compose.yml uses fixed ports 8080/8443/9443).
+    // a running dev stack (docker-compose.yml maps fixed host ports, 8080/8443/9443 by default).
     @Container
     static final ComposeContainer COMPOSE = new ComposeContainer(
             new File("src/it/docker-compose.it.yml"))
         // ComposeContainer runs `docker compose pull` before `up` unless told not to, and only
         // falls back to local images when that pull *throws*. The compose file names
-        // ghcr.io/thpham/ejbca-ce:latest, which is published — so a successful pull silently
-        // replaces the image `just docker-build` just produced, and the suite then validates the
-        // last release instead of the working tree. Which of the two ran depended on whether a
+        // ghcr.io/thpham/kimbo11ng-ejbca:latest, a name that is published whenever CI's push job is
+        // enabled — so a successful pull silently replaces the image `just docker-build` just
+        // produced, and the suite then validates the last release instead of the working tree. Which of the two ran depended on whether a
         // network call succeeded, and nothing in the output said which.
         //
         // Disabling it does not break a clean machine: `docker compose up` still pulls images
@@ -719,11 +719,19 @@ class EjbcaContainerIT {
     }
 
     @Test @Order(19)
-    void testMlKemKey_refusesWithAnExplanation() throws Exception {
+    void testMlKemKey_isRefused() throws Exception {
         // EJBCA's key test has two branches, sign and RSA-style encrypt/decrypt, chosen from the
-        // key-usage set. An ML-KEM key honestly reports CKA_DECRYPT and no CKA_SIGN, so it lands
-        // in the encryption branch — and encapsulation is not encryption. Without the interception
-        // this fails inside a JCA Cipher with a message about padding.
+        // key-usage set. An ML-KEM key reports an encryption usage and no CKA_SIGN, so it lands in
+        // the encryption branch — and encapsulation is not encryption, so it can only fail.
+        //
+        // What can be asserted depends on the EJBCA release. On 9.3.7 the token itself intercepted
+        // the test and said "key-encapsulation". On 9.6.3 every token is wrapped in
+        // CryptoTokenCompositeWrapper, which does not override testKeyPair, so BaseCryptoToken's
+        // runs on the wrapper and the token's override is never reached; the message is EJBCA's own.
+        // What must hold on both is that the test FAILS, and names the algorithm — a KEM key must
+        // never pass a test that cannot exercise it. The explanation is still asserted where the
+        // override is reachable: KeyUsageTest.KemKeys calls the token directly.
+        // See docs/EJBCA_UPSTREAM_WATCH.md, W3.
         org.testcontainers.containers.Container.ExecResult r =
             ejbcaContainer().execInContainer(
                 "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
@@ -731,8 +739,6 @@ class EjbcaContainerIT {
 
         assertEquals(1, r.getExitCode(),
             "testkey on a KEM key must fail, not silently pass.\nstdout: " + r.getStdout());
-        assertTrue(r.getStdout().contains("key-encapsulation"),
-            "the failure must say why. Output: " + r.getStdout());
         assertTrue(r.getStdout().contains("ML-KEM-768"),
             "the failure must name the algorithm. Output: " + r.getStdout());
     }
@@ -844,6 +850,59 @@ class EjbcaContainerIT {
             .getInstance("X.509")
             .generateCertificate(new java.io.ByteArrayInputStream(
                 pem.getStdout().getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
+
+    // ─── EJBCA 9.6 overlay (docker/ejbca-hsm) ─────────────────────────────────
+    //
+    // 9.6 refuses to start with a non-Soft, non-Null token in the database, and removed the classic
+    // PKCS11CryptoToken. The whole suite already proves the first — TestHSM is a Pkcs11NgCryptoToken
+    // row and EJBCA was restarted with it — so these two cover what that does not.
+
+    @Test @Order(24)
+    void tokenCreatedThroughEjbca_isStoredAsPkcs11Ng() throws Exception {
+        // TestHSM is inserted with SQL. A token created by EJBCA's own code takes its stored type
+        // from getConcreteClass().getSimpleName() on 9.6's CryptoTokenCompositeWrapper, and a wrong
+        // value is a row the 9.6 start-up check would count as unsupported. See W3 in
+        // docs/EJBCA_UPSTREAM_WATCH.md.
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "create",
+            "--token", "ItNgViaCli", "--pin", "1234", "--autoactivate", "true",
+            "--type", "Pkcs11NgCryptoToken",
+            "--lib", "/usr/local/lib/softhsm/libsofthsmv3.so",
+            "--slotlabeltype", "SLOT_LABEL", "--slotlabel", "TestToken");
+
+        ContainerState pg = COMPOSE.getContainerByServiceName("postgres-1").orElseThrow(
+            () -> new IllegalStateException("postgres-1 container not found"));
+        org.testcontainers.containers.Container.ExecResult r = pg.execInContainer(
+            "psql", "-U", "ejbca", "-d", "ejbca", "-tAc",
+            "SELECT tokenType FROM CryptoTokenData WHERE tokenName='ItNgViaCli';");
+        assertEquals("Pkcs11NgCryptoToken", r.getStdout().trim(),
+            "stdout: " + r.getStdout() + " stderr: " + r.getStderr());
+
+        // And it works: a key of a post-quantum family, generated and listed through the wrapper.
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "ItNgViaCli", "--alias", "it-viacli", "--keyspec", "ML-DSA-65");
+        org.testcontainers.containers.Container.ExecResult keys = ejbca.execInContainer(
+            "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "listkeys", "--token", "ItNgViaCli");
+        assertTrue(keys.getStdout().contains("it-viacli") && keys.getStdout().contains("ML-DSA-65"),
+            "listkeys output: " + keys.getStdout());
+    }
+
+    @Test @Order(25)
+    void restoredPkcs11CryptoToken_generatesAndTestsAKey() throws Exception {
+        // PKCS11CryptoToken is the class docker/ejbca-hsm compiles into the image, since 9.6 removed
+        // it from cryptotokens-impl. Creating one through EJBCA exercises the registration, the class
+        // and the slot lister together, and the key test signs on the token through SunPKCS11.
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "create",
+            "--token", "ItClassic", "--pin", "1234", "--autoactivate", "true",
+            "--type", "PKCS11CryptoToken",
+            "--lib", "/usr/local/lib/softhsm/libsofthsmv3.so",
+            "--slotlabeltype", "SLOT_LABEL", "--slotlabel", "TestToken");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "ItClassic", "--alias", "it-classic", "--keyspec", "2048");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
+            "--token", "ItClassic", "--alias", "it-classic");
     }
 
     private static ContainerState ejbcaContainer() {

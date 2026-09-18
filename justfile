@@ -6,13 +6,13 @@ set dotenv-load := false
 # ─── Version matrix (single source of truth) ─────────────────────────────────
 # Change these when upgrading EJBCA or its dependencies.
 
-ejbca_version   := "9.3.7"
-# Multi-arch index digest of keyfactor/ejbca-ce:9.3.7, and the same value docker/Dockerfile
-# FROMs. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
+ejbca_version   := "9.6.3"
+# Multi-arch index digest of keyfactor/ejbca-ce:9.6.3, and the same value docker/Dockerfile
+# defaults EJBCA_IMAGE to. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
 # and a tag that moved between `just setup` and the image build would compile against one EJBCA
 # and run against another. Resolve a new one with
 # `docker buildx imagetools inspect keyfactor/ejbca-ce:<version>` when bumping ejbca_version.
-ejbca_digest    := "sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a"
+ejbca_digest    := "sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164"
 ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version + "@" + ejbca_digest
 openssl_version := "3.6.0"
 # softhsmv3 (now pqctoday-org/pqctoday-hsm) is built from source. Pinned to a release tag:
@@ -26,7 +26,7 @@ softhsm_version := "v0.28.1"
 # EJBCA dependency JARs: "filename groupId artifactId version"
 # Extracted from the base image and installed to local Maven repo.
 # Update this list when EJBCA bumps dependency versions.
-ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 cryptotokens-impl-3.0.0.jar:com.keyfactor:cryptotokens-impl:3.0.0 jacknji11-1.3.1.jar:org.pkcs11:jacknji11:1.3.1 cesecore-common.jar:org.cesecore:cesecore-common:" + ejbca_version + " x509-common-util-5.3.5.jar:com.keyfactor:x509-common-util:5.3.5"
+ejbca_deps := "cryptotokens-api-4.1.0.jar:com.keyfactor:cryptotokens-api:4.1.0 cryptotokens-impl-4.1.0.jar:com.keyfactor:cryptotokens-impl:4.1.0 jacknji11-1.3.1.jar:org.pkcs11:jacknji11:1.3.1 cesecore-common.jar:org.cesecore:cesecore-common:" + ejbca_version + " x509-common-util-5.11.1.jar:com.keyfactor:x509-common-util:5.11.1"
 
 # OpenSSL and SoftHSMv3 are compiled once into their own image rather than on every image
 # build — see docker/Dockerfile.toolchain. The tag encodes both versions, so bumping either
@@ -150,7 +150,7 @@ build-quick:
 test:
     cd {{module_dir}} && mvn clean verify
 
-# The integration suite runs against ghcr.io/thpham/ejbca-ce:latest as it exists in the local
+# The integration suite runs against ghcr.io/thpham/kimbo11ng-ejbca:latest as it exists in the local
 # daemon — src/it/docker-compose.it.yml has no build: block. So `just docker-build` first, or
 # you are testing whatever image happens to be there.
 #
@@ -199,12 +199,12 @@ toolchain-build:
 
 # Build the Docker image (EJBCA + softhsmv3 + kimbo11ng)
 docker-build: build
-    docker build -f docker/Dockerfile -t ghcr.io/thpham/ejbca-ce:latest \
+    docker build -f docker/Dockerfile -t ghcr.io/thpham/kimbo11ng-ejbca:latest \
         --build-arg TOOLCHAIN={{toolchain_image}} .
 
 # Build Docker image without cache
 docker-build-nocache: build
-    docker build -f docker/Dockerfile -t kimbo11ng-ejbca \
+    docker build -f docker/Dockerfile -t ghcr.io/thpham/kimbo11ng-ejbca:latest \
         --build-arg TOOLCHAIN={{toolchain_image}} --no-cache .
 
 # Start all services (EJBCA + MariaDB)
@@ -335,7 +335,10 @@ create-token:
     echo "Created TestHSM (Pkcs11NgCryptoToken) with id=$TOKEN_ID"
     echo "Restarting EJBCA to pick up the new token..."
     docker compose restart ejbca
-    sleep 20
+    # Not a fixed sleep: EJBCA takes a minute or more to come back, and reporting "Done" before that
+    # sends people to an admin UI that is not up yet.
+    echo "Waiting for EJBCA to be healthy..."
+    docker compose exec -T ejbca sh -c 'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done' || true
     echo "Done."
 
 # ─── CI helpers ───────────────────────────────────────────────────────────────

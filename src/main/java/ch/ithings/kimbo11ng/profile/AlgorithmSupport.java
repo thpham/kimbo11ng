@@ -30,7 +30,7 @@ import java.util.function.Predicate;
  * <ul>
  *   <li>The token does not offer the mechanism. Key generation then failed inside EJBCA with
  *       {@code CKR_MECHANISM_INVALID} and no indication of which mechanism was asked for.
- *   <li>The deployed BouncyCastle cannot materialise the key type. EJBCA 9.3.7 ships BC 1.79+ with
+ *   <li>The deployed BouncyCastle cannot materialise the key type. EJBCA 9.3.7 and later ship BC 1.79+ with
  *       ML-DSA and SLH-DSA, but a container built against an older one would generate the key on
  *       the token, fail to read it back, and leave an orphan key behind. This is also what replaces
  *       the deleted {@code RawPqcPublicKey} fallback: an algorithm BC cannot recognise is excluded
@@ -139,7 +139,7 @@ public final class AlgorithmSupport {
             return true;
         } catch (Exception e) {
             log.warn("BouncyCastle on this classpath has no KeyFactory for " + family.jcaName()
-                    + "; keys of that family will not be offered. EJBCA 9.3.7 ships"
+                    + "; keys of that family will not be offered. EJBCA 9.3.7 and later ship"
                     + " BouncyCastle 1.79 or later, which has one.");
             return false;
         }

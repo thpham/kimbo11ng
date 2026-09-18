@@ -13,3 +13,6 @@ deps/**
 # Build artifacts
 *.class
 *.jar
+
+# Local compose overrides, e.g. host port mappings (see docker-compose.yml)
+.env

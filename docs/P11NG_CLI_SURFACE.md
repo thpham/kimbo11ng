@@ -315,6 +315,8 @@ encrypt  decrypt  sign  verify  move  linkcert
 — the same kind of omission as `p11ng-cli`'s missing `listkeypairs`.) It is a richer *PKI* tool than
 `p11ng-cli` — it does CSRs, certificate installation, link certificates, key migration between
 tokens — and a poorer *PKCS#11* tool: no slot listing, no token info, no object inspection.
+`HSMKeyTool.java` is unchanged in `r9.6.3` (diffed against `r9.3.7` on 2026-09-18), so this baseline
+holds for both releases.
 
 **It goes through SunPKCS11.** Its key-spec help string is
 `"all decimal digits RSA key with specified length, otherwise name of ECC curve or DSA key using

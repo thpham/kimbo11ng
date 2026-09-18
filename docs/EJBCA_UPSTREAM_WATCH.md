@@ -114,8 +114,9 @@ stay `Pkcs11NgCryptoToken`: any other value is a row the W1 check counts as an u
   `BaseCryptoToken` method the wrapper does not forward would be silently bypassed the same way.
 - **Detect:** after creating a token through the Admin UI or CLI, read `CryptoTokenData.tokenType`;
   `javap` the wrapper for the methods it declares.
-- **Status:** token type verified (the integration suite creates `Pkcs11NgCryptoToken` rows and issues
-  from them); the `testKeyPair` bypass measured as above.
+- **Status:** verified. `EjbcaContainerIT.tokenCreatedThroughEjbca_isStoredAsPkcs11Ng` creates a token
+  with EJBCA's own CLI and reads `tokenType` from the database, then generates and lists a key; the
+  `testKeyPair` bypass is measured as above.
 
 ### W4. BouncyCastle gets stricter about post-quantum keys
 
@@ -141,10 +142,14 @@ usage sets to `CryptoToken`, turns `getKeyUsagesFrom*` into default methods, and
 - **Effect on kimbo11ng:** `Kimbo11ngCryptoToken.testKeyPair` refuses ML-KEM before calling the
   base class, so a KEM key still never reaches that encryption test. That guard is now doing more
   work, not less.
-- **Open question:** `kimbo11ng.pqc.kemUsage` defaults to `both` because 9.3.7 only understood
-  `CKA_DECRYPT` (see the README). Upstream now names `{1588}` as the ML-KEM private-key usage set, so
-  `v32` may now be safe. Decide it from what the Admin UI shows for an ML-KEM key on 9.6.3, not from
-  this file.
+- **`kimbo11ng.pqc.kemUsage` stays `both`.** Settled from source on 2026-09-18. What EJBCA sees is
+  `getKeyUsagesFromPrivateKey`, and kimbo11ng asks the token only for `{CKA_DECRYPT, CKA_SIGN}`
+  whatever `kemUsage` says, so the encapsulation attributes never reach EJBCA and the new 1588 branch
+  in `BaseCryptoToken.testKeyPair` is never taken for these keys. The label the UI shows comes from
+  `CryptoTokenManagementSessionBean.getKeyUsageStringForKeyPairInfo`, which in 9.6.3 is unchanged and
+  still recognises only `{261}`, `{264}` and `{261,264}`. With `both` or `legacy` an ML-KEM key
+  reports `{261}` and shows as ENCRYPT; with `v32` it has no `CKA_DECRYPT`, reports `{}`, and shows no
+  usage. Revisit only if that method learns 1588.
 - **Also new:** `getKeyAttestation`, `isInstanceOf`, `getConcreteToken`, `getConcreteClass`,
   `clearCache`. All are defaults; nothing to implement.
 - **Status:** guard verified by the unit suite; UI behaviour unverified.
@@ -181,7 +186,7 @@ alternative signing key, and drops the legacy CA-token upgrade code.
 
 - **Effect:** none expected on kimbo11ng, which does not look at CA token properties. The hybrid
   (RSA/EC + ML-DSA) integration test is the check.
-- **Status:** unverified at runtime.
+- **Status:** verified on 9.6.3: the hybrid, ML-DSA, SLH-DSA, EC and RSA-PSS CAs all issue.
 
 ### W9. The Java runtime
 
@@ -233,5 +238,11 @@ position above.
 6. **Bump the pins** together: `justfile` (`ejbca_version`, `ejbca_digest`, `ejbca_deps`),
    `docker/Dockerfile` `FROM`, `pom.xml` versions, `.github/workflows/ci.yml`.
 7. **Run** `just extract-jars-fresh setup docker-build`, then `mvn verify -Pit`.
-8. **Record** what changed in the baseline and the compile-target tables, add a watch item for any
+8. **Swap the image under a live deployment.** Build the old release's image from a checkout of its
+   tag, then `scripts/upgrade-swap.sh OLD_IMAGE NEW_IMAGE`. The integration suite always starts from an
+   empty database; this starts the new image on the old one's database and token, so EJBCA's own
+   upgrade runs, and passes only if the CA signs again with the same keys. Run for 9.3.7 → 9.6.3 on
+   2026-09-18: EJBCA upgraded the database, the token stayed `Pkcs11NgCryptoToken`, and the ML-DSA-65
+   CA signed CRL 3 on 9.6.3 after signing CRL 2 on 9.3.7, with identical key fingerprints.
+9. **Record** what changed in the baseline and the compile-target tables, add a watch item for any
    new behaviour, and update the README version matrix.

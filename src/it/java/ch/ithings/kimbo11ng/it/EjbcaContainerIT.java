@@ -852,6 +852,59 @@ class EjbcaContainerIT {
                 pem.getStdout().getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
     }
 
+    // ─── EJBCA 9.6 overlay (docker/ejbca-hsm) ─────────────────────────────────
+    //
+    // 9.6 refuses to start with a non-Soft, non-Null token in the database, and removed the classic
+    // PKCS11CryptoToken. The whole suite already proves the first — TestHSM is a Pkcs11NgCryptoToken
+    // row and EJBCA was restarted with it — so these two cover what that does not.
+
+    @Test @Order(24)
+    void tokenCreatedThroughEjbca_isStoredAsPkcs11Ng() throws Exception {
+        // TestHSM is inserted with SQL. A token created by EJBCA's own code takes its stored type
+        // from getConcreteClass().getSimpleName() on 9.6's CryptoTokenCompositeWrapper, and a wrong
+        // value is a row the 9.6 start-up check would count as unsupported. See W3 in
+        // docs/EJBCA_UPSTREAM_WATCH.md.
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "create",
+            "--token", "ItNgViaCli", "--pin", "1234", "--autoactivate", "true",
+            "--type", "Pkcs11NgCryptoToken",
+            "--lib", "/usr/local/lib/softhsm/libsofthsmv3.so",
+            "--slotlabeltype", "SLOT_LABEL", "--slotlabel", "TestToken");
+
+        ContainerState pg = COMPOSE.getContainerByServiceName("postgres-1").orElseThrow(
+            () -> new IllegalStateException("postgres-1 container not found"));
+        org.testcontainers.containers.Container.ExecResult r = pg.execInContainer(
+            "psql", "-U", "ejbca", "-d", "ejbca", "-tAc",
+            "SELECT tokenType FROM CryptoTokenData WHERE tokenName='ItNgViaCli';");
+        assertEquals("Pkcs11NgCryptoToken", r.getStdout().trim(),
+            "stdout: " + r.getStdout() + " stderr: " + r.getStderr());
+
+        // And it works: a key of a post-quantum family, generated and listed through the wrapper.
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "ItNgViaCli", "--alias", "it-viacli", "--keyspec", "ML-DSA-65");
+        org.testcontainers.containers.Container.ExecResult keys = ejbca.execInContainer(
+            "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "listkeys", "--token", "ItNgViaCli");
+        assertTrue(keys.getStdout().contains("it-viacli") && keys.getStdout().contains("ML-DSA-65"),
+            "listkeys output: " + keys.getStdout());
+    }
+
+    @Test @Order(25)
+    void restoredPkcs11CryptoToken_generatesAndTestsAKey() throws Exception {
+        // PKCS11CryptoToken is the class docker/ejbca-hsm compiles into the image, since 9.6 removed
+        // it from cryptotokens-impl. Creating one through EJBCA exercises the registration, the class
+        // and the slot lister together, and the key test signs on the token through SunPKCS11.
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "create",
+            "--token", "ItClassic", "--pin", "1234", "--autoactivate", "true",
+            "--type", "PKCS11CryptoToken",
+            "--lib", "/usr/local/lib/softhsm/libsofthsmv3.so",
+            "--slotlabeltype", "SLOT_LABEL", "--slotlabel", "TestToken");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "ItClassic", "--alias", "it-classic", "--keyspec", "2048");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
+            "--token", "ItClassic", "--alias", "it-classic");
+    }
+
     private static ContainerState ejbcaContainer() {
         return COMPOSE.getContainerByServiceName("ejbca-1").orElseThrow(
             () -> new IllegalStateException("ejbca-1 container not found"));

@@ -267,6 +267,12 @@ Testcontainers:
 - Root CAs at ML-DSA-44, ML-DSA-65, ML-DSA-87, SLH-DSA-SHA2-128F, EC P-384, RSA-PSS and Hybrid
   (RSA + ML-DSA alternative), each issuing a certificate whose signature algorithm OID is checked
 - `cryptotoken testkey` for each signing algorithm, and its refusal for ML-KEM
+- A token created through EJBCA's own CLI is stored as `Pkcs11NgCryptoToken`, and the restored classic
+  `PKCS11CryptoToken` creates, generates and tests a key (the HSM overlay, on 9.6)
+
+`scripts/upgrade-swap.sh OLD_IMAGE NEW_IMAGE` covers what none of these can, because they all start
+from an empty database: it starts the new image on an old deployment's database and token, and passes
+only if the CA signs again with the same keys.
 
 **CLI integration tests** (`CliContainerIT`) run the tool from `PATH` inside the same image, against
 real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA and a symmetric key, each generated, signed with,
@@ -279,7 +285,7 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 24 EJBCA + 23 CLI integration tests (~5 min)
+mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
@@ -348,7 +354,7 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 24 tests,
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 26 tests,
                                      #   HsmConformanceIT — real-hardware contract)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)

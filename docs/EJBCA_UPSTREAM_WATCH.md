@@ -209,12 +209,15 @@ published, which is why **a built image is for local use and is never published*
 position, not a code detail: re-read it whenever Keyfactor changes its CE licence, terms or
 `README`.
 
-**CI publishes an image today.** `.github/workflows/ci.yml` builds `docker/Dockerfile` and, on a push
-to `main`, pushes it to `ghcr.io/thpham/ejbca-ce` (the repository is public). That was already a
-redistribution of Keyfactor's image with the kimbo11ng jar added. Merging the 9.6.3 branch as it
-stands would make it a redistribution of an image containing a *modified* Keyfactor jar and the
-restored LGPL classes. The `push` and `merge` jobs are unchanged on this branch and **must not run for
-it until that is decided**; the decision is the repository owner's.
+**CI publishing is disabled.** `.github/workflows/ci.yml` used to build `docker/Dockerfile` and, on a
+push to `main`, push it to `ghcr.io/thpham/ejbca-ce` (the repository is public). That was already a
+redistribution of Keyfactor's image with the kimbo11ng jar added; with the overlay it would be a
+redistribution of a *modified* Keyfactor jar plus the restored LGPL classes. The `push` and `merge`
+jobs are therefore set to `if: false` on this branch, with a comment saying why. The `test` job still
+builds the image locally on the runner and runs the suite against it; only publishing is off. The
+toolchain image (`toolchain.yml`: OpenSSL and SoftHSMv3, nothing of Keyfactor's) is unaffected.
+Re-enabling publishing is the repository owner's decision, and should follow a decision on the licensing
+position above.
 
 ## On each EJBCA bump
 

@@ -80,7 +80,7 @@ jobs:
 
   # ─── Build Docker image + integration tests (main only) ─────────────────────
   # Builds amd64 image into local daemon, runs the full test suite against it.
-  # Image is NOT pushed — that only happens in the push job after tests pass.
+  # Image is NOT pushed. The push job that would publish it is disabled, see its comment.
   test:
     needs: build
     runs-on: ubuntu-latest
@@ -166,7 +166,11 @@ jobs:
   # just slow again.
   push:
     needs: test
-    if: github.ref == 'refs/heads/main'
+    # DISABLED: publishing is off until the licensing question is decided (docs/EJBCA_UPSTREAM_WATCH.md,
+    # W11). The image built from this branch contains a modified Keyfactor ejbca-ejb.jar and the
+    # restored LGPL crypto token classes, on top of base jars whose source Keyfactor does not publish,
+    # and this repository is public. Restore `github.ref == 'refs/heads/main'` only once that is settled.
+    if: false
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -237,7 +241,11 @@ jobs:
   merge:
     needs: push
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # DISABLED: publishing is off until the licensing question is decided (docs/EJBCA_UPSTREAM_WATCH.md,
+    # W11). The image built from this branch contains a modified Keyfactor ejbca-ejb.jar and the
+    # restored LGPL crypto token classes, on top of base jars whose source Keyfactor does not publish,
+    # and this repository is public. Restore `github.ref == 'refs/heads/main'` only once that is settled.
+    if: false
     permissions:
       contents: read
       packages: write

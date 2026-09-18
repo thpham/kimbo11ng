@@ -49,10 +49,10 @@ class HsmContractFakeTest extends HsmContract {
 
     @Override
     protected boolean verifiesSignaturesFor(String jcaName) {
-        // The fake signs RSA and EC for real, through BouncyCastle, so those are verified here.
-        // Post-quantum signatures are synthetic — the fake has no ML-DSA implementation, and a
-        // wrong-length blob would be a worse lie than an obviously fake one — so only the hardware
-        // run can check those.
-        return !jcaName.startsWith("ML-") && !jcaName.startsWith("SLH-");
+        // The fake signs RSA, EC and ML-DSA for real, through BouncyCastle, so those are verified
+        // here. SLH-DSA stays synthetic: its key generation and signing cost seconds each, which is
+        // not worth paying in a suite this size, so only the hardware run checks it. See
+        // FakeToken.pqcMaterial.
+        return !jcaName.startsWith("SLH-");
     }
 }

@@ -1050,45 +1050,94 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     /**
-     * Public-key material of {@code size} bytes: random, except where the size is an ML-KEM
-     * encapsulation key.
+     * Post-quantum key material for a public key of {@code size} bytes.
      *
-     * <p>BouncyCastle 1.84 (EJBCA 9.6.3) runs FIPS 203's modulus check on every ML-KEM public key
-     * it decodes, so random bytes of the right length are refused. 1.80.2 (EJBCA 9.3.7) accepted
-     * them. A real token always emits a valid key, so the fake has to as well. The three ML-KEM
-     * lengths are disjoint from ML-DSA's (1312/1952/2592) and SLH-DSA's (32/48/64), which have no
-     * such check and stay random.
+     * @param publicMaterial the raw public key, as {@code CKA_VALUE} would hold it
+     * @param privatePkcs8 the matching private key, or {@code null} where this fake does not sign
+     *        for real; see {@link #pqcMaterial(int)}
+     * @param signAlgorithm what {@link #sign} should do with it
      */
-    private static byte[] publicKeyMaterial(int size) {
+    private record PqcMaterial(byte[] publicMaterial, byte[] privatePkcs8, String signAlgorithm) {
+    }
+
+    /**
+     * Post-quantum material of {@code size} bytes, real wherever being real matters.
+     *
+     * <p><b>ML-KEM</b> (800/1184/1568) is a genuine encapsulation key because BouncyCastle 1.84
+     * (EJBCA 9.6.3) runs FIPS 203's modulus check on every ML-KEM public key it decodes, so random
+     * bytes of the right length are refused. 1.80.2 (EJBCA 9.3.7) accepted them. A real token
+     * always emits a valid key, so the fake has to as well.
+     *
+     * <p><b>ML-DSA</b> (1312/1952/2592) is a genuine signing key, private half kept, so a signature
+     * this fake produces verifies against the public key it handed out. That is what lets a test
+     * assert the whole path — {@code Kimbo11ngSignatureSpi}, the mechanism choice, and the public
+     * key {@code PublicKeyReader} rebuilds — rather than only that bytes came back. Before this,
+     * every PQC signature was 64 random bytes, and nothing caught it because nothing verified one.
+     *
+     * <p><b>SLH-DSA</b> (32/48/64) stays random and unsigned: its keygen and signing cost seconds,
+     * which is not worth paying in every test that touches the algorithm table. A signature over an
+     * SLH-DSA key is therefore still synthetic, and {@code HsmConformanceIT} against SoftHSMv3 is
+     * what covers it.
+     *
+     * <p>The three length sets are disjoint, which is what makes dispatching on size safe.
+     */
+    private static PqcMaterial pqcMaterial(int size) {
         String kemParameterSet = switch (size) {
             case 800 -> "ML-KEM-512";
             case 1184 -> "ML-KEM-768";
             case 1568 -> "ML-KEM-1024";
             default -> null;
         };
-        if (kemParameterSet == null) {
-            byte[] material = new byte[size];
-            RANDOM.nextBytes(material);
-            return material;
+        if (kemParameterSet != null) {
+            return new PqcMaterial(generated("ML-KEM",
+                    org.bouncycastle.jcajce.spec.MLKEMParameterSpec.fromName(kemParameterSet), null),
+                    null, "PQC");
         }
+        String dsaParameterSet = switch (size) {
+            case 1312 -> "ML-DSA-44";
+            case 1952 -> "ML-DSA-65";
+            case 2592 -> "ML-DSA-87";
+            default -> null;
+        };
+        if (dsaParameterSet != null) {
+            byte[][] pair = new byte[1][];
+            byte[] material = generated("ML-DSA",
+                    org.bouncycastle.jcajce.spec.MLDSAParameterSpec.fromName(dsaParameterSet), pair);
+            return new PqcMaterial(material, pair[0], "ML-DSA");
+        }
+        byte[] material = new byte[size];
+        RANDOM.nextBytes(material);
+        return new PqcMaterial(material, null, "PQC");
+    }
+
+    /**
+     * The raw public key of a fresh BouncyCastle key pair, and its private half in
+     * {@code privateOut[0]} when one is wanted.
+     */
+    private static byte[] generated(String algorithm, java.security.spec.AlgorithmParameterSpec spec,
+            byte[][] privateOut) {
         try {
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-KEM", BC);
-            kpg.initialize(org.bouncycastle.jcajce.spec.MLKEMParameterSpec.fromName(kemParameterSet), RANDOM);
-            return SubjectPublicKeyInfo.getInstance(kpg.generateKeyPair().getPublic().getEncoded())
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance(algorithm, BC);
+            kpg.initialize(spec, RANDOM);
+            KeyPair kp = kpg.generateKeyPair();
+            if (privateOut != null) {
+                privateOut[0] = kp.getPrivate().getEncoded();
+            }
+            return SubjectPublicKeyInfo.getInstance(kp.getPublic().getEncoded())
                     .getPublicKeyData().getOctets();
         } catch (java.security.GeneralSecurityException e) {
-            throw new IllegalStateException("cannot generate " + kemParameterSet + " material", e);
+            throw new IllegalStateException("cannot generate " + algorithm + " material", e);
         }
     }
 
     /** Generates post-quantum material of the length and key type the profile's row declares. */
     private void generateFromEntry(AlgorithmEntry entry, Map<Long, byte[]> pub,
             Map<Long, byte[]> priv) {
-        byte[] material = publicKeyMaterial(entry.publicKeyLength());
-        pub.put(CKA.VALUE, publicValue(material));
+        PqcMaterial material = pqcMaterial(entry.publicKeyLength());
+        pub.put(CKA.VALUE, publicValue(material.publicMaterial()));
         pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
         priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
-        priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
+        rememberPqcPrivate(priv, material);
     }
 
     private void generateRsa(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
@@ -1148,13 +1197,13 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
             size = mapped;
         }
-        byte[] material = publicKeyMaterial(size);
-        pub.put(CKA.VALUE, publicValue(material));
+        PqcMaterial material = pqcMaterial(size);
+        pub.put(CKA.VALUE, publicValue(material.publicMaterial()));
         // putIfAbsent, not put: PKCS#11 validates CKA_KEY_TYPE from the template rather than
         // overwriting it, so a vendor profile's own key type must survive generation.
         pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
         priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
-        priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
+        rememberPqcPrivate(priv, material);
     }
 
     /** Applies the {@link #pqcSpkiOid} knob to freshly generated public-key material. */
@@ -1249,6 +1298,14 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return CKR.OK;
     }
 
+    /** Records how {@link #sign} should answer for a freshly generated post-quantum private key. */
+    private static void rememberPqcPrivate(Map<Long, byte[]> priv, PqcMaterial material) {
+        priv.put(SIGN_ALGORITHM, material.signAlgorithm().getBytes(StandardCharsets.UTF_8));
+        if (material.privatePkcs8() != null) {
+            priv.put(PRIVATE_MATERIAL, material.privatePkcs8());
+        }
+    }
+
     private byte[] sign(Session s, byte[] data) throws Exception {
         Map<Long, byte[]> key = objects.get(s.signKey);
         byte[] alg = key.get(SIGN_ALGORITHM);
@@ -1262,8 +1319,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return mac.doFinal(data);
         }
         if ("PQC".equals(algorithm)) {
-            // No real PQC signing: nothing under test verifies these, and a wrong-length blob
-            // would be a worse lie than an obviously synthetic one of plausible size.
+            // SLH-DSA and vendor-table entries whose length matches no standard parameter set: no
+            // private half was kept, so there is nothing to sign with. A wrong-length blob would be
+            // a worse lie than an obviously synthetic one. ML-DSA does not come through here — see
+            // pqcMaterial.
             byte[] fake = new byte[64];
             RANDOM.nextBytes(fake);
             return fake;
@@ -1292,6 +1351,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     private static String signatureAlgorithm(long ckm, String keyAlgorithm) {
+        if ("ML-DSA".equals(keyAlgorithm)) {
+            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest
+            // and no context string, which is what BouncyCastle's bare "ML-DSA" does.
+            return "ML-DSA";
+        }
         if ("EC".equals(keyAlgorithm)) {
             // CKM_ECDSA is the raw mechanism: its input is an already-computed hash, and a token
             // signs it as it stands. Answering it with a digesting algorithm would hash on the

@@ -33,4 +33,16 @@ public class Pkcs11NgCryptoToken extends Kimbo11ngCryptoToken {
     public Pkcs11NgCryptoToken() throws InstantiationException {
         super();
     }
+
+    /**
+     * For tests, which supply a registry backed by a fake token.
+     *
+     * <p>Tests drive this class rather than its parent on purpose: this FQN is the one EJBCA
+     * instantiates, and {@code getSimpleName()} on it is what lands in the database as
+     * {@code tokenType}.
+     */
+    protected Pkcs11NgCryptoToken(ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry modules)
+            throws InstantiationException {
+        super(modules);
+    }
 }

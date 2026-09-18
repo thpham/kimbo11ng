@@ -199,7 +199,63 @@ class P11SlotSigningTest {
                 "ML-KEM is key establishment; registering it as a Signature would be wrong");
     }
 
+    @Test
+    @DisplayName("a second signature on the same instance covers only its own message")
+    void signingResetsTheBuffer() throws Exception {
+        long[] handles = generateRsa(2048);
+        PublicKey pub = fixture.onSession((ce, session) ->
+                PublicKeyReader.readRsaPublicKey(ce, session, handles[0]));
+        byte[] first = "first message".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "second message".getBytes(StandardCharsets.UTF_8);
+
+        Signature signer = newSigner("SHA256withRSA", handles[1], "RSA");
+        signer.update(first);
+        signer.sign();
+        // The JCA contract: sign() leaves the object as after initSign. Reusing one, as EJBCA does
+        // when it signs a CRL and then a certificate, must not carry the last message forward.
+        signer.update(second);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance("SHA256withRSA",
+                BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(pub);
+        verifier.update(second);
+        assertTrue(verifier.verify(signature), "the signature must cover the second message alone");
+    }
+
+    @Test
+    @DisplayName("initSign discards whatever was fed to the instance before")
+    void initSignResetsTheBuffer() throws Exception {
+        long[] handles = generateRsa(2048);
+        PublicKey pub = fixture.onSession((ce, session) ->
+                PublicKeyReader.readRsaPublicKey(ce, session, handles[0]));
+        byte[] data = "kimbo11ng".getBytes(StandardCharsets.UTF_8);
+
+        Signature signer = newSigner("SHA256withRSA", handles[1], "RSA");
+        signer.update("abandoned".getBytes(StandardCharsets.UTF_8));
+        signer.initSign(new Kimbo11ngPrivateKey("RSA", fixture.slot(),
+                new P11KeyRef(null, "test", null), handles[1]));
+        signer.update(data);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance("SHA256withRSA",
+                BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(pub);
+        verifier.update(data);
+        assertTrue(verifier.verify(signature));
+    }
+
     // ---- helpers ----
+
+    private Signature newSigner(String algorithm, long privateHandle, String keyAlgorithm)
+            throws Exception {
+        Kimbo11ngProvider provider = Kimbo11ngProvider.forToken(
+                new TokenRuntime(fixture.slot(), new Pkcs11v32Profile()));
+        Signature signer = Signature.getInstance(algorithm, provider);
+        signer.initSign(new Kimbo11ngPrivateKey(keyAlgorithm, fixture.slot(),
+                new P11KeyRef(null, "test", null), privateHandle));
+        return signer;
+    }
 
     private byte[] signWithProvider(String algorithm, long privateHandle, String keyAlgorithm,
             byte[] data) throws Exception {

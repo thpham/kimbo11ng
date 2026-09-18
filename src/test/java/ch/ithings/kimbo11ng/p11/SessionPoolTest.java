@@ -240,6 +240,35 @@ class SessionPoolTest {
     }
 
     @Test
+    @DisplayName("gives the permit back when opening a session fails, even at a ceiling of one")
+    void failedOpenReturnsThePermit() throws Exception {
+        // At the default ceiling a single leaked permit is invisible: nine more remain. With one
+        // permit the leak is the whole pool, and the second borrow times out.
+        SessionPool pool = pool(new SessionPoolConfig(1, 1));
+        token.failNextWith(CKR.TOKEN_NOT_PRESENT);
+        assertThrows(CryptoTokenOfflineException.class, pool::borrow);
+
+        try (SessionLease lease = pool.borrow()) {
+            assertTrue(lease.session() > 0);
+        }
+    }
+
+    @Test
+    @DisplayName("closes a session on the token when it is returned broken")
+    void brokenSessionIsClosedOnTheToken() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        try (SessionLease lease = pool.borrow()) {
+            assertEquals(1, token.openSessionCount());
+            lease.invalidate();
+        }
+
+        // Dropped from the pool's books is not enough: an HSM partition has a hard session limit,
+        // and a session only this side has forgotten still counts against it.
+        assertEquals(0, pool.liveSessions());
+        assertEquals(0, token.openSessionCount(), "the token still holds the discarded session");
+    }
+
+    @Test
     @DisplayName("reports a token that cannot open a session as offline")
     void openFailureIsOffline() {
         SessionPool pool = pool(SessionPoolConfig.defaults());

@@ -236,6 +236,7 @@ mvn verify -Pit
 | `just build`              | Build the fat JAR, gates included (`mvn clean verify`)                      |
 | `just build-quick`        | Package with no clean, tests or gates — for `just deploy` iteration only    |
 | `just test`               | Unit tests + every build gate, no Docker needed                             |
+| `just mutation`           | Mutation testing (PIT): which deliberate bugs the unit tests miss, ~8 min   |
 | `just it`                 | The above plus the integration suite — run `just docker-build` first        |
 | `just it-only`            | Integration tests alone, skipping the unit suite and the gates              |
 | `just cli`                | Run the command-line tool from the build tree                               |
@@ -271,6 +272,14 @@ hide or under-report a mechanism, refuse an attribute write.
   constants, so a vendor table is proved end to end and not merely for self-consistency
 - Build gates: enforcer, duplicate-finder, SpotBugs + findsecbugs, JaCoCo floor, `-Werror`
 
+**Mutation testing** (`just mutation`, PIT) asks the question coverage cannot: would a test fail if
+this line were wrong? It is deliberately outside `verify` and has no threshold yet. The first run
+(1506 mutants, 68% killed) found real gaps, several now closed: a leaked session-pool permit, a
+`Signature` that carried the previous message into the next signature, and EC point prefixes that
+nothing checked. Read survivors before acting on them. Some are equivalent mutants, and some mean
+`FakeToken` is more forgiving than a real HSM — in that case fix the fake and add the case to
+`HsmContract`, which also runs against SoftHSMv3. The report is `target/pit-reports/index.html`.
+
 **Integration tests** (`EjbcaContainerIT`) run against a full EJBCA CE stack managed by
 Testcontainers:
 
@@ -295,7 +304,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 738 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

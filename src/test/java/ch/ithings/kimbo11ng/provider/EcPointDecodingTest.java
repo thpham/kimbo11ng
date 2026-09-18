@@ -221,6 +221,82 @@ class EcPointDecodingTest {
     }
 
     @Nested
+    @DisplayName("the point encodings it accepts")
+    class Encodings {
+
+        private ECParameterSpec p256() throws Exception {
+            return EcPointCodec.parseCurve(
+                    new ASN1ObjectIdentifier("1.2.840.10045.3.1.7").getEncoded());
+        }
+
+        /** The generator in uncompressed form, with its first byte replaced. */
+        private byte[] uncompressedWithPrefix(ECParameterSpec spec, int prefix) {
+            byte[] point = spec.getG().getEncoded(false);
+            point[0] = (byte) prefix;
+            return point;
+        }
+
+        @Test
+        @DisplayName("a bare compressed point decodes to the same point, wrapped or not")
+        void compressed() throws Exception {
+            ECParameterSpec spec = p256();
+            byte[] compressed = spec.getG().getEncoded(true);
+            assertEquals(33, compressed.length);
+
+            assertEquals(spec.getG(), EcPointCodec.decodePoint(compressed, spec));
+            assertEquals(spec.getG(), EcPointCodec.decodePoint(
+                    new DEROctetString(compressed).getEncoded(), spec));
+        }
+
+        @Test
+        @DisplayName("a hybrid point decodes, whichever parity its prefix names")
+        void hybrid() throws Exception {
+            ECParameterSpec spec = p256();
+            boolean yOdd = spec.getG().getAffineYCoord().testBitZero();
+            byte[] hybrid = uncompressedWithPrefix(spec, yOdd ? 0x07 : 0x06);
+
+            assertEquals(spec.getG(), EcPointCodec.decodePoint(hybrid, spec));
+        }
+
+        @ParameterizedTest
+        @ValueSource(ints = {0x00, 0x01, 0x05, 0x08, 0x30, 0xFF})
+        @DisplayName("an uncompressed-length blob with any other prefix is not a point")
+        void unknownPrefixAtFullLength(int prefix) throws Exception {
+            ECParameterSpec spec = p256();
+
+            // Refused as "neither a point nor a wrapped point", which is the diagnosis; a prefix
+            // check that let it through would fail later with a decode error naming the wrong cause.
+            Exception e = assertThrows(java.security.InvalidKeyException.class,
+                    () -> EcPointCodec.decodePoint(uncompressedWithPrefix(spec, prefix), spec));
+            assertTrue(e.getMessage().contains("neither a bare point"), e.getMessage());
+        }
+
+        @ParameterizedTest
+        @ValueSource(ints = {0x00, 0x01, 0x04, 0x05, 0x06, 0x07, 0xFF})
+        @DisplayName("a compressed-length blob with any other prefix is not a point")
+        void unknownPrefixAtCompressedLength(int prefix) throws Exception {
+            ECParameterSpec spec = p256();
+            byte[] blob = spec.getG().getEncoded(true);
+            blob[0] = (byte) prefix;
+
+            Exception e = assertThrows(java.security.InvalidKeyException.class,
+                    () -> EcPointCodec.decodePoint(blob, spec));
+            assertTrue(e.getMessage().contains("neither a bare point"), e.getMessage());
+        }
+
+        @Test
+        @DisplayName("a wrapped blob whose contents are not a point is refused, and says what it held")
+        void wrappedButNotAPoint() throws Exception {
+            ECParameterSpec spec = p256();
+            byte[] wrapped = new DEROctetString(uncompressedWithPrefix(spec, 0x05)).getEncoded();
+
+            Exception e = assertThrows(java.security.InvalidKeyException.class,
+                    () -> EcPointCodec.decodePoint(wrapped, spec));
+            assertTrue(e.getMessage().contains("unwrapped to 65 bytes"), e.getMessage());
+        }
+    }
+
+    @Nested
     @DisplayName("CKA_EC_PARAMS")
     class Curves {
 

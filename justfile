@@ -166,6 +166,17 @@ it:
 it-only:
     cd {{module_dir}} && mvn -Pit test-compile failsafe:integration-test failsafe:verify
 
+# A mutation is a small deliberate bug (a flipped condition, a dropped call); a survivor is one no
+# test noticed. Takes minutes — about 8 for everything — so it is not part of `test` or `build`.
+# Pass classes to narrow it, e.g. `just mutation 'ch.ithings.kimbo11ng.p11.SessionPool'` (comma
+# separated, globs allowed). Read survivors before trusting them: some are equivalent mutants, and
+# some mean FakeToken is more forgiving than a real HSM. Report: target/pit-reports/index.html.
+#
+# Mutation testing: which bugs would the unit tests miss?
+mutation classes="ch.ithings.kimbo11ng.*":
+    cd {{module_dir}} && mvn -Pmutation clean test-compile org.pitest:pitest-maven:mutationCoverage -DtargetClasses='{{classes}}'
+    @echo "Report: {{module_dir}}/target/pit-reports/index.html"
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 # Runs the command-line tool from the build tree. Against the SoftHSM inside the running

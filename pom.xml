@@ -285,6 +285,55 @@
                 </plugins>
             </build>
         </profile>
+
+        <!-- Mutation testing: mvn -Pmutation clean test-compile pitest:mutationCoverage
+             Not part of `verify`: it reruns the covering tests once per mutant, so it takes minutes,
+             and its verdicts need reading before they are trusted (a survivor can mean a weak test,
+             an equivalent mutant, or a FakeToken more forgiving than a real HSM). Report:
+             target/pit-reports/index.html. Run it from a clean tree, like the JaCoCo floors. -->
+        <profile>
+            <id>mutation</id>
+            <properties>
+                <!-- PIT injects its own agent; two coverage agents in one JVM help nobody. -->
+                <jacoco.skip>true</jacoco.skip>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.pitest</groupId>
+                        <artifactId>pitest-maven</artifactId>
+                        <version>1.30.0</version>
+                        <configuration>
+                            <targetClasses>
+                                <param>ch.ithings.kimbo11ng.*</param>
+                            </targetClasses>
+                            <targetTests>
+                                <param>ch.ithings.kimbo11ng.*</param>
+                            </targetTests>
+                            <!-- Fault injection makes which paths run differ between runs, and PIT
+                                 needs every test to give the same answer on the unmutated code. -->
+                            <excludedTestClasses>
+                                <param>ch.ithings.kimbo11ng.provider.ConcurrentTokenAccessTest</param>
+                                <param>ch.ithings.kimbo11ng.ArtifactContentsIT</param>
+                            </excludedTestClasses>
+                            <threads>8</threads>
+                            <timestampedReports>false</timestampedReports>
+                            <outputFormats>
+                                <param>HTML</param>
+                                <param>XML</param>
+                            </outputFormats>
+                        </configuration>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.pitest</groupId>
+                                <artifactId>pitest-junit5-plugin</artifactId>
+                                <version>1.2.3</version>
+                            </dependency>
+                        </dependencies>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
 
     <build>

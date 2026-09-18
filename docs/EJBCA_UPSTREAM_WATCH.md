@@ -67,8 +67,12 @@ aborts deployment when `!isRunningEnterprise() && hasNonCeSupportedTokenTypes()`
 - **Watch for:** the check moving into `CryptoTokenSessionBean`, a second check on the token
   *create* path, or the check becoming a licence check rather than a type check. Each needs a new
   anchor, and the last is a decision for a person, not a patch.
-- **Status:** statically verified. Patch and end-to-end start with a `Pkcs11NgCryptoToken` row: not
-  yet built.
+- **Status:** verified end to end on 2026-09-18. With the overlay, `keyfactor/ejbca-ce:9.6.3` starts
+  with a `Pkcs11NgCryptoToken` row in the database. The control (same image, same database, the
+  original `ejbca-ejb.jar` mounted over the patched one) fails deployment with
+  `EJBCA Community Edition does not support HSM crypto tokens`, so the patch is what makes the
+  difference. The class file the patcher writes is a bare `return` and nothing else in the jar
+  changes.
 
 ### W2. Token classes are found by string, in a package Keyfactor owns
 
@@ -82,7 +86,10 @@ that the last two classes are absent from the jar (W1's companion — see `docke
   name in `ejbca.ear/lib` load in an unspecified order. The alias is deliberately empty
   (`Pkcs11NgCryptoToken` extends `Kimbo11ngCryptoToken`) so that case costs a redirect, not a
   rewrite. See also `docs/JACKNJI11_PROVENANCE.md`.
-- **Status:** verified statically for 9.6.3.
+- **Guard:** `docker/ejbca-hsm/build.sh` fails the image build if any jar on the EAR classpath already
+  contains `PKCS11CryptoToken`, `AzureCryptoToken` or `AzureProvider`, so the overlay can never add a
+  second copy of a class Keyfactor starts shipping again.
+- **Status:** verified statically for 9.6.3; no collision when building the overlay.
 
 ### W3. The stored token type comes from `getConcreteClass().getSimpleName()`
 
@@ -92,8 +99,23 @@ Admin UI). `CryptoTokenSessionBean.mergeCryptoToken` and `CryptoTokenManagementS
 stay `Pkcs11NgCryptoToken`: any other value is a row the W1 check counts as an unsupported type, and
 `getClassNameForType` resolves stored types by `endsWith`.
 
-- **Detect:** after creating a token through the Admin UI or CLI, read `CryptoTokenData.tokenType`.
-- **Status:** unverified at runtime.
+- **The wrapper hides overrides it does not forward.** `CryptoTokenFactory.createTokenFromClass`
+  constructs the token and wraps it, for every type. `CryptoTokenCompositeWrapper` extends
+  `BaseCryptoToken` and forwards the token methods, **except `testKeyPair`**. So on EJBCA's paths
+  (`cryptotoken testkey`, the Admin UI, `HsmKeepAliveWorker`) `BaseCryptoToken.testKeyPair` runs on
+  the wrapper and `Kimbo11ngCryptoToken.testKeyPair` is never called. Measured 2026-09-18:
+  `ejbca.sh cryptotoken testkey` on an ML-KEM alias still fails, as it must, but with EJBCA's
+  `No algorithm in the available list could be used for private key of algorithm ML-KEM` in place of
+  kimbo11ng's "key-encapsulation" explanation, which 9.3.7 showed. `EjbcaContainerIT` now asserts the
+  failure and the algorithm name; the explanation is asserted at unit level.
+  Audit of kimbo11ng's other overrides: every one is forwarded by the wrapper (`getPrivateKey`,
+  `deleteEntry`, `generateKeyPair`, `generateKey`, `getKeyUsagesFrom*`, lifecycle), so the
+  secret-key guard in `getPrivateKey` still protects `HsmKeepAliveWorker`. A new override of a
+  `BaseCryptoToken` method the wrapper does not forward would be silently bypassed the same way.
+- **Detect:** after creating a token through the Admin UI or CLI, read `CryptoTokenData.tokenType`;
+  `javap` the wrapper for the methods it declares.
+- **Status:** token type verified (the integration suite creates `Pkcs11NgCryptoToken` rows and issues
+  from them); the `testKeyPair` bypass measured as above.
 
 ### W4. BouncyCastle gets stricter about post-quantum keys
 
@@ -127,16 +149,19 @@ usage sets to `CryptoToken`, turns `getKeyUsagesFrom*` into default methods, and
   `clearCache`. All are defaults; nothing to implement.
 - **Status:** guard verified by the unit suite; UI behaviour unverified.
 
-### W6. P11NG-as-classic migration switch
+### W6. `USE_P11NG_AS_P11` does nothing in Community Edition
 
-`CryptoTokenSessionBean` honours the environment variable `USE_P11NG_AS_P11`: it loads stored
-`PKCS11CryptoToken` rows as `Pkcs11NgCryptoToken` in the cache and keeps the stored type unchanged.
-With kimbo11ng that moves an existing SunPKCS11 token onto this implementation without editing the
-database. It needs `PKCS11CryptoToken` to exist as a class (`docker/ejbca-hsm/`), because the row's
-type is still that name.
+`CryptoTokenSessionBean` reads the environment variable `USE_P11NG_AS_P11` to load stored
+`PKCS11CryptoToken` rows as `Pkcs11NgCryptoToken`. It only acts when
+`org.cesecore.dbprotection.ProtectedDataIntegrityImpl` is on the classpath, which is how the code
+tells Enterprise from Community, so **in CE the switch is inert**. Confirmed 2026-09-18: with the
+variable set on a 9.6.3 container holding a `PKCS11CryptoToken` row there is no "Migrating
+PKCS11CryptoToken" log line, and the token keeps working through the classic class. Moving an existing
+SunPKCS11 token onto kimbo11ng is therefore a manual edit of the row's `tokenType`, not something
+EJBCA will do. Do not supply that Enterprise class to make the switch work: much other code branches
+on the same probe.
 
-- **Watch for:** the variable being renamed, or the migration being restricted to Enterprise.
-- **Status:** read in source only.
+- **Watch for:** the probe changing to something a CE build can satisfy.
 
 ### W7. jacknji11 and JNA ship in the EAR
 
@@ -183,6 +208,13 @@ LGPL-2.1+ history, and the jars the image is built on declare LGPL-2.1 while the
 published, which is why **a built image is for local use and is never published**. This is a licensing
 position, not a code detail: re-read it whenever Keyfactor changes its CE licence, terms or
 `README`.
+
+**CI publishes an image today.** `.github/workflows/ci.yml` builds `docker/Dockerfile` and, on a push
+to `main`, pushes it to `ghcr.io/thpham/ejbca-ce` (the repository is public). That was already a
+redistribution of Keyfactor's image with the kimbo11ng jar added. Merging the 9.6.3 branch as it
+stands would make it a redistribution of an image containing a *modified* Keyfactor jar and the
+restored LGPL classes. The `push` and `merge` jobs are unchanged on this branch and **must not run for
+it until that is decided**; the decision is the repository owner's.
 
 ## On each EJBCA bump
 

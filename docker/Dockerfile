@@ -18,19 +18,45 @@
 # `just docker-build` overrides this with the version-derived tag instead, so that
 # `just toolchain-build` works offline and without GHCR credentials.
 # ─────────────────────────────────────────────────────────────────────────────
+# Declared up here because an ARG used in a FROM has to precede the first FROM. Explained at the
+# `ejbca` stage below.
+ARG EJBCA_IMAGE=keyfactor/ejbca-ce:9.6.3@sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164
 ARG TOOLCHAIN=ghcr.io/thpham/ejbca-ce-toolchain@sha256:29360d98d2c42547f3da2390c08c16c6ebaf29be88a82bb0d055340e6361ea44
 FROM ${TOOLCHAIN} AS toolchain
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Final EJBCA image
+# The EJBCA base image
 #
 # Digest-pinned, as the block above claims for every external reference here. The tag is kept
 # alongside it only so the version is readable; the digest is what resolves. `keyfactor/ejbca-ce`
 # publishes a multi-arch index and this is the index digest, so amd64 and arm64 both build from
-# it. Bumping EJBCA means changing `ejbca_version` and `ejbca_digest` in the justfile and this
-# line together — the JARs kimbo11ng compiles against are extracted from this exact image.
+# it. Bumping EJBCA means changing `ejbca_version` and `ejbca_digest` in the justfile and the
+# default below together — the JARs kimbo11ng compiles against are extracted from this exact
+# image. It is an ARG so that the two stages that use it cannot name different images.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM keyfactor/ejbca-ce:9.6.3@sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164
+FROM ${EJBCA_IMAGE} AS ejbca
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HSM overlay for EJBCA CE 9.6 — see docker/ejbca-hsm/README.md
+#
+# 9.6 refuses to start when the database holds a crypto token that is not Soft or Null, which
+# includes Pkcs11NgCryptoToken, and has removed the classic PKCS11 and Azure tokens. This stage
+# runs in the base image, with its own JDK, and produces a patched ejbca-ejb.jar and a small jar
+# of the restored classes. It fails, rather than producing an image whose CA will not start, if the
+# check is not where the patch expects it.
+#
+# Local use only: the resulting image contains a modified Keyfactor jar and LGPL code whose base
+# jars have no published source, so it must not be pushed anywhere. See docker/ejbca-hsm/NOTICE.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM ejbca AS hsm-build
+USER root
+COPY docker/ejbca-hsm /ejbca-hsm
+RUN OUT=/out /ejbca-hsm/build.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Final EJBCA image
+# ─────────────────────────────────────────────────────────────────────────────
+FROM ejbca
 
 USER root
 
@@ -94,6 +120,16 @@ RUN set -eu; \
 
 ENV SOFTHSM2_CONF=/etc/softhsmv3.conf
 ENV LD_LIBRARY_PATH=/opt/openssl/lib
+
+# The HSM overlay. ejbca-ejb.jar replaces the official file in place (ejbca.ear/ejbca-ejb.jar is a
+# symlink to it, so nothing else needs touching). The token jar is linked into the two command-line
+# distributions, which load crypto token classes from their own lib/ directories.
+COPY --from=hsm-build /out/ejbca-ejb.jar        /opt/keyfactor/ejbca/dist/ejbca.ear/lib/ejbca-ejb.jar
+COPY --from=hsm-build /out/ejbca-hsm-tokens.jar /opt/keyfactor/ejbca/dist/ejbca.ear/lib/
+RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/ejbca-hsm-tokens.jar \
+          /opt/keyfactor/ejbca/dist/clientToolBox/lib/ && \
+    ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/ejbca-hsm-tokens.jar \
+          /opt/keyfactor/ejbca/dist/ejbca-ejb-cli/lib/
 
 # kimbo11ng fat JAR — single COPY + symlink to avoid duplicating the layer
 COPY target/kimbo11ng-jar-with-dependencies.jar \

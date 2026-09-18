@@ -719,11 +719,19 @@ class EjbcaContainerIT {
     }
 
     @Test @Order(19)
-    void testMlKemKey_refusesWithAnExplanation() throws Exception {
+    void testMlKemKey_isRefused() throws Exception {
         // EJBCA's key test has two branches, sign and RSA-style encrypt/decrypt, chosen from the
-        // key-usage set. An ML-KEM key honestly reports CKA_DECRYPT and no CKA_SIGN, so it lands
-        // in the encryption branch — and encapsulation is not encryption. Without the interception
-        // this fails inside a JCA Cipher with a message about padding.
+        // key-usage set. An ML-KEM key reports an encryption usage and no CKA_SIGN, so it lands in
+        // the encryption branch — and encapsulation is not encryption, so it can only fail.
+        //
+        // What can be asserted depends on the EJBCA release. On 9.3.7 the token itself intercepted
+        // the test and said "key-encapsulation". On 9.6.3 every token is wrapped in
+        // CryptoTokenCompositeWrapper, which does not override testKeyPair, so BaseCryptoToken's
+        // runs on the wrapper and the token's override is never reached; the message is EJBCA's own.
+        // What must hold on both is that the test FAILS, and names the algorithm — a KEM key must
+        // never pass a test that cannot exercise it. The explanation is still asserted where the
+        // override is reachable: KeyUsageTest.KemKeys calls the token directly.
+        // See docs/EJBCA_UPSTREAM_WATCH.md, W3.
         org.testcontainers.containers.Container.ExecResult r =
             ejbcaContainer().execInContainer(
                 "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "testkey",
@@ -731,8 +739,6 @@ class EjbcaContainerIT {
 
         assertEquals(1, r.getExitCode(),
             "testkey on a KEM key must fail, not silently pass.\nstdout: " + r.getStdout());
-        assertTrue(r.getStdout().contains("key-encapsulation"),
-            "the failure must say why. Output: " + r.getStdout());
         assertTrue(r.getStdout().contains("ML-KEM-768"),
             "the failure must name the algorithm. Output: " + r.getStdout());
     }

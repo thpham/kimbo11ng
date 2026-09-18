@@ -8,7 +8,7 @@ set dotenv-load := false
 
 ejbca_version   := "9.6.3"
 # Multi-arch index digest of keyfactor/ejbca-ce:9.6.3, and the same value docker/Dockerfile
-# FROMs. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
+# defaults EJBCA_IMAGE to. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
 # and a tag that moved between `just setup` and the image build would compile against one EJBCA
 # and run against another. Resolve a new one with
 # `docker buildx imagetools inspect keyfactor/ejbca-ce:<version>` when bumping ejbca_version.

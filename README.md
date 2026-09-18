@@ -8,7 +8,7 @@ see [provenance](docs/JACKNJI11_PROVENANCE.md)) and tested against
 
 ## Features
 
-- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.3.7 (the 9.6.3 upgrade is in progress on `upgrade-9.6.3`)
+- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.6.3 (9.3.7 on `main`; 9.6.3 needs the [HSM overlay](#ejbca-ce-96-and-the-hsm-overlay))
 - RSA and EC key generation and signing via PKCS#11
 - **Post-quantum cryptography**: ML-DSA (FIPS 204), ML-KEM (FIPS 203), and SLH-DSA (FIPS 205)
 - Vendor-agnostic `PqcMechanismProfile` abstraction for HSM-specific PQC constants, selected
@@ -54,8 +54,10 @@ an AES key on the token would be one nothing could use.
 ### What is not supported
 
 - **ML-KEM is generation and enumeration only.** It has no signature or KEM operation here: EJBCA
-  CE has no key-encapsulation path, and `cryptotoken testkey` on an ML-KEM alias is refused with an
-  explanation rather than being run through an RSA-style encryption test that cannot succeed.
+  CE has no key-encapsulation path, and `cryptotoken testkey` on an ML-KEM alias fails rather than
+  passing an RSA-style encryption test it cannot run. On 9.3.7 the failure carried kimbo11ng's
+  explanation; on 9.6.3 EJBCA wraps every token in a wrapper that skips the token's own test, so the
+  message is EJBCA's (see [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md), W3).
 - **Verification.** The provider signs; it does not verify. EJBCA verifies with BouncyCastle from
   the public key, so `Signature.initVerify` through this provider is refused by name.
 - **Symmetric encryption.** There is no `Cipher` service, so the token's AES mechanisms are not
@@ -133,6 +135,25 @@ from the build tree, `just cli-token` inside the running container.
 Not implemented: the Utimaco CP5 key-authorisation commands (`initializekey`, `authorizekey`,
 `unblockkey`, `backupobject`, `restoreobject`) — vendor extensions with no hardware here to develop
 or verify against.
+
+## EJBCA CE 9.6 and the HSM overlay
+
+EJBCA Community Edition 9.6 refuses to start when its database holds a crypto token that is not Soft
+or Null, and that includes `Pkcs11NgCryptoToken`. `docker/Dockerfile` therefore builds an overlay
+into the image ([docker/ejbca-hsm/](docker/ejbca-hsm/README.md)):
+
+- the one method that enforces the check is emptied in Keyfactor's own `ejbca-ejb.jar`, by a
+  bytecode patch that fails the build if the method is not where it expects it. Measured on 9.6.3:
+  with the patch the CA starts with a `Pkcs11NgCryptoToken` in the database; with the stock jar, the
+  same image and database refuse with *"EJBCA Community Edition does not support HSM crypto tokens"*;
+- the classic `PKCS11CryptoToken` and `AzureCryptoToken`, which 9.6 removed, are restored from their
+  last Community Edition sources (adapted by [ejbca-custom](https://github.com/3keyroman/ejbca-custom)).
+  kimbo11ng does not need them; they are there so existing SunPKCS11 tokens keep working. Checked
+  on 9.6.3 against SoftHSMv3: create, generate an RSA key and test it.
+
+**The image is for local use and must not be published**: it contains a modified Keyfactor jar and
+LGPL code, on top of base jars whose source Keyfactor does not publish. See
+[docker/ejbca-hsm/NOTICE](docker/ejbca-hsm/NOTICE).
 
 ## Prerequisites
 
@@ -258,7 +279,7 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 24 EJBCA + 21 CLI integration tests (~5 min)
+mvn verify -Pit          # + 24 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
@@ -332,6 +353,7 @@ kimbo11ng/
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
+  docker/ejbca-hsm/                  # EJBCA 9.6 overlay: start-up check patcher + restored classic tokens (LGPL, see NOTICE)
   scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
   docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)

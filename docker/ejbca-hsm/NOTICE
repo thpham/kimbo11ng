@@ -1,0 +1,56 @@
+docker/ejbca-hsm — provenance and licensing
+===========================================
+
+This directory is not part of the kimbo11ng artifact. kimbo11ng (src/, the jar it builds) is
+Apache-2.0. Everything under this directory is used only by docker/Dockerfile, to build a local
+image, and is kept apart so the two licences never share a file.
+
+Files
+-----
+
+src/org/cesecore/keys/token/PKCS11CryptoToken.java
+src/org/cesecore/keys/token/AzureCryptoToken.java
+src/org/cesecore/keys/token/AzureProvider.java
+LICENSE
+
+    GNU Lesser General Public License 2.1 or later, Copyright Keyfactor / PrimeKey. The licence
+    headers are intact, and each file changed from upstream carries the dated modification notice
+    LGPL 2.1 section 2(a) requires (AzureProvider.java is unchanged and has none).
+
+    Origin. Keyfactor/ejbca-ce, the last Community Edition sources of the three classes:
+
+        PKCS11CryptoToken.java   36a3fb0c0a40f61897d11d8bf5a6fdf27f1a1802  (2023-04-04)
+        AzureCryptoToken.java    1c6f656ff1a12b9b3aedb169ff79cd2f998815bc  (2024-04-19)
+        AzureProvider.java       1c6f656ff1a12b9b3aedb169ff79cd2f998815bc  (2024-04-19)
+
+    Adapted for EJBCA CE 9.6.3 by the ejbca-custom project (https://github.com/3keyroman/ejbca-custom,
+    commit 401887f, 2026-09-17), which changed the org.apache.commons.lang imports to lang3 and, in
+    AzureCryptoToken, the KeyAndCertFinder.find result from Pair to KeyAndCertificateInfo. Copied here
+    on 2026-09-18 with no further change; the comparison with the upstream commits above was redone
+    then and shows exactly those differences and nothing else.
+
+    One behavioural difference from what Community Edition 9.3.7 shipped. That release's compiled
+    PKCS11CryptoToken overrode getKeyUsagesFromKey/PrivateKey/PublicKey to return an empty set. The
+    2023 source does not, so on 9.6.3 the token inherits CryptoToken's new defaults, which infer the
+    usage set from the key type. That is upstream's current behaviour for a token that cannot read
+    CKA_* usage attributes, and it is what the Admin UI will show. See
+    docs/EJBCA_UPSTREAM_WATCH.md.
+
+StartupCheckPatcher.java, build.sh
+
+    Apache-2.0, Copyright (c) 2026 Thomas Pham, like the rest of kimbo11ng. StartupCheckPatcher
+    rewrites one method of Keyfactor's ejbca-ejb.jar at image-build time; it contains none of
+    Keyfactor's code. It uses ASM (BSD-3-Clause, https://asm.ow2.io), which build.sh downloads,
+    checks against a pinned SHA-256 and uses without adding it to the image.
+
+Do not redistribute the built image
+-----------------------------------
+
+The image this produces contains Keyfactor's ejbca-ejb.jar with a method removed, and the LGPL classes
+above. The base image also carries jars that Keyfactor declares LGPL-2.1 and whose source is not
+published (x509-common-util, cryptotokens-api, cryptotokens-impl, keyfactor-commons-cli). LGPL 2.1
+section 4 makes whoever distributes a binary responsible for the matching source, which a downstream
+party cannot supply. Build the image yourself, from source, for your own use.
+
+EJBCA is a trademark of Keyfactor. This project is not affiliated with, endorsed by or supported by
+Keyfactor.

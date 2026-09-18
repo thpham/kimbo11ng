@@ -144,6 +144,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
     private PqcMechanismProfile profile;
+    /** What this token says its session ceiling is, for C_GetTokenInfo. */
+    private static final long MAX_SESSIONS = 64;
+
+    private long tokenFlags;
+    private long clearedTokenFlags;
     private long failNextCkr = -1;
     private int killSessionsAfter = -1;
     private int operationCount;
@@ -300,6 +305,26 @@ public final class FakeToken extends UnsupportedNativeProvider {
      */
     public synchronized FakeToken dropAllSessions() {
         sessions.clear();
+        return this;
+    }
+
+    /**
+     * Additional {@code CKF_*} flags for {@code C_GetTokenInfo}, on top of the healthy defaults.
+     *
+     * <p>{@code CKF_USER_PIN_LOCKED} and its neighbours are the token state an operator most needs
+     * reported back accurately, and the only way to see one on a real HSM is to lock a PIN.
+     */
+    public FakeToken tokenFlags(long flags) {
+        this.tokenFlags = flags;
+        return this;
+    }
+
+    /**
+     * Removes a flag the healthy defaults set, for the states expressed by a flag's absence —
+     * an uninitialised user PIN above all.
+     */
+    public FakeToken clearTokenFlag(long flags) {
+        this.clearedTokenFlags |= flags;
         return this;
     }
 
@@ -518,8 +543,29 @@ public final class FakeToken extends UnsupportedNativeProvider {
         byte[] src = tokenLabel.getBytes(StandardCharsets.UTF_8);
         System.arraycopy(src, 0, label, 0, Math.min(src.length, 32));
         info.label = label;
+        // A token that reported nothing but a label left every reader of this structure looking at
+        // zeroes, and flags of zero is not a neutral answer: it means the user PIN is uninitialised
+        // and login is not required, which describes no token anyone would deploy.
+        info.flags = CK_TOKEN_INFO.CKF_RNG | CK_TOKEN_INFO.CKF_LOGIN_REQUIRED
+                | CK_TOKEN_INFO.CKF_USER_PIN_INITIALIZED | CK_TOKEN_INFO.CKF_TOKEN_INITIALIZED
+                | tokenFlags;
+        info.flags &= ~clearedTokenFlags;
+        info.ulSessionCount = sessions.size();
+        info.ulMaxSessionCount = MAX_SESSIONS;
+        info.ulRwSessionCount = sessions.size();
+        info.ulMaxRwSessionCount = MAX_SESSIONS;
+        info.ulMinPinLen = 4;
+        info.ulMaxPinLen = 32;
+        info.manufacturerID = padded("kimbo11ng", 32);
+        info.model = padded("FakeToken v3.2", 16);
+        info.serialNumber = padded("FAKE-0001", 16);
+        info.hardwareVersion = version((byte) 1, (byte) 0);
+        // 0x80 is 128 unsigned, and a signed read of it prints -128: the case the CLI's own
+        // formatting has to get right, so the fake is the token that exhibits it.
+        info.firmwareVersion = version((byte) 3, (byte) 0x80);
         return CKR.OK;
     }
+
 
     @Override
     public synchronized long C_GetMechanismList(long slot, long[] list, LongRef count) {

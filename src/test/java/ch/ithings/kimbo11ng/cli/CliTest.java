@@ -6,6 +6,7 @@ package ch.ithings.kimbo11ng.cli;
 
 import ch.ithings.kimbo11ng.fake.FakeToken;
 import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
+import org.pkcs11.jacknji11.CK_TOKEN_INFO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -217,6 +219,160 @@ class CliTest {
         assertTrue(stdout().contains("User PIN state:"), stdout());
     }
 
+    // ---- the three info views, field by field ----
+
+    /**
+     * Asserts every label is present and carries the expected value.
+     *
+     * <p>Per field, not "the output is non-empty": a dropped line leaves a report that still looks
+     * like a report, and the operator reading it has no way to know a field was ever meant to be
+     * there. These commands exist to answer "what is this HSM", so a silently missing answer is the
+     * failure mode worth pinning.
+     */
+    private void assertFields(String... labelsAndValues) {
+        String output = stdout();
+        for (int i = 0; i < labelsAndValues.length; i += 2) {
+            String label = labelsAndValues[i];
+            String value = labelsAndValues[i + 1];
+            String line = output.lines().filter(l -> l.contains(label)).findFirst().orElse(null);
+            assertNotNull(line, "no '" + label + "' line in:\n" + output);
+            assertTrue(line.contains(value),
+                    "'" + label + "' should report '" + value + "' but was: " + line);
+        }
+    }
+
+    @Test
+    @DisplayName("showinfo reports every field of the library's own identity")
+    void showInfoFields() {
+        assertEquals(Main.OK, Main.run(new String[] {"showinfo", "--lib-file", LIB}, env));
+        assertFields(
+                "Cryptoki version", "3.0",
+                "Manufacturer", "kimbo11ng",
+                "Library", "FakeToken",
+                "Library version", "1.0",
+                "Flags", "0x");
+    }
+
+    @Test
+    @DisplayName("showslotinfo reports every field of the slot")
+    void showSlotInfoFields() {
+        assertEquals(Main.OK, Main.run(new String[] {"showslotinfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        assertFields(
+                "Slot id", "0",
+                "Description", "FakeToken slot",
+                "Manufacturer", "kimbo11ng",
+                "Hardware version", "1.0",
+                "Firmware version", "1.0",
+                "Token present", "yes",
+                "Removable", "no",
+                "Hardware slot", "no",
+                "Flags", "CKF_TOKEN_PRESENT");
+    }
+
+    @Test
+    @DisplayName("showtokeninfo reports every field of the token")
+    void showTokenInfoFields() {
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        assertFields(
+                "Slot id", "0",
+                "Label", "FakeToken",
+                "Manufacturer", "kimbo11ng",
+                "Model", "FakeToken v3.2",
+                "Serial number", "FAKE-0001",
+                "Hardware version", "1.0",
+                "Firmware version", "3.128",
+                "Sessions", "of 64",
+                "R/W sessions", "of 64",
+                "PIN length", "4 to 32",
+                "Login required", "yes",
+                "Write protected", "no",
+                "User PIN state", "ok",
+                "Flags", "CKF_");
+    }
+
+    // ---- what showtokeninfo reports about the token's own state ----
+
+    @Test
+    @DisplayName("a healthy token reports its PIN state as ok")
+    void tokenInfoPinStateOk() {
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        assertTrue(stdout().contains("User PIN state"), stdout());
+        assertTrue(stdout().lines().anyMatch(l -> l.contains("User PIN state") && l.contains("ok")),
+                stdout());
+    }
+
+    @Test
+    @DisplayName("a locked PIN is named, because it turns a retry into an outage")
+    void tokenInfoPinLocked() {
+        token.tokenFlags(CK_TOKEN_INFO.CKF_USER_PIN_LOCKED);
+
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        // The operator about to type the PIN again has to see this first: on most tokens the retry
+        // is what consumes the last attempt.
+        assertTrue(pinState().contains("LOCKED"), stdout());
+    }
+
+    @Test
+    @DisplayName("every PIN warning flag is reported, and several at once are all listed")
+    void tokenInfoPinWarnings() {
+        token.tokenFlags(CK_TOKEN_INFO.CKF_USER_PIN_FINAL_TRY
+                | CK_TOKEN_INFO.CKF_USER_PIN_COUNT_LOW
+                | CK_TOKEN_INFO.CKF_USER_PIN_TO_BE_CHANGED);
+
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        String state = pinState();
+        // Each flag independently, not "the first one wins": a token on its final try whose PIN
+        // must also be changed is exactly the state where a missing half misleads.
+        assertTrue(state.contains("FINAL TRY"), state);
+        assertTrue(state.contains("failed attempts recorded"), state);
+        assertTrue(state.contains("must be changed"), state);
+        assertFalse(state.contains("ok"), state);
+    }
+
+    @Test
+    @DisplayName("an uninitialised user PIN is reported as such")
+    void tokenInfoPinNotInitialized() {
+        // The one state expressed by a flag's absence rather than its presence: a token straight
+        // out of the box, whose user PIN has never been set.
+        token.clearTokenFlag(CK_TOKEN_INFO.CKF_USER_PIN_INITIALIZED);
+
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        assertTrue(pinState().contains("not initialized"), stdout());
+    }
+
+    @Test
+    @DisplayName("a firmware minor of 0x80 prints as 128, not -128")
+    void tokenInfoVersionsAreUnsigned() {
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        // CK_VERSION fields are bytes and the values are unsigned. A signed read turns a perfectly
+        // ordinary firmware version into a negative number in front of the operator.
+        String line = stdout().lines().filter(l -> l.contains("Firmware version")).findFirst()
+                .orElse("");
+        assertTrue(line.contains("3.128"), line);
+        assertFalse(line.contains("-"), line);
+    }
+
+    @Test
+    @DisplayName("session counts are reported against the token's ceiling")
+    void tokenInfoSessionCounts() {
+        assertEquals(Main.OK, Main.run(new String[] {"showtokeninfo", "--lib-file", LIB,
+                "--slot", "0"}, env));
+        String line = stdout().lines().filter(l -> l.contains("Sessions")).findFirst().orElse("");
+        assertTrue(line.matches(".*\\d+ of 64.*"), line);
+    }
+
+    /** The value printed on the "User PIN state" line. */
+    private String pinState() {
+        return stdout().lines().filter(l -> l.contains("User PIN state")).findFirst().orElse("");
+    }
+
     @Test
     @DisplayName("capabilities reports the resolved profile with no PIN")
     void capabilities() {
@@ -294,6 +450,52 @@ class CliTest {
     }
 
     @Test
+    @DisplayName("the KEM footnote describes the template this token will actually be sent")
+    void capabilitiesKemNoteFollowsTheProperty() {
+        // The footnote is read by an operator deciding whether their token will accept the key, so
+        // it has to describe this run's template and not the general case. Each setting names its
+        // own attributes and nobody else's.
+        assertEquals(Main.OK, Main.run(new String[] {"capabilities", "--lib-file", LIB,
+                "--slot", "0", "--property", "kimbo11ng.pqc.kemUsage=v32"}, env));
+        String v32 = stdout();
+        assertTrue(v32.contains("CKA_ENCAPSULATE"), v32);
+        assertFalse(v32.contains("CKA_ENCRYPT and CKA_DECRYPT"), v32);
+        // v32 alone means EJBCA shows no usage at all, which is the cost the operator is choosing.
+        assertTrue(v32.contains("show no usage"), v32);
+
+        out.reset();
+        assertEquals(Main.OK, Main.run(new String[] {"capabilities", "--lib-file", LIB,
+                "--slot", "0", "--property", "kimbo11ng.pqc.kemUsage=legacy"}, env));
+        String legacy = stdout();
+        assertTrue(legacy.contains("CKA_ENCRYPT and CKA_DECRYPT"), legacy);
+        assertFalse(legacy.contains("CKA_ENCAPSULATE"), legacy);
+        assertFalse(legacy.contains("show no usage"), legacy);
+
+        out.reset();
+        assertEquals(Main.OK, Main.run(new String[] {"capabilities", "--lib-file", LIB,
+                "--slot", "0", "--property", "kimbo11ng.pqc.kemUsage=both"}, env));
+        String both = stdout();
+        assertTrue(both.contains("CKA_ENCAPSULATE"), both);
+        assertTrue(both.contains("and also with "), both);
+        assertTrue(both.contains("CKA_ENCRYPT and CKA_DECRYPT"), both);
+        assertFalse(both.contains("show no usage"), both);
+
+        // Whatever the setting, the same thing stays true and has to be said.
+        for (String output : new String[] {v32, legacy, both}) {
+            assertTrue(output.contains("No signing service is registered"), output);
+        }
+    }
+
+    @Test
+    @DisplayName("the KEM footnote names the property that produced it")
+    void capabilitiesKemNoteNamesTheProperty() {
+        assertEquals(Main.OK, Main.run(new String[] {"capabilities", "--lib-file", LIB,
+                "--slot", "0", "--property", "kimbo11ng.pqc.kemUsage=v32"}, env));
+        // Naming the setting is what lets a reader change it without going to the documentation.
+        assertTrue(stdout().contains("kimbo11ng.pqc.kemUsage=v32"), stdout());
+    }
+
+    @Test
     @DisplayName("capabilities --mechanisms lists the mechanism table")
     void capabilitiesMechanisms() {
         int code = Main.run(new String[] {"capabilities", "--lib-file", LIB, "--slot", "0",
@@ -346,14 +548,6 @@ class CliTest {
         assertTrue(stdout().contains("signed and verified with SHA256withRSA"), stdout());
     }
 
-    /**
-     * The generation half only.
-     *
-     * <p>{@code testkeypair} is not run against a post-quantum alias here because
-     * {@link FakeToken} returns a stub of the right length instead of a real ML-DSA signature, so a
-     * verification would fail for reasons that have nothing to do with the CLI. That path is
-     * covered against real firmware by {@code HsmConformanceIT}.
-     */
     @Test
     @DisplayName("a post-quantum key pair generates and appears under its alias")
     void postQuantumKeyPair() {
@@ -364,6 +558,59 @@ class CliTest {
         assertEquals(Main.OK, session("listkeypairs"), stderr());
         assertTrue(stdout().contains("pqcKey"), stdout());
         assertTrue(stdout().contains("ML-DSA-65"), stdout());
+    }
+
+    @Test
+    @DisplayName("testkeypair picks the algorithm from the key, for a post-quantum alias too")
+    void testKeyPairPostQuantum() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "pqcKey",
+                "--key-spec", "ML-DSA-65"), stderr());
+        out.reset();
+
+        // The alias carries its algorithm, so nothing has to be passed on the command line; for a
+        // post-quantum key the JCA name and the algorithm name are the same string.
+        assertEquals(Main.OK, session("testkeypair", "--alias", "pqcKey"), stderr());
+        assertTrue(stdout().contains("ML-DSA-65"), stdout());
+    }
+
+    @Test
+    @DisplayName("testkeypair picks SHA256withECDSA for an EC alias")
+    void testKeyPairEc() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "ecKey",
+                "--key-spec", "secp256r1"), stderr());
+        out.reset();
+
+        assertEquals(Main.OK, session("testkeypair", "--alias", "ecKey"), stderr());
+        assertTrue(stdout().contains("SHA256withECDSA"), stdout());
+    }
+
+    @Test
+    @DisplayName("testkeypair refuses an ML-KEM alias as a question that does not apply")
+    void testKeyPairRefusesKem() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "kemKey",
+                "--key-spec", "ML-KEM-768"), stderr());
+        out.reset();
+
+        // Not "no such algorithm for this provider", which reads as a gap here. The key generated
+        // perfectly well and simply has no signature to make.
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "kemKey"));
+        assertTrue(stderr().contains("key encapsulation, not signing"), stderr());
+        assertTrue(stderr().contains("ML-KEM-768"), stderr());
+    }
+
+    @Test
+    @DisplayName("--signature-algorithm overrides what the alias would have chosen")
+    void testKeyPairExplicitAlgorithm() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "signKey",
+                "--key-spec", "2048"), stderr());
+        out.reset();
+
+        // An operator whose token needs a different digest than the default has to be able to say
+        // so, and the explicit value must win over the alias's own answer.
+        assertEquals(Main.OK, session("testkeypair", "--alias", "signKey",
+                "--signature-algorithm", "SHA512withRSA"), stderr());
+        assertTrue(stdout().contains("SHA512withRSA"), stdout());
+        assertFalse(stdout().contains("SHA256withRSA"), stdout());
     }
 
     @Test

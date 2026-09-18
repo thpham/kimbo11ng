@@ -150,7 +150,7 @@ build-quick:
 test:
     cd {{module_dir}} && mvn clean verify
 
-# The integration suite runs against ghcr.io/thpham/ejbca-ce:latest as it exists in the local
+# The integration suite runs against ghcr.io/thpham/kimbo11ng-ejbca:latest as it exists in the local
 # daemon — src/it/docker-compose.it.yml has no build: block. So `just docker-build` first, or
 # you are testing whatever image happens to be there.
 #
@@ -199,12 +199,12 @@ toolchain-build:
 
 # Build the Docker image (EJBCA + softhsmv3 + kimbo11ng)
 docker-build: build
-    docker build -f docker/Dockerfile -t ghcr.io/thpham/ejbca-ce:latest \
+    docker build -f docker/Dockerfile -t ghcr.io/thpham/kimbo11ng-ejbca:latest \
         --build-arg TOOLCHAIN={{toolchain_image}} .
 
 # Build Docker image without cache
 docker-build-nocache: build
-    docker build -f docker/Dockerfile -t kimbo11ng-ejbca \
+    docker build -f docker/Dockerfile -t ghcr.io/thpham/kimbo11ng-ejbca:latest \
         --build-arg TOOLCHAIN={{toolchain_image}} --no-cache .
 
 # Start all services (EJBCA + MariaDB)

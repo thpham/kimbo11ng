@@ -215,7 +215,9 @@ position, not a code detail: re-read it whenever Keyfactor changes its CE licenc
 `README`.
 
 **CI publishing is disabled.** `.github/workflows/ci.yml` used to build `docker/Dockerfile` and, on a
-push to `main`, push it to `ghcr.io/thpham/ejbca-ce` (the repository is public). That was already a
+push to `main`, push it to `ghcr.io/thpham/kimbo11ng-ejbca` (the repository is public; the image was
+called `ghcr.io/thpham/ejbca-ce` until 2026-09-18, renamed because EJBCA is Keyfactor's trademark and
+that name read as an official image). That was already a
 redistribution of Keyfactor's image with the kimbo11ng jar added; with the overlay it would be a
 redistribution of a *modified* Keyfactor jar plus the restored LGPL classes. The `push` and `merge`
 jobs are therefore set to `if: false` on this branch, with a comment saying why. The `test` job still

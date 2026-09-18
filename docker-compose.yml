@@ -15,7 +15,7 @@ services:
       retries: 12
 
   ejbca:
-    image: ghcr.io/thpham/ejbca-ce:latest
+    image: ghcr.io/thpham/kimbo11ng-ejbca:latest
     build:
       context: .
       dockerfile: docker/Dockerfile

@@ -31,7 +31,7 @@ env:
   # The platform list is not an env var any more: each architecture is built by its own
   # matrix leg on a native runner, so the platform belongs to the leg. See the push job.
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/thpham/ejbca-ce
+  IMAGE: ghcr.io/thpham/kimbo11ng-ejbca
 
   # ─── Build artifacts ──────────────────────────────────────────────────────
   ARTIFACT: kimbo11ng-jar-with-dependencies.jar

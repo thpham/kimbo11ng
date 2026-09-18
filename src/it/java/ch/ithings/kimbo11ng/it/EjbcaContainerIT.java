@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Integration tests against a full EJBCA + SoftHSMv3 stack.
  *
  * Prerequisites:
- *   - just docker-build  (image ghcr.io/thpham/ejbca-ce:latest must exist locally)
+ *   - just docker-build  (image ghcr.io/thpham/kimbo11ng-ejbca:latest must exist locally)
  *
  * Run with:
  *   mvn verify -Pit
@@ -74,9 +74,9 @@ class EjbcaContainerIT {
             new File("src/it/docker-compose.it.yml"))
         // ComposeContainer runs `docker compose pull` before `up` unless told not to, and only
         // falls back to local images when that pull *throws*. The compose file names
-        // ghcr.io/thpham/ejbca-ce:latest, which is published — so a successful pull silently
-        // replaces the image `just docker-build` just produced, and the suite then validates the
-        // last release instead of the working tree. Which of the two ran depended on whether a
+        // ghcr.io/thpham/kimbo11ng-ejbca:latest, a name that is published whenever CI's push job is
+        // enabled — so a successful pull silently replaces the image `just docker-build` just
+        // produced, and the suite then validates the last release instead of the working tree. Which of the two ran depended on whether a
         // network call succeeded, and nothing in the output said which.
         //
         // Disabling it does not break a clean machine: `docker compose up` still pulls images

@@ -96,7 +96,7 @@ build dependency on a jar nobody can download.
 
 ## 5. Running EJBCA itself against the HSM
 
-Nothing Thales-owned ships in `ghcr.io/thpham/ejbca-ce`. The client is side-mounted, discovered at
+Nothing Thales-owned ships in `ghcr.io/thpham/kimbo11ng-ejbca`. The client is side-mounted, discovered at
 start-up by `docker/luna-discover.sh`, and absent by default:
 
 ```bash

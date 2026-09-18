@@ -18,8 +18,8 @@ env:
   EJBCA_VERSION: "9.6.3"
   # OpenSSL and SoftHSMv3 versions live in .github/workflows/toolchain.yml and the justfile:
   # they are inputs to the toolchain image, which this workflow only consumes.
-  # The JDK that *builds*, not the one that runs. EJBCA 9.6.3 ships a Java 21 runtime, but
-  # pom.xml still pins <maven.compiler.release>17</maven.compiler.release>, which keeps the
+  # The JDK that *builds*, not the one that runs. EJBCA 9.6.3 ships a Java 21 runtime and
+  # pom.xml pins <maven.compiler.release>21</maven.compiler.release>, which keeps the
   # bytecode and the resolvable API surface compatible with it. The compiler itself has to be 21
   # or newer: the strict-warning gate excludes the 'this-escape' lint category for the
   # OpenAPI-generated REST client, and that category does not exist before JDK 21 — javac 17

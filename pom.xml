@@ -13,9 +13,11 @@
     <description>PKCS#11 NG CryptoToken for EJBCA CE — JackNJI11 + PQC support</description>
 
     <properties>
-        <!-- 'release' (not source/target) so the JDK 21 compiler cannot resolve APIs
-             that do not exist on the Java 17 runtime EJBCA 9.3.7 shipped (9.6.3 runs 21; the release stays 17 until nothing needs the older line). -->
-        <maven.compiler.release>17</maven.compiler.release>
+        <!-- 'release' (not source/target) so the compiler cannot resolve APIs that do not exist on
+             the runtime EJBCA ships. That runtime is Java 21 for CE 9.6.3 (keyfactor/ejbca-ce:9.6.3
+             reports OpenJDK 21.0.10); the 9.3.7 line ran Java 17. The target follows the image
+             this branch is pinned to, and moves with it: see docs/EJBCA_UPSTREAM_WATCH.md. -->
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!-- Reproducible builds: fixed entry timestamps in the produced JARs. -->
         <project.build.outputTimestamp>2026-01-01T00:00:00Z</project.build.outputTimestamp>
@@ -385,7 +387,7 @@
                         <goals><goal>enforce</goal></goals>
                         <configuration>
                             <rules>
-                                <requireJavaVersion><version>[17,)</version></requireJavaVersion>
+                                <requireJavaVersion><version>[21,)</version></requireJavaVersion>
                                 <requireMavenVersion><version>[3.8,)</version></requireMavenVersion>
                                 <dependencyConvergence/>
                                 <banDuplicatePomDependencyVersions/>

@@ -138,8 +138,9 @@ or verify against.
 
 - Docker
 - [just](https://github.com/casey/just) command runner
-- Maven 3.8+ and JDK 21+ to build (the artifact targets Java 17, which the 9.3.7 line ran and 9.6.3's Java 21 still loads;
-  the compiler has to be 21 or newer for the `this-escape` lint category the warning gate excludes)
+- Maven 3.8+ and JDK 21+ to build. The artifact targets Java 21, which is the runtime of the pinned
+  EJBCA image (`keyfactor/ejbca-ce:9.6.3` runs OpenJDK 21; the 9.3.7 line ran 17). The target moves with
+  the image — see [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md#compile-target)
 
 ## Quick Start
 
@@ -185,7 +186,10 @@ Dependencies:
 
 To upgrade EJBCA, update `ejbca_version`, `ejbca_digest` and `ejbca_deps` in the justfile and the
 matching `FROM` in `docker/Dockerfile` — the base image is pinned by digest in both places so that
-the JARs extracted for the build and the image they run in are the same bytes. Then:
+the JARs extracted for the build and the image they run in are the same bytes — and move
+`maven.compiler.release` to the new image's Java version. What to check first, and what has broken
+before, is in [docs/EJBCA_UPSTREAM_WATCH.md](docs/EJBCA_UPSTREAM_WATCH.md);
+`scripts/api-diff.sh OLD_LIB NEW_LIB` compares the EJBCA API surface between two releases. Then:
 
 ```bash
 just extract-jars-fresh setup docker-build
@@ -253,7 +257,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 655 unit tests + 4 artifact tests, no Docker (~2 min)
+mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 24 EJBCA + 21 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
@@ -328,6 +332,8 @@ kimbo11ng/
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
+  scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
+  docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)
   pom.xml                            # Maven build (ch.ithings:kimbo11ng)

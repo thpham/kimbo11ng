@@ -30,7 +30,7 @@ import java.util.Set;
  * and to expose its protected methods through {@link CryptoTokenBridge}.
  *
  * <p><strong>Why this class is not in {@code org.cesecore.keys.token.p11ng.cryptotoken}.</strong>
- * That package belongs to Keyfactor, and CE 9.3.7 ships nothing in it — we supply the class EJBCA's
+ * That package belongs to Keyfactor, and CE 9.3.7 and 9.6.3 ship nothing in it — we supply the class EJBCA's
  * registry names. It works, and it is also the project's most fragile point: one stub class in a
  * future CE would occupy the name, and which of the two jars in {@code ejbca.ear/lib} wins is
  * unspecified. The canonical implementation therefore lives here, and

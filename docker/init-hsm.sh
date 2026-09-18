@@ -51,7 +51,7 @@ if [ "${LUNA_PRESENT}" = "1" ]; then
         echo "[luna] WARNING: no config directory at ${CHRYSTOKI_DIR}; nothing will connect."
     fi
 
-    # ClientToolBox only, deliberately. EJBCA CE 9.3.7 has no crypto token backed by the Luna JSP
+    # ClientToolBox only, deliberately. EJBCA CE (9.3.7 and 9.6.3) has no crypto token backed by the Luna JSP
     # provider — CryptoTokenFactory knows Soft, PKCS11, Pkcs11Ng, Azure, AWS KMS, Fortanix,
     # Securosys and PrimeCAToken — so putting LunaProvider.jar on the EAR classpath would add a
     # JNI-loading jar that EJBCA cannot use and that throws on deploy when the .so is missing.

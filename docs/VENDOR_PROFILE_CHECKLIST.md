@@ -112,7 +112,7 @@ The container arms itself only when `$LUNA_CLIENT_DIR` (default `/usr/local/luna
 directory to `LD_LIBRARY_PATH` — which is also how the JNI bridge behind the JSP provider is found,
 since HotSpot seeds `java.library.path` from `LD_LIBRARY_PATH`. `LunaProvider.jar` is linked into
 `clientToolBox/lib` for diagnostics and deliberately **not** onto EJBCA's EAR classpath: EJBCA CE
-9.3.7 has no crypto token that could use it (`CryptoTokenFactory` knows Soft, PKCS11, Pkcs11Ng,
+9.3.7 and 9.6.3 have no crypto token that could use it (`CryptoTokenFactory` knows Soft, PKCS11, Pkcs11Ng,
 Azure, AWS KMS, Fortanix, Securosys and PrimeCAToken), so it would only add a JNI-loading jar that
 throws on deploy when the `.so` is absent.
 

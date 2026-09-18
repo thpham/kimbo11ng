@@ -6,13 +6,13 @@ set dotenv-load := false
 # ─── Version matrix (single source of truth) ─────────────────────────────────
 # Change these when upgrading EJBCA or its dependencies.
 
-ejbca_version   := "9.3.7"
-# Multi-arch index digest of keyfactor/ejbca-ce:9.3.7, and the same value docker/Dockerfile
+ejbca_version   := "9.6.3"
+# Multi-arch index digest of keyfactor/ejbca-ce:9.6.3, and the same value docker/Dockerfile
 # FROMs. It has to be the same: the JARs extracted below are what kimbo11ng compiles against,
 # and a tag that moved between `just setup` and the image build would compile against one EJBCA
 # and run against another. Resolve a new one with
 # `docker buildx imagetools inspect keyfactor/ejbca-ce:<version>` when bumping ejbca_version.
-ejbca_digest    := "sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a"
+ejbca_digest    := "sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164"
 ejbca_image     := "keyfactor/ejbca-ce:" + ejbca_version + "@" + ejbca_digest
 openssl_version := "3.6.0"
 # softhsmv3 (now pqctoday-org/pqctoday-hsm) is built from source. Pinned to a release tag:
@@ -26,7 +26,7 @@ softhsm_version := "v0.28.1"
 # EJBCA dependency JARs: "filename groupId artifactId version"
 # Extracted from the base image and installed to local Maven repo.
 # Update this list when EJBCA bumps dependency versions.
-ejbca_deps := "cryptotokens-api-3.0.0.jar:com.keyfactor:cryptotokens-api:3.0.0 cryptotokens-impl-3.0.0.jar:com.keyfactor:cryptotokens-impl:3.0.0 jacknji11-1.3.1.jar:org.pkcs11:jacknji11:1.3.1 cesecore-common.jar:org.cesecore:cesecore-common:" + ejbca_version + " x509-common-util-5.3.5.jar:com.keyfactor:x509-common-util:5.3.5"
+ejbca_deps := "cryptotokens-api-4.1.0.jar:com.keyfactor:cryptotokens-api:4.1.0 cryptotokens-impl-4.1.0.jar:com.keyfactor:cryptotokens-impl:4.1.0 jacknji11-1.3.1.jar:org.pkcs11:jacknji11:1.3.1 cesecore-common.jar:org.cesecore:cesecore-common:" + ejbca_version + " x509-common-util-5.11.1.jar:com.keyfactor:x509-common-util:5.11.1"
 
 # OpenSSL and SoftHSMv3 are compiled once into their own image rather than on every image
 # build — see docker/Dockerfile.toolchain. The tag encodes both versions, so bumping either

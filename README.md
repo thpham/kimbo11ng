@@ -8,7 +8,7 @@ see [provenance](docs/JACKNJI11_PROVENANCE.md)) and tested against
 
 ## Features
 
-- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.3.7
+- Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.3.7 (the 9.6.3 upgrade is in progress on `upgrade-9.6.3`)
 - RSA and EC key generation and signing via PKCS#11
 - **Post-quantum cryptography**: ML-DSA (FIPS 204), ML-KEM (FIPS 203), and SLH-DSA (FIPS 205)
 - Vendor-agnostic `PqcMechanismProfile` abstraction for HSM-specific PQC constants, selected
@@ -138,7 +138,7 @@ or verify against.
 
 - Docker
 - [just](https://github.com/casey/just) command runner
-- Maven 3.8+ and JDK 21+ to build (the artifact targets Java 17, which is what EJBCA 9.3.7 runs;
+- Maven 3.8+ and JDK 21+ to build (the artifact targets Java 17, which the 9.3.7 line ran and 9.6.3's Java 21 still loads;
   the compiler has to be 21 or newer for the `this-escape` lint category the warning gate excludes)
 
 ## Quick Start
@@ -169,18 +169,18 @@ OpenSSL and SoftHSMv3 are compiled from source, but not on every image build —
 matching tag, so `just toolchain-build` is also how to build with no access to GHCR.
 
 ```
-EJBCA:     9.3.7 (keyfactor/ejbca-ce:9.3.7@sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a)
+EJBCA:     9.6.3 (keyfactor/ejbca-ce:9.6.3@sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164)
 OpenSSL:   3.6.0
 SoftHSMv3: v0.28.1 (pqctoday-org/pqctoday-hsm)
 Toolchain: ghcr.io/thpham/ejbca-ce-toolchain:openssl3.6.0-softhsmv0.28.1
 Artifact:  kimbo11ng-jar-with-dependencies.jar
 
 Dependencies:
-  com.keyfactor:cryptotokens-api:3.0.0
-  com.keyfactor:cryptotokens-impl:3.0.0
+  com.keyfactor:cryptotokens-api:4.1.0
+  com.keyfactor:cryptotokens-impl:4.1.0
   org.pkcs11:jacknji11:1.3.1
-  org.cesecore:cesecore-common:9.3.7
-  com.keyfactor:x509-common-util:5.3.5
+  org.cesecore:cesecore-common:9.6.3
+  com.keyfactor:x509-common-util:5.11.1
 ```
 
 To upgrade EJBCA, update `ejbca_version`, `ejbca_digest` and `ejbca_deps` in the justfile and the

@@ -30,7 +30,7 @@ FROM ${TOOLCHAIN} AS toolchain
 # it. Bumping EJBCA means changing `ejbca_version` and `ejbca_digest` in the justfile and this
 # line together — the JARs kimbo11ng compiles against are extracted from this exact image.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM keyfactor/ejbca-ce:9.3.7@sha256:183b86af44b9b13e7cc8912c868f635aeb8dba6bf056ccbd4683b17626964d0a
+FROM keyfactor/ejbca-ce:9.6.3@sha256:ef574ed81c1e2bb335902f1097b09f9408fe32f2c3abbccfe80999d1c9b50164
 
 USER root
 

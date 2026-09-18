@@ -1049,11 +1049,42 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 + Long.toHexString(normalized) + " with parameter set " + ckp);
     }
 
+    /**
+     * Public-key material of {@code size} bytes: random, except where the size is an ML-KEM
+     * encapsulation key.
+     *
+     * <p>BouncyCastle 1.84 (EJBCA 9.6.3) runs FIPS 203's modulus check on every ML-KEM public key
+     * it decodes, so random bytes of the right length are refused. 1.80.2 (EJBCA 9.3.7) accepted
+     * them. A real token always emits a valid key, so the fake has to as well. The three ML-KEM
+     * lengths are disjoint from ML-DSA's (1312/1952/2592) and SLH-DSA's (32/48/64), which have no
+     * such check and stay random.
+     */
+    private static byte[] publicKeyMaterial(int size) {
+        String kemParameterSet = switch (size) {
+            case 800 -> "ML-KEM-512";
+            case 1184 -> "ML-KEM-768";
+            case 1568 -> "ML-KEM-1024";
+            default -> null;
+        };
+        if (kemParameterSet == null) {
+            byte[] material = new byte[size];
+            RANDOM.nextBytes(material);
+            return material;
+        }
+        try {
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-KEM", BC);
+            kpg.initialize(org.bouncycastle.jcajce.spec.MLKEMParameterSpec.fromName(kemParameterSet), RANDOM);
+            return SubjectPublicKeyInfo.getInstance(kpg.generateKeyPair().getPublic().getEncoded())
+                    .getPublicKeyData().getOctets();
+        } catch (java.security.GeneralSecurityException e) {
+            throw new IllegalStateException("cannot generate " + kemParameterSet + " material", e);
+        }
+    }
+
     /** Generates post-quantum material of the length and key type the profile's row declares. */
     private void generateFromEntry(AlgorithmEntry entry, Map<Long, byte[]> pub,
             Map<Long, byte[]> priv) {
-        byte[] material = new byte[entry.publicKeyLength()];
-        RANDOM.nextBytes(material);
+        byte[] material = publicKeyMaterial(entry.publicKeyLength());
         pub.put(CKA.VALUE, publicValue(material));
         pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
         priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
@@ -1117,8 +1148,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
             size = mapped;
         }
-        byte[] material = new byte[size];
-        RANDOM.nextBytes(material);
+        byte[] material = publicKeyMaterial(size);
         pub.put(CKA.VALUE, publicValue(material));
         // putIfAbsent, not put: PKCS#11 validates CKA_KEY_TYPE from the template rather than
         // overwriting it, so a vendor profile's own key type must survive generation.

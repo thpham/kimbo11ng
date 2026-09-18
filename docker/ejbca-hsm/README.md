@@ -18,9 +18,12 @@ pinned and the class files are the version of the JVM that loads them. It:
 1. downloads ASM and checks its SHA-256;
 2. rewrites the one method (`StartupCheckPatcher.java`), then confirms with `javap`, independently,
    that the body is a single `return`;
-3. refuses to continue if any jar on the EAR classpath already contains one of the three classes, since
+3. has the JVM itself load and initialise the patched class with the bytecode verifier forced on
+   (`LinkCheck.java`), with the patched jar first on the class path and a failure if the class came from
+   anywhere else. A rewrite that is still a bare `return` but is malformed passes step 2 and fails here;
+4. refuses to continue if any jar on the EAR classpath already contains one of the three classes, since
    two of one name load in an unspecified order;
-4. compiles the three classes against the EAR's own jars.
+5. compiles the three classes against the EAR's own jars, and link-checks them the same way.
 
 The patcher **fails the build** when the method is missing, when it no longer calls
 `hasNonCeSupportedTokenTypes`, or when something else in the class does. A release that moves the check

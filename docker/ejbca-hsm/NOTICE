@@ -36,7 +36,7 @@ LICENSE
     CKA_* usage attributes, and it is what the Admin UI will show. See
     docs/EJBCA_UPSTREAM_WATCH.md.
 
-StartupCheckPatcher.java, build.sh
+StartupCheckPatcher.java, LinkCheck.java, build.sh
 
     Apache-2.0, Copyright (c) 2026 Thomas Pham, like the rest of kimbo11ng. StartupCheckPatcher
     rewrites one method of Keyfactor's ejbca-ejb.jar at image-build time; it contains none of

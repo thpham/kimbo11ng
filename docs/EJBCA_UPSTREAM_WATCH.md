@@ -63,7 +63,14 @@ aborts deployment when `!isRunningEnterprise() && hasNonCeSupportedTokenTypes()`
   `StartupSingletonBean` in `ejbca-ejb.jar`.
 - **Response:** the image build patches that one method out of the official `ejbca-ejb.jar` and fails
   if the method is not found (`docker/ejbca-hsm/`). A moved or renamed method makes the build loud
-  instead of the CA silently refusing to start.
+  instead of the CA silently refusing to start. The build then has the JVM load the patched class with
+  the verifier forced on, so a malformed rewrite fails there too (checked with a deliberately broken
+  patch, which the `javap` check alone accepts).
+- **Limits of the approach:** the patcher knows one method name and one call. It cannot see a check
+  added in another class, or a change to *what* the method does beyond calling the check. ASM 9.7.1
+  reads class files up to Java 23; a release built for a newer Java stops the build until ASM is bumped.
+  The end-to-end guard is the integration suite, which restarts EJBCA with a `Pkcs11NgCryptoToken` row
+  in the database.
 - **Watch for:** the check moving into `CryptoTokenSessionBean`, a second check on the token
   *create* path, or the check becoming a licence check rather than a type check. Each needs a new
   anchor, and the last is a decision for a person, not a patch.

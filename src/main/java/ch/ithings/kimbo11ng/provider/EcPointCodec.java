@@ -174,6 +174,14 @@ final class EcPointCodec {
      * <p>Parse <em>and consume</em>: a raw point whose X coordinate begins with a byte that looks
      * like a length parses as a shorter OCTET STRING with trailing bytes left over. Requiring the
      * encoding to account for every byte is what rejects that.
+     *
+     * <p>Every failure is "not an OCTET STRING", including the unchecked ones. BouncyCastle's
+     * parser does not confine itself to {@code IOException}: {@code ASN1ParsingException} extends
+     * {@code IllegalStateException}, and a constructed BIT STRING whose pad-bit count is out of
+     * range ({@code 23 80 03 31 1b ...}) throws exactly that. These bytes come from the token, so
+     * an unchecked exception here escapes {@code PublicKeyReader.readEcPublicKey} and aborts the
+     * enumeration of every alias on the slot over one malformed key. Catching the parser's whole
+     * surface is deliberate, and is not narrowed to the types BouncyCastle happens to throw today.
      */
     private static byte[] unwrapOctetString(byte[] buffer) {
         try (ASN1InputStream in = new ASN1InputStream(buffer)) {
@@ -190,7 +198,7 @@ final class EcPointCodec {
                 return null;
             }
             return octets.getOctets();
-        } catch (IOException | IllegalArgumentException e) {
+        } catch (IOException | RuntimeException e) {
             if (log.isDebugEnabled()) {
                 log.debug("CKA_EC_POINT is not a DER OCTET STRING: " + e.getMessage());
             }

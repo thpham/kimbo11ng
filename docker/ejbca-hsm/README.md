@@ -29,6 +29,17 @@ The patcher **fails the build** when the method is missing, when it no longer ca
 `hasNonCeSupportedTokenTypes`, or when something else in the class does. A release that moves the check
 therefore stops the image build, not the CA at 3 a.m.
 
+Those refusals are the whole value of the tool, so they are tested rather than assumed. `test.sh`
+builds synthetic classes shaped like `StartupSingletonBean` — renamed method, method that no longer
+calls the check, a second caller elsewhere in the class, no class at all — and asserts that each is
+refused with the message that names the cause. It also checks that the real shape is patched, that
+`javap` agrees the body is one `return`, and that a second run is a no-op. It needs only a JDK and
+ASM, runs in seconds, and never touches an EJBCA image:
+
+```bash
+./docker/ejbca-hsm/test.sh      # or: just patcher-test
+```
+
 Try it without Docker Compose:
 
 ```bash
@@ -39,5 +50,5 @@ docker run --rm --user root --entrypoint bash \
 
 ## On an EJBCA bump
 
-`docs/EJBCA_UPSTREAM_WATCH.md` lists what to re-check. For this directory: re-run the build (step 2 is
-the canary), re-diff the three classes against the upstream commits in NOTICE, and re-read W1 and W2.
+`docs/EJBCA_UPSTREAM_WATCH.md` lists what to re-check. For this directory: run `test.sh`, re-run the build (step 2
+is the canary), re-diff the three classes against the upstream commits in NOTICE, and re-read W1 and W2.

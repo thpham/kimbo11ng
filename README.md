@@ -280,6 +280,17 @@ nothing checked. Read survivors before acting on them. Some are equivalent mutan
 `FakeToken` is more forgiving than a real HSM — in that case fix the fake and add the case to
 `HsmContract`, which also runs against SoftHSMv3. The report is `target/pit-reports/index.html`.
 
+**Fuzz and refusal tests.** `EcPointFuzzTest` throws bent and arbitrary bytes at the two
+`EcPointCodec` entry points and holds them to a total contract: every input yields either a point on
+the curve or an `InvalidKeyException`, never an unchecked one. Seeds are fixed, so a failure is
+reproducible and PIT sees a stable suite. It found one: a constructed BIT STRING with an out-of-range
+pad-bit count makes BouncyCastle throw `ASN1ParsingException`, which extends `IllegalStateException`
+and so escaped a catch of `IOException | IllegalArgumentException` — out through
+`PublicKeyReader.readEcPublicKey`, where it would have aborted enumeration of every alias on the slot
+over one malformed key. `just patcher-test` does the same for the image build's bytecode patcher:
+synthetic classes with the start-up check renamed, gutted or duplicated, each of which it must refuse
+by name.
+
 **Integration tests** (`EjbcaContainerIT`) run against a full EJBCA CE stack managed by
 Testcontainers:
 
@@ -304,7 +315,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 751 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 770 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

@@ -166,6 +166,12 @@ it:
 it-only:
     cd {{module_dir}} && mvn -Pit test-compile failsafe:integration-test failsafe:verify
 
+# Needs a JDK and network access for ASM (or ASM_JAR set); no EJBCA image, seconds to run.
+#
+# Prove StartupCheckPatcher still refuses what it should
+patcher-test:
+    {{module_dir}}/docker/ejbca-hsm/test.sh
+
 # A mutation is a small deliberate bug (a flipped condition, a dropped call); a survivor is one no
 # test noticed. Takes minutes — about 8 for everything — so it is not part of `test` or `build`.
 # Pass classes to narrow it, e.g. `just mutation 'ch.ithings.kimbo11ng.p11.SessionPool'` (comma

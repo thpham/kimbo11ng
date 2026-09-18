@@ -324,7 +324,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 807 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 813 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

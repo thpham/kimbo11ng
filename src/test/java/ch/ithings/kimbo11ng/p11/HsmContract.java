@@ -14,7 +14,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.api.TestInstance;
 import org.pkcs11.jacknji11.CKM;
 
@@ -291,6 +294,47 @@ public abstract class HsmContract {
         String alias = alias("rsa-sign");
         impl.generateKeyPair("2048", alias);
         signAndVerify(alias, "SHA256withRSA");
+    }
+
+    /**
+     * Every classical signature algorithm this provider registered, on a key of the right kind.
+     *
+     * <p>Registration is already gated on the mechanism probe, so the provider's own service list
+     * is the token's answer to "what can you sign with". Iterating it rather than a fixed list is
+     * what makes this test say something different on each HSM — and what makes a new algorithm
+     * covered on hardware the day it is added, without editing this file.
+     *
+     * <p>The classical half used to be two assertions, {@code SHA256withRSA} and
+     * {@code SHA256withECDSA}. A hardware session therefore said nothing about SHA-3 or EdDSA,
+     * which is precisely where a token is most likely to differ: SHA-3 combinations are commonly
+     * advertised and not implemented, and EdDSA has two encodings of its public key.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "2048,    SHA1withRSA|SHA256withRSA|SHA384withRSA|SHA512withRSA"
+                + "|SHA3-256withRSA|SHA3-384withRSA|SHA3-512withRSA"
+                + "|SHA256withRSAandMGF1|SHA384withRSAandMGF1|SHA512withRSAandMGF1",
+        "secp256r1, SHA1withECDSA|SHA224withECDSA|SHA256withECDSA|SHA3-256withECDSA",
+        "secp384r1, SHA384withECDSA|SHA3-384withECDSA",
+        "secp521r1, SHA512withECDSA|SHA3-512withECDSA",
+        "Ed25519,  Ed25519",
+        "Ed448,    Ed448"})
+    @DisplayName("signs with every classical algorithm the token advertises")
+    void everyClassicalAlgorithm(String keySpec, String candidates) throws Exception {
+        List<String> registered = new ArrayList<>();
+        for (String jcaName : candidates.split("\\|")) {
+            if (impl.getProvider().getService("Signature", jcaName) != null) {
+                registered.add(jcaName);
+            }
+        }
+        Assumptions.assumeFalse(registered.isEmpty(),
+                "the token advertises no mechanism for any of: " + candidates);
+
+        String alias = alias("classical-" + keySpec);
+        impl.generateKeyPair(keySpec, alias);
+        for (String jcaName : registered) {
+            signAndVerify(alias, jcaName);
+        }
     }
 
     @Test

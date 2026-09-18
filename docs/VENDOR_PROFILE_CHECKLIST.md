@@ -215,6 +215,24 @@ correct — the two agree on every algorithm they share.
 Sources: Luna HSM Firmware 7.9.0 Customer Release Notes; the ML-DSA and ML-KEM programming guides
 and the "Post Quantum Algorithms" page in the Luna SDK documentation at `thalesdocs.com`.
 
+### Classical algorithms to settle in the same session
+
+The profile covers post-quantum only. Everything classical is decided by the mechanism probe at
+registration time, so there is no table to be wrong — but there is still an answer to record, and
+since 0f1c5f6 the set is wider than RSA and ECDSA. `everyClassicalAlgorithm` in `HsmContract`
+iterates the provider's own registered services, so whatever the Luna advertises is generated,
+signed with and verified in the same run; nothing here needs editing when an algorithm is added.
+
+What to read off that run, none of it verified against hardware yet:
+
+| Question | Why it is not obvious |
+| --- | --- |
+| Does Luna advertise `CKM_EDDSA` and `CKM_EC_EDWARDS_KEY_PAIR_GEN`? | Documented as supported from firmware 7.7. If it does, Ed25519 and Ed448 become usable CA keys. |
+| Which `CKA_EC_PARAMS` spelling does it want for Edwards? | v3.0 permits the OID and a `PrintableString`. kimbo11ng sends the OID and refuses the other by name. A Luna wanting `"edwards25519"` needs a profile, and the refusal message says so. |
+| Is `CKA_EC_POINT` bare or DER-wrapped for Edwards? | Both are accepted, and the lengths disambiguate, but which one it is belongs in this table. |
+| Are the SHA-3 combinations advertised **and** implemented? | The common divergence: a token lists `CKM_SHA3_256_RSA_PKCS` and then fails `C_SignInit`. The probe cannot see that; only signing can. |
+| Ed448 at all? | Several HSMs ship Ed25519 and not Ed448. The two are separate rows in the run for that reason. |
+
 **Not yet verified against hardware.** Everything above is from vendor documentation. Running
 `HsmConformanceIT` against a Luna is what turns it into a fact, and the failure will name which row
 is wrong.

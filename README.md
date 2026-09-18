@@ -172,8 +172,19 @@ just ci
 # Or step by step:
 just setup          # extract JARs from EJBCA image + install + build
 just docker-build   # build Docker image (EJBCA + softhsmv3 + kimbo11ng)
-just up             # start EJBCA + PostgreSQL
-just create-token   # provision TestHSM as Pkcs11NgCryptoToken
+just up             # start EJBCA + PostgreSQL (host ports 8080/8443/9443)
+just create-token   # provision TestHSM as Pkcs11NgCryptoToken (restarts EJBCA, waits until it is back)
+
+# Admin UI: https://localhost:8443/ejbca/adminweb/  — HTTPS, and accept the self-signed certificate.
+# The plain-HTTP port (8080) answers "Authorization Denied": the UI needs the TLS session. This dev
+# stack sets EJBCA_ADMIN_ALLOW_ANY_IP, so anyone who reaches the HTTPS port is a super administrator.
+# Do not expose it beyond your own machine.
+
+# Port 8080, 8443 or 9443 already taken? Move the host side; the container is unchanged.
+# Shell variables work, and so does a git-ignored `.env` next to docker-compose.yml:
+echo 'EJBCA_HTTP_PORT=18080
+EJBCA_HTTPS_PORT=18443
+EJBCA_RA_PORT=19443' > .env
 
 # Run integration tests (Testcontainers — starts a fresh stack automatically)
 mvn verify -Pit

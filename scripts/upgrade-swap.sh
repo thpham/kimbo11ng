@@ -21,8 +21,8 @@
 #
 # It passes when the second CRL is signed, the key fingerprints are the ones from step 1, and EJBCA
 # does not refuse the token at start-up. It exits non-zero on the first failing step and prints what
-# it saw either way. Host ports 18080/18443/19443 are used, so it does not collide with a service on
-# 8080. It removes its containers and volumes when it finishes.
+# it saw either way. Host ports 18080/18443/19443 are used (EJBCA_HTTP_PORT, EJBCA_HTTPS_PORT and
+# EJBCA_RA_PORT in docker-compose.yml), so it does not collide with a service on 8080. It removes its containers and volumes when it finishes.
 
 set -euo pipefail
 
@@ -38,19 +38,13 @@ WORK="$(mktemp -d)"
 PROJECT="kimbo11ng-swap"
 cd "$ROOT"
 
-cat > "$WORK/ports.yml" <<'YAML'
-services:
-  ejbca:
-    ports: !override
-      - "18080:8080"
-      - "18443:8443"
-      - "19443:9443"
-YAML
+# Host ports for this run, through the variables docker-compose.yml reads.
+export EJBCA_HTTP_PORT=18080 EJBCA_HTTPS_PORT=18443 EJBCA_RA_PORT=19443
 
 dc() { # dc IMAGE args...
     local image="$1"; shift
     printf 'services:\n  ejbca:\n    image: %s\n' "$image" > "$WORK/image.yml"
-    docker compose -p "$PROJECT" -f docker-compose.yml -f "$WORK/ports.yml" -f "$WORK/image.yml" "$@"
+    docker compose -p "$PROJECT" -f docker-compose.yml -f "$WORK/image.yml" "$@"
 }
 ej() { docker compose -p "$PROJECT" exec -T ejbca /opt/keyfactor/bin/ejbca.sh "$@" 2>&1 | grep -v '^$'; }
 sql() { docker compose -p "$PROJECT" exec -T postgres psql -U ejbca -d ejbca -tAc "$1"; }

@@ -68,7 +68,7 @@ class EjbcaContainerIT {
     // docker-compose.it.yml — IT-specific compose file without fixed host port bindings.
     // Testcontainers maps container ports to random ephemeral host ports; use
     // getServiceHost/getServicePort to discover them.  This avoids conflicts with
-    // a running dev stack (docker-compose.yml uses fixed ports 8080/8443/9443).
+    // a running dev stack (docker-compose.yml maps fixed host ports, 8080/8443/9443 by default).
     @Container
     static final ComposeContainer COMPOSE = new ComposeContainer(
             new File("src/it/docker-compose.it.yml"))

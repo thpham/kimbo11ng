@@ -35,10 +35,13 @@ services:
       SOFTHSM_TOKEN_LABEL:  "TestToken"
       SOFTHSM_TOKEN_PIN:    "1234"
       SOFTHSM_TOKEN_SO_PIN: "12345678"
+    # Host-side ports only; the container always listens on 8080/8443/9443. Override any of them in
+    # the shell or in a `.env` file next to this one (compose reads it, git ignores it) when a port
+    # is already taken, e.g. EJBCA_HTTPS_PORT=18443.
     ports:
-      - "8080:8080"   # HTTP (redirect to HTTPS)
-      - "8443:8443"   # EJBCA admin HTTPS
-      - "9443:9443"   # RA/VA HTTPS
+      - "${EJBCA_HTTP_PORT:-8080}:8080"    # plain HTTP; the admin UI refuses it, use the HTTPS port
+      - "${EJBCA_HTTPS_PORT:-8443}:8443"   # EJBCA admin HTTPS
+      - "${EJBCA_RA_PORT:-9443}:9443"      # RA/VA HTTPS
     volumes:
       - softhsm-tokens:/var/lib/softhsmv3/tokens
       - ejbca-p12:/opt/keyfactor/ejbca/p12

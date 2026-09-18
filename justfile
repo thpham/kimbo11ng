@@ -335,7 +335,10 @@ create-token:
     echo "Created TestHSM (Pkcs11NgCryptoToken) with id=$TOKEN_ID"
     echo "Restarting EJBCA to pick up the new token..."
     docker compose restart ejbca
-    sleep 20
+    # Not a fixed sleep: EJBCA takes a minute or more to come back, and reporting "Done" before that
+    # sends people to an admin UI that is not up yet.
+    echo "Waiting for EJBCA to be healthy..."
+    docker compose exec -T ejbca sh -c 'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done' || true
     echo "Done."
 
 # ─── CI helpers ───────────────────────────────────────────────────────────────

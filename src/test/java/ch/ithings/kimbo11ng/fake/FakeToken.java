@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.fake;
 
 import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.p11.Pkcs11v30;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 
@@ -611,8 +612,16 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
                 // SoftHSMv3 advertises all three PSS mechanisms with CKF_SIGN|CKF_VERIFY.
                 CKM.SHA256_RSA_PKCS_PSS, CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS,
+                // SoftHSMv3 advertises the SHA-3 combinations too, with CKF_SIGN, and EJBCA
+                // offers them for every RSA key — so a fake that lacked them would let a service
+                // this provider registers go untested.
+                Pkcs11v30.CKM_SHA3_256_RSA_PKCS, Pkcs11v30.CKM_SHA3_384_RSA_PKCS,
+                Pkcs11v30.CKM_SHA3_512_RSA_PKCS,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA,
-                CKM.ECDSA_SHA1, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
+                CKM.ECDSA_SHA1, CKM.ECDSA_SHA224, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384,
+                CKM.ECDSA_SHA512,
+                Pkcs11v30.CKM_ECDSA_SHA3_256, Pkcs11v30.CKM_ECDSA_SHA3_384,
+                Pkcs11v30.CKM_ECDSA_SHA3_512,
                 // Symmetric: the generation mechanisms carry CKF_GENERATE and the HMAC mechanisms
                 // CKF_SIGN|CKF_VERIFY, which is what SoftHSM reports for them.
                 CKM.AES_KEY_GEN, CKM.GENERIC_SECRET_KEY_GEN,
@@ -1414,6 +1423,18 @@ public final class FakeToken extends UnsupportedNativeProvider {
             if (ckm == CKM.ECDSA_SHA1) {
                 return "SHA1withECDSA";
             }
+            if (ckm == CKM.ECDSA_SHA224) {
+                return "SHA224withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_256) {
+                return "SHA3-256withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_384) {
+                return "SHA3-384withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_512) {
+                return "SHA3-512withECDSA";
+            }
             if (ckm == CKM.ECDSA_SHA384) {
                 return "SHA384withECDSA";
             }
@@ -1424,6 +1445,15 @@ public final class FakeToken extends UnsupportedNativeProvider {
         }
         if (ckm == CKM.SHA1_RSA_PKCS) {
             return "SHA1withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_256_RSA_PKCS) {
+            return "SHA3-256withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_384_RSA_PKCS) {
+            return "SHA3-384withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_512_RSA_PKCS) {
+            return "SHA3-512withRSA";
         }
         if (ckm == CKM.SHA384_RSA_PKCS) {
             return "SHA384withRSA";

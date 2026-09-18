@@ -207,7 +207,7 @@ public final class TokenCapabilities {
     }
 
     /**
-     * The six PKCS#11 v3.2 mechanisms Keyfactor's jacknji11 1.3.1 predates.
+     * The PKCS#11 v3.0 and v3.2 mechanisms Keyfactor's jacknji11 1.3.1 predates.
      *
      * <p>Named here rather than left as hex so that one list of mechanisms does not mix the two
      * styles — a table where RSA reads {@code CKM_RSA_PKCS_KEY_PAIR_GEN} and ML-DSA reads
@@ -221,13 +221,24 @@ public final class TokenCapabilities {
      *
      * <p>Drop this when the bindings catch up; {@link CKM#L2S} already wins when it answers.
      */
-    private static final Map<Long, String> PKCS11_V32 = Map.of(
-            Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN, "CKM_ML_KEM_KEY_PAIR_GEN",
-            Pkcs11v32.CKM_ML_KEM, "CKM_ML_KEM",
-            Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN, "CKM_ML_DSA_KEY_PAIR_GEN",
-            Pkcs11v32.CKM_ML_DSA, "CKM_ML_DSA",
-            Pkcs11v32.CKM_SLH_DSA_KEY_PAIR_GEN, "CKM_SLH_DSA_KEY_PAIR_GEN",
-            Pkcs11v32.CKM_SLH_DSA, "CKM_SLH_DSA");
+    private static final Map<Long, String> PKCS11_V32 = Map.ofEntries(
+            Map.entry(Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN, "CKM_ML_KEM_KEY_PAIR_GEN"),
+            Map.entry(Pkcs11v32.CKM_ML_KEM, "CKM_ML_KEM"),
+            Map.entry(Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN, "CKM_ML_DSA_KEY_PAIR_GEN"),
+            Map.entry(Pkcs11v32.CKM_ML_DSA, "CKM_ML_DSA"),
+            Map.entry(Pkcs11v32.CKM_SLH_DSA_KEY_PAIR_GEN, "CKM_SLH_DSA_KEY_PAIR_GEN"),
+            Map.entry(Pkcs11v32.CKM_SLH_DSA, "CKM_SLH_DSA"),
+            // v3.0's SHA-3 additions, for the same reason: a dump that names RSA and leaves
+            // SHA3-256 as 0x00000060 reads as if the second were less well understood.
+            Map.entry(Pkcs11v30.CKM_SHA3_256_RSA_PKCS, "CKM_SHA3_256_RSA_PKCS"),
+            Map.entry(Pkcs11v30.CKM_SHA3_384_RSA_PKCS, "CKM_SHA3_384_RSA_PKCS"),
+            Map.entry(Pkcs11v30.CKM_SHA3_512_RSA_PKCS, "CKM_SHA3_512_RSA_PKCS"),
+            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_256, "CKM_ECDSA_SHA3_256"),
+            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_384, "CKM_ECDSA_SHA3_384"),
+            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_512, "CKM_ECDSA_SHA3_512"),
+            Map.entry(Pkcs11v30.CKM_SHA3_256, "CKM_SHA3_256"),
+            Map.entry(Pkcs11v30.CKM_SHA3_384, "CKM_SHA3_384"),
+            Map.entry(Pkcs11v30.CKM_SHA3_512, "CKM_SHA3_512"));
 
     @Override
     public String toString() {

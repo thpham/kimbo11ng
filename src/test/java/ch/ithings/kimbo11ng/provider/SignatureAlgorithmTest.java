@@ -115,7 +115,10 @@ class SignatureAlgorithmTest {
     class Pkcs1 {
 
         @ParameterizedTest
-        @CsvSource({"SHA1withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA"})
+        @CsvSource({"SHA1withRSA", "SHA256withRSA", "SHA384withRSA", "SHA512withRSA",
+            // AlgorithmTools offers these three for every RSA key, so an administrator can pick
+            // one for a CA. Before they were registered, that CA failed at its first signature.
+            "SHA3-256withRSA", "SHA3-384withRSA", "SHA3-512withRSA"})
         @DisplayName("signs and verifies")
         void roundTrip(String jcaName) throws Exception {
             long[] handles = generateRsa("rsa-" + jcaName, 2048);
@@ -171,9 +174,13 @@ class SignatureAlgorithmTest {
 
         @ParameterizedTest
         @CsvSource({
+            "SHA224withECDSA, secp256r1",
             "SHA256withECDSA, secp256r1",
             "SHA384withECDSA, secp384r1",
-            "SHA512withECDSA, secp521r1"})
+            "SHA512withECDSA, secp521r1",
+            "SHA3-256withECDSA, secp256r1",
+            "SHA3-384withECDSA, secp384r1",
+            "SHA3-512withECDSA, secp521r1"})
         @DisplayName("signs, DER-wraps and verifies")
         void roundTrip(String jcaName, String curve) throws Exception {
             // PKCS#11 returns the bare r||s pair; X.509 needs SEQUENCE{INTEGER r, INTEGER s}. The
@@ -204,7 +211,12 @@ class SignatureAlgorithmTest {
             "SHA384withRSA,        1.2.840.113549.1.1.12",
             "SHA256withRSAandMGF1, 1.2.840.113549.1.1.10",
             "SHA384withRSAandMGF1, 1.2.840.113549.1.1.10",
-            "SHA512withRSAandMGF1, 1.2.840.113549.1.1.10"})
+            "SHA512withRSAandMGF1, 1.2.840.113549.1.1.10",
+            // The SHA-3 identifiers are what lands in a certificate issued by such a CA; a wrong
+            // one produces a certificate no relying party can verify.
+            "SHA3-256withRSA,      2.16.840.1.101.3.4.3.14",
+            "SHA3-384withRSA,      2.16.840.1.101.3.4.3.15",
+            "SHA3-512withRSA,      2.16.840.1.101.3.4.3.16"})
         @DisplayName("builds, signs and stamps the right algorithm identifier")
         void buildsAndSigns(String jcaName, String expectedOid) throws Exception {
             long[] handles = generateRsa("cs-" + jcaName, 2048);
@@ -228,11 +240,43 @@ class SignatureAlgorithmTest {
                     jcaName + " via ContentSigner produced an unverifiable signature");
         }
 
+        @ParameterizedTest
+        @CsvSource({
+            "SHA224withECDSA,   secp256r1, 1.2.840.10045.4.3.1",
+            "SHA256withECDSA,   secp256r1, 1.2.840.10045.4.3.2",
+            "SHA3-256withECDSA, secp256r1, 2.16.840.1.101.3.4.3.10",
+            "SHA3-384withECDSA, secp384r1, 2.16.840.1.101.3.4.3.11",
+            "SHA3-512withECDSA, secp521r1, 2.16.840.1.101.3.4.3.12"})
+        @DisplayName("builds and signs for EC too, with the DER re-wrap in the path")
+        void buildsAndSignsEc(String jcaName, String curve, String expectedOid) throws Exception {
+            // Same trap as the RSA rows above, plus the r||s to DER conversion, which a
+            // ContentSigner exercises exactly as a certificate signature would.
+            long[] handles = generateEc("cs-" + jcaName, curve);
+            Kimbo11ngPrivateKey key = new Kimbo11ngPrivateKey("EC", fixture.slot(),
+                    new P11KeyRef(null, "cs-ec", null), handles[1]);
+            byte[] message = "certificate to be signed".getBytes(StandardCharsets.UTF_8);
+
+            org.bouncycastle.operator.ContentSigner signer =
+                    new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder(jcaName)
+                            .setProvider(provider).build(key);
+            signer.getOutputStream().write(message);
+            signer.getOutputStream().close();
+
+            assertEquals(expectedOid, signer.getAlgorithmIdentifier().getAlgorithm().getId());
+
+            Signature verifier = Signature.getInstance(jcaName, BouncyCastleProvider.PROVIDER_NAME);
+            verifier.initVerify(readEc(handles[0]));
+            verifier.update(message);
+            assertTrue(verifier.verify(signer.getSignature()),
+                    jcaName + " via ContentSigner produced an unverifiable signature");
+        }
+
         @Test
         @DisplayName("offers the digests BouncyCastle looks up, under both spellings")
         void digestServices() throws Exception {
             for (String name : new String[] {"SHA-256", "SHA256", "SHA-384", "SHA384",
-                    "SHA-512", "SHA512", "SHA-1", "SHA1"}) {
+                    "SHA-512", "SHA512", "SHA-1", "SHA1",
+                    "SHA3-256", "SHA3256", "SHA3-384", "SHA3384", "SHA3-512", "SHA3512"}) {
                 assertNotNull(provider.getService("MessageDigest", name), name);
             }
             // And they must compute the real thing, not a stub.

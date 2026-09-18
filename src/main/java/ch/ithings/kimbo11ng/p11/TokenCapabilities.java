@@ -188,57 +188,23 @@ public final class TokenCapabilities {
     /**
      * {@code "CKM_ECDSA (0x00001041)"}, for messages that have to name a mechanism.
      *
-     * <p>Bare hex whenever the bindings cannot name the mechanism, because their placeholder
-     * ("unknown CKM constant …") reads as an error rather than a value. Which mechanisms that
-     * covers depends on the build: Keyfactor's jacknji11 1.3.1 predates PKCS#11 v3.2 and names
-     * none of {@code 0x1C}, {@code 0x1D}, {@code 0x2D}, {@code 0x2E}, {@code 0x0F} or
-     * {@code 0x17}, while upstream HEAD names all six. Vendor-defined mechanisms are never named
-     * by either. The hex is always present, so a log line identifies the mechanism regardless.
+     * <p>The bindings first, then {@link Pkcs11MechanismNames} for the 198 mechanisms Keyfactor's
+     * jacknji11 1.3.1 predates, then bare hex. The bindings' own placeholder ("unknown CKM constant
+     * …") is never shown, because it reads as an error rather than as a value the caller can look
+     * up. Vendor-defined mechanisms stay hex by construction: no standard name can be right for
+     * one. The hex is always present either way, so a log line identifies the mechanism regardless.
      */
     public static String name(long ckm) {
         long code = CkULong.typeCode(ckm);
         String hex = String.format("0x%08x", code);
         String symbolic = CKM.L2S(code);
         if (symbolic == null || symbolic.startsWith("unknown ")) {
-            String known = PKCS11_V32.get(code);
+            String known = Pkcs11MechanismNames.get(code);
             return known == null ? hex : known + " (" + hex + ")";
         }
         return "CKM_" + symbolic + " (" + hex + ")";
     }
 
-    /**
-     * The PKCS#11 v3.0 and v3.2 mechanisms Keyfactor's jacknji11 1.3.1 predates.
-     *
-     * <p>Named here rather than left as hex so that one list of mechanisms does not mix the two
-     * styles — a table where RSA reads {@code CKM_RSA_PKCS_KEY_PAIR_GEN} and ML-DSA reads
-     * {@code 0x0000001c} suggests the second is less well understood than the first, when in fact
-     * both are fully specified and only the bindings differ.
-     *
-     * <p>Keyed by value, not derived from the algorithm's family, and that distinction matters: a
-     * vendor profile may map ML-DSA onto a vendor-defined mechanism in the {@code 0x80000000}
-     * range, and printing the standard name over a vendor number would be a confident lie about
-     * what the token was asked for. Anything not in this table stays hex, as before.
-     *
-     * <p>Drop this when the bindings catch up; {@link CKM#L2S} already wins when it answers.
-     */
-    private static final Map<Long, String> PKCS11_V32 = Map.ofEntries(
-            Map.entry(Pkcs11v32.CKM_ML_KEM_KEY_PAIR_GEN, "CKM_ML_KEM_KEY_PAIR_GEN"),
-            Map.entry(Pkcs11v32.CKM_ML_KEM, "CKM_ML_KEM"),
-            Map.entry(Pkcs11v32.CKM_ML_DSA_KEY_PAIR_GEN, "CKM_ML_DSA_KEY_PAIR_GEN"),
-            Map.entry(Pkcs11v32.CKM_ML_DSA, "CKM_ML_DSA"),
-            Map.entry(Pkcs11v32.CKM_SLH_DSA_KEY_PAIR_GEN, "CKM_SLH_DSA_KEY_PAIR_GEN"),
-            Map.entry(Pkcs11v32.CKM_SLH_DSA, "CKM_SLH_DSA"),
-            // v3.0's SHA-3 additions, for the same reason: a dump that names RSA and leaves
-            // SHA3-256 as 0x00000060 reads as if the second were less well understood.
-            Map.entry(Pkcs11v30.CKM_SHA3_256_RSA_PKCS, "CKM_SHA3_256_RSA_PKCS"),
-            Map.entry(Pkcs11v30.CKM_SHA3_384_RSA_PKCS, "CKM_SHA3_384_RSA_PKCS"),
-            Map.entry(Pkcs11v30.CKM_SHA3_512_RSA_PKCS, "CKM_SHA3_512_RSA_PKCS"),
-            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_256, "CKM_ECDSA_SHA3_256"),
-            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_384, "CKM_ECDSA_SHA3_384"),
-            Map.entry(Pkcs11v30.CKM_ECDSA_SHA3_512, "CKM_ECDSA_SHA3_512"),
-            Map.entry(Pkcs11v30.CKM_SHA3_256, "CKM_SHA3_256"),
-            Map.entry(Pkcs11v30.CKM_SHA3_384, "CKM_SHA3_384"),
-            Map.entry(Pkcs11v30.CKM_SHA3_512, "CKM_SHA3_512"));
 
     @Override
     public String toString() {

@@ -215,6 +215,35 @@ correct — the two agree on every algorithm they share.
 Sources: Luna HSM Firmware 7.9.0 Customer Release Notes; the ML-DSA and ML-KEM programming guides
 and the "Post Quantum Algorithms" page in the Luna SDK documentation at `thalesdocs.com`.
 
+### What the standard mechanism space actually holds
+
+Recorded on 2026-09-19, by decoding every mechanism SoftHSMv3 advertises against the OASIS PKCS#11
+v3.2 header. It is written down because the first pass of this work guessed instead, and guessed
+wrong.
+
+- **LMS is reachable.** `CKM_HSS_KEY_PAIR_GEN` (`0x4032`) and `CKM_HSS` (`0x4033`) are advertised by
+  SoftHSMv3 with key-pair-generation and signing flags, and EJBCA declares `SIGALG_LMS`. HSS is the
+  multi-tree form of LMS (RFC 8554), which is what "LMS" means in practice.
+- **XMSS and XMSS^MT too** (`0x4034`–`0x4037`), with no EJBCA signature algorithm for either.
+- **kimbo11ng supports none of them, on purpose.** LMS and XMSS are *stateful*: a private key signs
+  a bounded number of times, and reusing a state index makes forgery possible. NIST SP 800-208
+  requires the state to live in the module, which rules out key backup and restore — restoring is
+  duplicating the state. For a CA that is a direct conflict with HA and disaster recovery, and a key
+  that expires by use rather than by date is something EJBCA would also have to understand. This is
+  a class of key with different lifecycle semantics, not a mechanism to map. Revisit only as a
+  deliberate decision.
+- **FALCON has no PKCS#11 mechanism at all.** Not one occurrence in the v3.2 header. A token could
+  only offer it as a vendor mechanism, which needs a profile. EJBCA declares `SIGALG_FALCON512` and
+  `SIGALG_FALCON1024` regardless.
+- **The `CKM_HASH_ML_DSA_*` and `CKM_HASH_SLH_DSA_*` blocks** (22 mechanisms, `0x1f`–`0x3f`) are the
+  pre-hash variants of FIPS 204 and 205. kimbo11ng uses the pure ones, `CKM_ML_DSA` (`0x1d`) and
+  `CKM_SLH_DSA` (`0x2e`), and EJBCA has no signature algorithm for the pre-hash forms.
+
+`Pkcs11MechanismNames` now names all 198 mechanisms the bindings predate, so a dump reads as an
+inventory. On SoftHSMv3 that leaves 8 of 165 as hex: six vendor-defined, which no standard name can
+describe, and two beyond the published header. Expect a Luna to leave its own vendor set unnamed —
+that residue is the interesting part of the output, not a defect in it.
+
 ### Classical algorithms to settle in the same session
 
 The profile covers post-quantum only. Everything classical is decided by the mechanism probe at

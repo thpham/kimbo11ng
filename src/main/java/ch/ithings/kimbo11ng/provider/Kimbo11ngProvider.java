@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.provider;
 
 import ch.ithings.kimbo11ng.p11.P11Slot;
+import ch.ithings.kimbo11ng.p11.Pkcs11v30;
 import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
@@ -63,8 +64,24 @@ public final class Kimbo11ngProvider extends Provider {
      *
      * @param mechanismParam non-null only for RSA-PSS; see {@link RsaPssParams}
      */
+    /**
+     * @param oidAliases OIDs this algorithm must also answer to, or empty.
+     *        <p>BouncyCastle's operator layer resolves a signer from an {@code AlgorithmIdentifier},
+     *        and {@code OperatorHelper} only turns that back into a JCA name for the algorithms its
+     *        own table knows; for the rest it asks the provider for the OID <em>as the algorithm
+     *        name</em>. So a service registered under its name alone is invisible to
+     *        {@code JcaContentSignerBuilder} — which is the path EJBCA signs every certificate
+     *        through — and CA creation fails with "no such algorithm: 2.16.840.1.101.3.4.3.14".
+     *        Signing and verifying directly through {@code Signature.getInstance} works throughout,
+     *        which is what makes this worth stating: the plain round trip does not reveal it.
+     */
     private record ClassicalSignature(String jcaName, long mechanism, boolean ecdsaDerEncoding,
-            byte[] mechanismParam) {
+            byte[] mechanismParam, List<String> oidAliases) {
+
+        ClassicalSignature(String jcaName, long mechanism, boolean ecdsaDerEncoding,
+                byte[] mechanismParam) {
+            this(jcaName, mechanism, ecdsaDerEncoding, mechanismParam, List.of());
+        }
     }
 
     /**
@@ -80,6 +97,14 @@ public final class Kimbo11ngProvider extends Provider {
             new ClassicalSignature("SHA256withRSA",   CKM.SHA256_RSA_PKCS, false, null),
             new ClassicalSignature("SHA384withRSA",   CKM.SHA384_RSA_PKCS, false, null),
             new ClassicalSignature("SHA512withRSA",   CKM.SHA512_RSA_PKCS, false, null),
+            // SHA-3 is not exotic here: AlgorithmTools offers these three for every RSA key, so
+            // without them an administrator can configure a CA EJBCA will then fail to sign with.
+            new ClassicalSignature("SHA3-256withRSA", Pkcs11v30.CKM_SHA3_256_RSA_PKCS, false, null,
+                    List.of("2.16.840.1.101.3.4.3.14")),
+            new ClassicalSignature("SHA3-384withRSA", Pkcs11v30.CKM_SHA3_384_RSA_PKCS, false, null,
+                    List.of("2.16.840.1.101.3.4.3.15")),
+            new ClassicalSignature("SHA3-512withRSA", Pkcs11v30.CKM_SHA3_512_RSA_PKCS, false, null,
+                    List.of("2.16.840.1.101.3.4.3.16")),
             new ClassicalSignature("SHA256withRSAandMGF1", CKM.SHA256_RSA_PKCS_PSS, false,
                     RsaPssParams.sha256()),
             new ClassicalSignature("SHA384withRSAandMGF1", CKM.SHA384_RSA_PKCS_PSS, false,
@@ -92,7 +117,23 @@ public final class Kimbo11ngProvider extends Provider {
             new ClassicalSignature("SHA1withECDSA",   CKM.ECDSA_SHA1,      true,  null),
             new ClassicalSignature("SHA256withECDSA", CKM.ECDSA_SHA256,    true,  null),
             new ClassicalSignature("SHA384withECDSA", CKM.ECDSA_SHA384,    true,  null),
-            new ClassicalSignature("SHA512withECDSA", CKM.ECDSA_SHA512,    true,  null));
+            new ClassicalSignature("SHA224withECDSA", CKM.ECDSA_SHA224,    true,  null,
+                    List.of("1.2.840.10045.4.3.1")),
+            new ClassicalSignature("SHA512withECDSA", CKM.ECDSA_SHA512,    true,  null),
+            new ClassicalSignature("SHA3-256withECDSA", Pkcs11v30.CKM_ECDSA_SHA3_256, true, null,
+                    List.of("2.16.840.1.101.3.4.3.10")),
+            new ClassicalSignature("SHA3-384withECDSA", Pkcs11v30.CKM_ECDSA_SHA3_384, true, null,
+                    List.of("2.16.840.1.101.3.4.3.11")),
+            new ClassicalSignature("SHA3-512withECDSA", Pkcs11v30.CKM_ECDSA_SHA3_512, true, null,
+                    List.of("2.16.840.1.101.3.4.3.12")),
+            // EdDSA is pure: CKM_EDDSA takes the message, not a digest, and returns R||S as a
+            // fixed-width pair that goes into a certificate unchanged — so no DER re-wrap, unlike
+            // ECDSA. One mechanism serves both curves; the key decides which, and the two services
+            // exist because Ed25519 and Ed448 are distinct JCA algorithms.
+            new ClassicalSignature("Ed25519", CKM.EDDSA, false, null,
+                    List.of("1.3.101.112")),
+            new ClassicalSignature("Ed448", CKM.EDDSA, false, null,
+                    List.of("1.3.101.113")));
 
     /**
      * Digest services, as {@code {standardName, alias...}}.
@@ -104,7 +145,13 @@ public final class Kimbo11ngProvider extends Provider {
             new String[] {"SHA-1",   "SHA1",   "SHA",  "1.3.14.3.2.26"},
             new String[] {"SHA-256", "SHA256", "2.16.840.1.101.3.4.2.1"},
             new String[] {"SHA-384", "SHA384", "2.16.840.1.101.3.4.2.2"},
-            new String[] {"SHA-512", "SHA512", "2.16.840.1.101.3.4.2.3"});
+            new String[] {"SHA-512", "SHA512", "2.16.840.1.101.3.4.2.3"},
+            // Needed by the same operator layer as the four above: a CA signing with
+            // SHA3-256withRSA has BouncyCastle ask this provider for "SHA3-256" by name, and the
+            // failure without it is "no such algorithm" at CA creation, not at signing.
+            new String[] {"SHA3-256", "SHA3256", "2.16.840.1.101.3.4.2.8"},
+            new String[] {"SHA3-384", "SHA3384", "2.16.840.1.101.3.4.2.9"},
+            new String[] {"SHA3-512", "SHA3512", "2.16.840.1.101.3.4.2.10"});
 
     private final transient AtomicReference<TokenRuntime> runtime = new AtomicReference<>();
 
@@ -242,7 +289,8 @@ public final class Kimbo11ngProvider extends Provider {
                 continue;
             }
             putService(new Service(this, "Signature", row.jcaName(),
-                    Kimbo11ngSignatureSpi.class.getName(), null, null) {
+                    Kimbo11ngSignatureSpi.class.getName(),
+                    row.oidAliases().isEmpty() ? null : row.oidAliases(), null) {
                 @Override
                 public Object newInstance(Object constructorParameter) {
                     return Kimbo11ngSignatureSpi.fixed(row.mechanism(), row.ecdsaDerEncoding(),

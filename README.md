@@ -29,6 +29,7 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 | RSA       | 2048, 3072, 4096                             | generate, sign         | PKCS#1 v1.5     |
 | RSA-PSS   | 2048, 3072, 4096                             | generate, sign         | PKCS#1 v2.1     |
 | EC        | P-256/384/521, secp256k1, brainpoolP256/384/512r1 | generate, sign    | NIST / RFC 5639 |
+| EdDSA     | Ed25519, Ed448                               | generate, sign         | RFC 8032        |
 | ML-DSA    | ML-DSA-44, ML-DSA-65, ML-DSA-87              | generate, sign         | FIPS 204        |
 | ML-KEM    | ML-KEM-512, ML-KEM-768, ML-KEM-1024          | generate, enumerate    | FIPS 203        |
 | SLH-DSA   | SHA2/SHAKE x 128/192/256 x S/F (12 variants) | generate, sign         | FIPS 205        |
@@ -36,9 +37,17 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 
 ### Signature algorithms registered by the JCA provider
 
-`SHA{1,256,384,512}withRSA`, `SHA{256,384,512}withRSAandMGF1`, `SHA{1,256,384,512}withECDSA`, and
-one service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A
-service is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
+`SHA{1,256,384,512}withRSA`, `SHA3-{256,384,512}withRSA`, `SHA{256,384,512}withRSAandMGF1`,
+`SHA{1,224,256,384,512}withECDSA`, `SHA3-{256,384,512}withECDSA`, `Ed25519`, `Ed448`, and one
+service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A service
+is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
+
+The set is chosen to match what EJBCA offers, not what is convenient: `AlgorithmTools`
+`.getSignatureAlgorithms` returns the SHA-3 and `SHA224withECDSA` spellings for every RSA and EC
+key, so an administrator can pick one when creating a CA. Each is registered under its OID as well
+as its name — BouncyCastle's operator layer resolves a signer from an `AlgorithmIdentifier` and asks
+the provider for the OID as the algorithm name, so a name-only registration is invisible to the
+path EJBCA signs certificates through.
 
 ### Symmetric keys
 
@@ -236,6 +245,7 @@ mvn verify -Pit
 | `just build`              | Build the fat JAR, gates included (`mvn clean verify`)                      |
 | `just build-quick`        | Package with no clean, tests or gates — for `just deploy` iteration only    |
 | `just test`               | Unit tests + every build gate, no Docker needed                             |
+| `just mutation`           | Mutation testing (PIT): which deliberate bugs the unit tests miss, ~8 min   |
 | `just it`                 | The above plus the integration suite — run `just docker-build` first        |
 | `just it-only`            | Integration tests alone, skipping the unit suite and the gates              |
 | `just cli`                | Run the command-line tool from the build tree                               |
@@ -271,6 +281,25 @@ hide or under-report a mechanism, refuse an attribute write.
   constants, so a vendor table is proved end to end and not merely for self-consistency
 - Build gates: enforcer, duplicate-finder, SpotBugs + findsecbugs, JaCoCo floor, `-Werror`
 
+**Mutation testing** (`just mutation`, PIT) asks the question coverage cannot: would a test fail if
+this line were wrong? It is deliberately outside `verify` and has no threshold yet. The first run
+(1506 mutants, 68% killed) found real gaps, several now closed: a leaked session-pool permit, a
+`Signature` that carried the previous message into the next signature, and EC point prefixes that
+nothing checked. Read survivors before acting on them. Some are equivalent mutants, and some mean
+`FakeToken` is more forgiving than a real HSM — in that case fix the fake and add the case to
+`HsmContract`, which also runs against SoftHSMv3. The report is `target/pit-reports/index.html`.
+
+**Fuzz and refusal tests.** `EcPointFuzzTest` throws bent and arbitrary bytes at the two
+`EcPointCodec` entry points and holds them to a total contract: every input yields either a point on
+the curve or an `InvalidKeyException`, never an unchecked one. Seeds are fixed, so a failure is
+reproducible and PIT sees a stable suite. It found one: a constructed BIT STRING with an out-of-range
+pad-bit count makes BouncyCastle throw `ASN1ParsingException`, which extends `IllegalStateException`
+and so escaped a catch of `IOException | IllegalArgumentException` — out through
+`PublicKeyReader.readEcPublicKey`, where it would have aborted enumeration of every alias on the slot
+over one malformed key. `just patcher-test` does the same for the image build's bytecode patcher:
+synthetic classes with the start-up check renamed, gutted or duplicated, each of which it must refuse
+by name.
+
 **Integration tests** (`EjbcaContainerIT`) run against a full EJBCA CE stack managed by
 Testcontainers:
 
@@ -295,7 +324,7 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 718 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 813 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

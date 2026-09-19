@@ -5,6 +5,7 @@
 package ch.ithings.kimbo11ng.fake;
 
 import ch.ithings.kimbo11ng.p11.CkULong;
+import ch.ithings.kimbo11ng.p11.Pkcs11v30;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 
@@ -144,6 +145,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
     private PqcMechanismProfile profile;
+    /** What this token says its session ceiling is, for C_GetTokenInfo. */
+    private static final long MAX_SESSIONS = 64;
+
+    private long tokenFlags;
+    private long clearedTokenFlags;
     private long failNextCkr = -1;
     private int killSessionsAfter = -1;
     private int operationCount;
@@ -300,6 +306,26 @@ public final class FakeToken extends UnsupportedNativeProvider {
      */
     public synchronized FakeToken dropAllSessions() {
         sessions.clear();
+        return this;
+    }
+
+    /**
+     * Additional {@code CKF_*} flags for {@code C_GetTokenInfo}, on top of the healthy defaults.
+     *
+     * <p>{@code CKF_USER_PIN_LOCKED} and its neighbours are the token state an operator most needs
+     * reported back accurately, and the only way to see one on a real HSM is to lock a PIN.
+     */
+    public FakeToken tokenFlags(long flags) {
+        this.tokenFlags = flags;
+        return this;
+    }
+
+    /**
+     * Removes a flag the healthy defaults set, for the states expressed by a flag's absence —
+     * an uninitialised user PIN above all.
+     */
+    public FakeToken clearTokenFlag(long flags) {
+        this.clearedTokenFlags |= flags;
         return this;
     }
 
@@ -518,8 +544,29 @@ public final class FakeToken extends UnsupportedNativeProvider {
         byte[] src = tokenLabel.getBytes(StandardCharsets.UTF_8);
         System.arraycopy(src, 0, label, 0, Math.min(src.length, 32));
         info.label = label;
+        // A token that reported nothing but a label left every reader of this structure looking at
+        // zeroes, and flags of zero is not a neutral answer: it means the user PIN is uninitialised
+        // and login is not required, which describes no token anyone would deploy.
+        info.flags = CK_TOKEN_INFO.CKF_RNG | CK_TOKEN_INFO.CKF_LOGIN_REQUIRED
+                | CK_TOKEN_INFO.CKF_USER_PIN_INITIALIZED | CK_TOKEN_INFO.CKF_TOKEN_INITIALIZED
+                | tokenFlags;
+        info.flags &= ~clearedTokenFlags;
+        info.ulSessionCount = sessions.size();
+        info.ulMaxSessionCount = MAX_SESSIONS;
+        info.ulRwSessionCount = sessions.size();
+        info.ulMaxRwSessionCount = MAX_SESSIONS;
+        info.ulMinPinLen = 4;
+        info.ulMaxPinLen = 32;
+        info.manufacturerID = padded("kimbo11ng", 32);
+        info.model = padded("FakeToken v3.2", 16);
+        info.serialNumber = padded("FAKE-0001", 16);
+        info.hardwareVersion = version((byte) 1, (byte) 0);
+        // 0x80 is 128 unsigned, and a signed read of it prints -128: the case the CLI's own
+        // formatting has to get right, so the fake is the token that exhibits it.
+        info.firmwareVersion = version((byte) 3, (byte) 0x80);
         return CKR.OK;
     }
+
 
     @Override
     public synchronized long C_GetMechanismList(long slot, long[] list, LongRef count) {
@@ -565,8 +612,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 CKM.SHA256_RSA_PKCS, CKM.SHA384_RSA_PKCS, CKM.SHA512_RSA_PKCS,
                 // SoftHSMv3 advertises all three PSS mechanisms with CKF_SIGN|CKF_VERIFY.
                 CKM.SHA256_RSA_PKCS_PSS, CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS,
+                // SoftHSMv3 advertises the SHA-3 combinations too, with CKF_SIGN, and EJBCA
+                // offers them for every RSA key — so a fake that lacked them would let a service
+                // this provider registers go untested.
+                Pkcs11v30.CKM_SHA3_256_RSA_PKCS, Pkcs11v30.CKM_SHA3_384_RSA_PKCS,
+                Pkcs11v30.CKM_SHA3_512_RSA_PKCS,
+                CKM.EC_EDWARDS_KEY_PAIR_GEN, CKM.EDDSA,
                 CKM.EC_KEY_PAIR_GEN, CKM.ECDSA,
-                CKM.ECDSA_SHA1, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384, CKM.ECDSA_SHA512,
+                CKM.ECDSA_SHA1, CKM.ECDSA_SHA224, CKM.ECDSA_SHA256, CKM.ECDSA_SHA384,
+                CKM.ECDSA_SHA512,
+                Pkcs11v30.CKM_ECDSA_SHA3_256, Pkcs11v30.CKM_ECDSA_SHA3_384,
+                Pkcs11v30.CKM_ECDSA_SHA3_512,
                 // Symmetric: the generation mechanisms carry CKF_GENERATE and the HMAC mechanisms
                 // CKF_SIGN|CKF_VERIFY, which is what SoftHSM reports for them.
                 CKM.AES_KEY_GEN, CKM.GENERIC_SECRET_KEY_GEN,
@@ -620,6 +676,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
         }
         if (type == CKM.RSA_PKCS_KEY_PAIR_GEN || type == CKM.EC_KEY_PAIR_GEN
+                || type == CKM.EC_EDWARDS_KEY_PAIR_GEN
                 || type == CKM_ML_DSA_KEY_PAIR_GEN || type == CKM_SLH_DSA_KEY_PAIR_GEN
                 || type == CKM_ML_KEM_KEY_PAIR_GEN) {
             return CK_MECHANISM_INFO.CKF_GENERATE_KEY_PAIR;
@@ -981,6 +1038,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (ckm == CKM.EC_KEY_PAIR_GEN && priv.containsKey(CKA.EC_PARAMS)) {
             return CKR.ATTRIBUTE_READ_ONLY;
         }
+        if (ckm == CKM.EC_EDWARDS_KEY_PAIR_GEN && priv.containsKey(CKA.EC_PARAMS)) {
+            return CKR.ATTRIBUTE_READ_ONLY;
+        }
         try {
             AlgorithmEntry entry = profile == null ? null
                     : entryForKeyPairGen(advertisedCkm, pub, priv);
@@ -990,6 +1050,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
                 generateRsa(pub, priv);
             } else if (ckm == CKM.EC_KEY_PAIR_GEN) {
                 generateEc(pub, priv);
+            } else if (ckm == CKM.EC_EDWARDS_KEY_PAIR_GEN) {
+                generateEdwards(pub, priv);
             } else if (ckm == CKM_ML_DSA_KEY_PAIR_GEN) {
                 generatePqc(pub, priv, CKK_ML_DSA, ML_DSA_PUBLIC_KEY_LEN, 1952);
             } else if (ckm == CKM_ML_KEM_KEY_PAIR_GEN) {
@@ -1050,45 +1112,94 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     /**
-     * Public-key material of {@code size} bytes: random, except where the size is an ML-KEM
-     * encapsulation key.
+     * Post-quantum key material for a public key of {@code size} bytes.
      *
-     * <p>BouncyCastle 1.84 (EJBCA 9.6.3) runs FIPS 203's modulus check on every ML-KEM public key
-     * it decodes, so random bytes of the right length are refused. 1.80.2 (EJBCA 9.3.7) accepted
-     * them. A real token always emits a valid key, so the fake has to as well. The three ML-KEM
-     * lengths are disjoint from ML-DSA's (1312/1952/2592) and SLH-DSA's (32/48/64), which have no
-     * such check and stay random.
+     * @param publicMaterial the raw public key, as {@code CKA_VALUE} would hold it
+     * @param privatePkcs8 the matching private key, or {@code null} where this fake does not sign
+     *        for real; see {@link #pqcMaterial(int)}
+     * @param signAlgorithm what {@link #sign} should do with it
      */
-    private static byte[] publicKeyMaterial(int size) {
+    private record PqcMaterial(byte[] publicMaterial, byte[] privatePkcs8, String signAlgorithm) {
+    }
+
+    /**
+     * Post-quantum material of {@code size} bytes, real wherever being real matters.
+     *
+     * <p><b>ML-KEM</b> (800/1184/1568) is a genuine encapsulation key because BouncyCastle 1.84
+     * (EJBCA 9.6.3) runs FIPS 203's modulus check on every ML-KEM public key it decodes, so random
+     * bytes of the right length are refused. 1.80.2 (EJBCA 9.3.7) accepted them. A real token
+     * always emits a valid key, so the fake has to as well.
+     *
+     * <p><b>ML-DSA</b> (1312/1952/2592) is a genuine signing key, private half kept, so a signature
+     * this fake produces verifies against the public key it handed out. That is what lets a test
+     * assert the whole path — {@code Kimbo11ngSignatureSpi}, the mechanism choice, and the public
+     * key {@code PublicKeyReader} rebuilds — rather than only that bytes came back. Before this,
+     * every PQC signature was 64 random bytes, and nothing caught it because nothing verified one.
+     *
+     * <p><b>SLH-DSA</b> (32/48/64) stays random and unsigned: its keygen and signing cost seconds,
+     * which is not worth paying in every test that touches the algorithm table. A signature over an
+     * SLH-DSA key is therefore still synthetic, and {@code HsmConformanceIT} against SoftHSMv3 is
+     * what covers it.
+     *
+     * <p>The three length sets are disjoint, which is what makes dispatching on size safe.
+     */
+    private static PqcMaterial pqcMaterial(int size) {
         String kemParameterSet = switch (size) {
             case 800 -> "ML-KEM-512";
             case 1184 -> "ML-KEM-768";
             case 1568 -> "ML-KEM-1024";
             default -> null;
         };
-        if (kemParameterSet == null) {
-            byte[] material = new byte[size];
-            RANDOM.nextBytes(material);
-            return material;
+        if (kemParameterSet != null) {
+            return new PqcMaterial(generated("ML-KEM",
+                    org.bouncycastle.jcajce.spec.MLKEMParameterSpec.fromName(kemParameterSet), null),
+                    null, "PQC");
         }
+        String dsaParameterSet = switch (size) {
+            case 1312 -> "ML-DSA-44";
+            case 1952 -> "ML-DSA-65";
+            case 2592 -> "ML-DSA-87";
+            default -> null;
+        };
+        if (dsaParameterSet != null) {
+            byte[][] pair = new byte[1][];
+            byte[] material = generated("ML-DSA",
+                    org.bouncycastle.jcajce.spec.MLDSAParameterSpec.fromName(dsaParameterSet), pair);
+            return new PqcMaterial(material, pair[0], "ML-DSA");
+        }
+        byte[] material = new byte[size];
+        RANDOM.nextBytes(material);
+        return new PqcMaterial(material, null, "PQC");
+    }
+
+    /**
+     * The raw public key of a fresh BouncyCastle key pair, and its private half in
+     * {@code privateOut[0]} when one is wanted.
+     */
+    private static byte[] generated(String algorithm, java.security.spec.AlgorithmParameterSpec spec,
+            byte[][] privateOut) {
         try {
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-KEM", BC);
-            kpg.initialize(org.bouncycastle.jcajce.spec.MLKEMParameterSpec.fromName(kemParameterSet), RANDOM);
-            return SubjectPublicKeyInfo.getInstance(kpg.generateKeyPair().getPublic().getEncoded())
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance(algorithm, BC);
+            kpg.initialize(spec, RANDOM);
+            KeyPair kp = kpg.generateKeyPair();
+            if (privateOut != null) {
+                privateOut[0] = kp.getPrivate().getEncoded();
+            }
+            return SubjectPublicKeyInfo.getInstance(kp.getPublic().getEncoded())
                     .getPublicKeyData().getOctets();
         } catch (java.security.GeneralSecurityException e) {
-            throw new IllegalStateException("cannot generate " + kemParameterSet + " material", e);
+            throw new IllegalStateException("cannot generate " + algorithm + " material", e);
         }
     }
 
     /** Generates post-quantum material of the length and key type the profile's row declares. */
     private void generateFromEntry(AlgorithmEntry entry, Map<Long, byte[]> pub,
             Map<Long, byte[]> priv) {
-        byte[] material = publicKeyMaterial(entry.publicKeyLength());
-        pub.put(CKA.VALUE, publicValue(material));
+        PqcMaterial material = pqcMaterial(entry.publicKeyLength());
+        pub.put(CKA.VALUE, publicValue(material.publicMaterial()));
         pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
         priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(entry.ckkKeyType()));
-        priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
+        rememberPqcPrivate(priv, material);
     }
 
     private void generateRsa(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
@@ -1130,6 +1241,38 @@ public final class FakeToken extends UnsupportedNativeProvider {
         priv.put(SIGN_ALGORITHM, "EC".getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * An Edwards key pair, real enough to sign with.
+     *
+     * <p>{@code CKA_EC_POINT} is the algorithm's own public-key encoding — 32 bytes for Ed25519,
+     * 57 for Ed448 — not a {@code 04 || X || Y} curve point, and it goes through the same
+     * {@link #ecPointEncoding} knob so a test can present either the bare or the DER-wrapped form.
+     * {@code CKA_EC_PARAMS} is put on the private object too, which is where the enumeration path
+     * has to read it to tell Ed25519 from Ed448 before the public half is available.
+     */
+    private void generateEdwards(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
+        byte[] ecParams = pub.get(CKA.EC_PARAMS);
+        if (ecParams == null) {
+            throw new IllegalArgumentException("CKA_EC_PARAMS missing");
+        }
+        String oid = ASN1ObjectIdentifier.getInstance(ecParams).getId();
+        String algorithm = switch (oid) {
+            case "1.3.101.112" -> "Ed25519";
+            case "1.3.101.113" -> "Ed448";
+            default -> throw new IllegalArgumentException("not an Edwards curve: " + oid);
+        };
+        KeyPair kp = KeyPairGenerator.getInstance(algorithm, BC).generateKeyPair();
+        byte[] raw = SubjectPublicKeyInfo.getInstance(kp.getPublic().getEncoded())
+                .getPublicKeyData().getOctets();
+
+        pub.put(CKA.EC_POINT, encodeEcPoint(raw));
+        pub.put(CKA.KEY_TYPE, encodeLong(CKK.CKK_EC_EDWARDS));
+        priv.put(CKA.KEY_TYPE, encodeLong(CKK.CKK_EC_EDWARDS));
+        priv.put(CKA.EC_PARAMS, ecParams);
+        priv.put(PRIVATE_MATERIAL, kp.getPrivate().getEncoded());
+        priv.put(SIGN_ALGORITHM, algorithm.getBytes(StandardCharsets.UTF_8));
+    }
+
     private byte[] encodeEcPoint(byte[] rawPoint) throws IOException {
         return ecPointEncoding == EcPointEncoding.DER
                 ? new DEROctetString(rawPoint).getEncoded()
@@ -1148,13 +1291,13 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
             size = mapped;
         }
-        byte[] material = publicKeyMaterial(size);
-        pub.put(CKA.VALUE, publicValue(material));
+        PqcMaterial material = pqcMaterial(size);
+        pub.put(CKA.VALUE, publicValue(material.publicMaterial()));
         // putIfAbsent, not put: PKCS#11 validates CKA_KEY_TYPE from the template rather than
         // overwriting it, so a vendor profile's own key type must survive generation.
         pub.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
         priv.putIfAbsent(CKA.KEY_TYPE, encodeLong(ckk));
-        priv.put(SIGN_ALGORITHM, "PQC".getBytes(StandardCharsets.UTF_8));
+        rememberPqcPrivate(priv, material);
     }
 
     /** Applies the {@link #pqcSpkiOid} knob to freshly generated public-key material. */
@@ -1249,6 +1392,14 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return CKR.OK;
     }
 
+    /** Records how {@link #sign} should answer for a freshly generated post-quantum private key. */
+    private static void rememberPqcPrivate(Map<Long, byte[]> priv, PqcMaterial material) {
+        priv.put(SIGN_ALGORITHM, material.signAlgorithm().getBytes(StandardCharsets.UTF_8));
+        if (material.privatePkcs8() != null) {
+            priv.put(PRIVATE_MATERIAL, material.privatePkcs8());
+        }
+    }
+
     private byte[] sign(Session s, byte[] data) throws Exception {
         Map<Long, byte[]> key = objects.get(s.signKey);
         byte[] alg = key.get(SIGN_ALGORITHM);
@@ -1262,8 +1413,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return mac.doFinal(data);
         }
         if ("PQC".equals(algorithm)) {
-            // No real PQC signing: nothing under test verifies these, and a wrong-length blob
-            // would be a worse lie than an obviously synthetic one of plausible size.
+            // SLH-DSA and vendor-table entries whose length matches no standard parameter set: no
+            // private half was kept, so there is nothing to sign with. A wrong-length blob would be
+            // a worse lie than an obviously synthetic one. ML-DSA does not come through here — see
+            // pqcMaterial.
             byte[] fake = new byte[64];
             RANDOM.nextBytes(fake);
             return fake;
@@ -1292,6 +1445,16 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     private static String signatureAlgorithm(long ckm, String keyAlgorithm) {
+        if ("Ed25519".equals(keyAlgorithm) || "Ed448".equals(keyAlgorithm)) {
+            // CKM_EDDSA is pure EdDSA: the signature covers the message itself, which is what
+            // BouncyCastle's bare "Ed25519" does.
+            return keyAlgorithm;
+        }
+        if ("ML-DSA".equals(keyAlgorithm)) {
+            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest
+            // and no context string, which is what BouncyCastle's bare "ML-DSA" does.
+            return "ML-DSA";
+        }
         if ("EC".equals(keyAlgorithm)) {
             // CKM_ECDSA is the raw mechanism: its input is an already-computed hash, and a token
             // signs it as it stands. Answering it with a digesting algorithm would hash on the
@@ -1304,6 +1467,18 @@ public final class FakeToken extends UnsupportedNativeProvider {
             if (ckm == CKM.ECDSA_SHA1) {
                 return "SHA1withECDSA";
             }
+            if (ckm == CKM.ECDSA_SHA224) {
+                return "SHA224withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_256) {
+                return "SHA3-256withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_384) {
+                return "SHA3-384withECDSA";
+            }
+            if (ckm == Pkcs11v30.CKM_ECDSA_SHA3_512) {
+                return "SHA3-512withECDSA";
+            }
             if (ckm == CKM.ECDSA_SHA384) {
                 return "SHA384withECDSA";
             }
@@ -1314,6 +1489,15 @@ public final class FakeToken extends UnsupportedNativeProvider {
         }
         if (ckm == CKM.SHA1_RSA_PKCS) {
             return "SHA1withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_256_RSA_PKCS) {
+            return "SHA3-256withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_384_RSA_PKCS) {
+            return "SHA3-384withRSA";
+        }
+        if (ckm == Pkcs11v30.CKM_SHA3_512_RSA_PKCS) {
+            return "SHA3-512withRSA";
         }
         if (ckm == CKM.SHA384_RSA_PKCS) {
             return "SHA384withRSA";

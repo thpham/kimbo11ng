@@ -225,6 +225,11 @@ public class CryptoTokenImpl {
                 generatePqc(current, label, keyId, entry.get(), alias);
                 return;
             }
+            if (KeyTemplates.edwardsOid(keySpec) != null) {
+                requireMechanism(current, CKM.EC_EDWARDS_KEY_PAIR_GEN, keySpec);
+                generateEdwards(current, label, keyId, keySpec, alias);
+                return;
+            }
             String curveName = curveNameOf(keySpec);
             requireCurveOrBetterProfile(current, keySpec, curveName);
             requireMechanism(current, CKM.EC_KEY_PAIR_GEN, keySpec);
@@ -666,6 +671,18 @@ public class CryptoTokenImpl {
         generateAndRegister(current, templates, keyId, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
                 PublicKeyReader::readEcPublicKey);
         log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
+    }
+
+    private void generateEdwards(TokenRuntime current, byte[] label, byte[] keyId,
+            String curveName, String alias) throws Exception {
+        KeyTemplates.Pair templates = KeyTemplates.edwards(label, keyId, curveName);
+        // The JCA algorithm is the curve's own name: unlike EC, where one "EC" algorithm covers
+        // every curve, Ed25519 and Ed448 are distinct algorithms with distinct signature schemes.
+        String jcaName = "1.3.101.112".equals(KeyTemplates.edwardsOid(curveName))
+                ? "Ed25519" : "Ed448";
+        generateAndRegister(current, templates, keyId, CKM.EC_EDWARDS_KEY_PAIR_GEN, alias,
+                jcaName, null, PublicKeyReader::readEdwardsPublicKey);
+        log.info("Generated " + jcaName + " key pair '" + alias + "'");
     }
 
     private void generatePqc(TokenRuntime current, byte[] label, byte[] keyId,

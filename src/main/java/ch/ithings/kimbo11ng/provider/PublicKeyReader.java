@@ -7,6 +7,7 @@ package ch.ithings.kimbo11ng.provider;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.ASN1OctetString;
 import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
@@ -17,6 +18,7 @@ import org.bouncycastle.math.ec.ECPoint;
 import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CryptokiE;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.security.InvalidKeyException;
 import java.security.KeyFactory;
@@ -92,6 +94,92 @@ public final class PublicKeyReader {
 
         KeyFactory kf = KeyFactory.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
         return kf.generatePublic(new ECPublicKeySpec(point, spec));
+    }
+
+    /**
+     * Read an Edwards public key — Ed25519 or Ed448.
+     *
+     * <p>Separate from {@link #readEcPublicKey} because almost nothing is shared. An Edwards key's
+     * {@code CKA_EC_POINT} is not a curve point in the {@code 04 || X || Y} sense: it is the
+     * algorithm's own encoding of the public key, 32 bytes for Ed25519 and 57 for Ed448, which goes
+     * into a {@code SubjectPublicKeyInfo} as-is. There is no curve arithmetic to do and no point to
+     * validate, so {@code EcPointCodec} has nothing to offer here.
+     *
+     * <p>What is shared is the wrapping question. PKCS#11 v3.0 says the value is a DER
+     * {@code OCTET STRING}; tokens differ on whether they apply it, exactly as they do for EC, so
+     * both forms are accepted and the length decides. The two lengths are distinct, which is what
+     * makes that safe: an unwrapped Ed25519 key is 32 bytes and a wrapped one 34.
+     */
+    public static PublicKey readEdwardsPublicKey(CryptokiE ce, long session, long handle)
+            throws Exception {
+        CKA[] attrs = ce.GetAttributeValue(session, handle, CKA.EC_PARAMS, CKA.EC_POINT);
+        byte[] params = attrs[0].getValue();
+        byte[] point = attrs[1].getValue();
+        if (params == null || point == null) {
+            throw new InvalidKeyException("An Edwards key needs both CKA_EC_PARAMS and"
+                    + " CKA_EC_POINT; the token returned "
+                    + (params == null ? "no parameters" : "no point") + ".");
+        }
+        ASN1ObjectIdentifier oid = edwardsOid(params);
+        int expected = ED25519_OID.equals(oid.getId()) ? 32 : 57;
+        byte[] raw = unwrapIfOctetString(point, expected);
+        if (raw.length != expected) {
+            throw new InvalidKeyException("CKA_EC_POINT is " + raw.length + " bytes for "
+                    + oid.getId() + ", which needs " + expected + ". The token and this provider"
+                    + " disagree about which Edwards curve this key is on.");
+        }
+        SubjectPublicKeyInfo spki =
+                new SubjectPublicKeyInfo(new AlgorithmIdentifier(oid), raw);
+        return KeyFactory.getInstance(oid.getId(), BouncyCastleProvider.PROVIDER_NAME)
+                .generatePublic(new java.security.spec.X509EncodedKeySpec(spki.getEncoded()));
+    }
+
+    /** id-Ed25519. */
+    private static final String ED25519_OID = "1.3.101.112";
+    /** id-Ed448. */
+    private static final String ED448_OID = "1.3.101.113";
+
+    /**
+     * The Edwards algorithm OID a token reported in {@code CKA_EC_PARAMS}.
+     *
+     * <p>Only the two this provider generates are accepted. A token answering with the
+     * {@code PrintableString} spelling v3.0 also allows, or with anything else, is refused by name
+     * rather than guessed at — a wrong curve here would produce a public key that verifies nothing.
+     */
+    private static ASN1ObjectIdentifier edwardsOid(byte[] ecParams) throws InvalidKeyException {
+        try {
+            ASN1ObjectIdentifier oid = ASN1ObjectIdentifier.getInstance(ecParams);
+            if (ED25519_OID.equals(oid.getId()) || ED448_OID.equals(oid.getId())) {
+                return oid;
+            }
+            throw new InvalidKeyException("CKA_EC_PARAMS names " + oid.getId()
+                    + ", which is not an Edwards signature curve this provider generates.");
+        } catch (InvalidKeyException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new InvalidKeyException("CKA_EC_PARAMS (" + ecParams.length + " bytes) is not an"
+                    + " object identifier. PKCS#11 v3.0 also permits a PrintableString such as"
+                    + " \"edwards25519\"; this token appears to use it, and supporting that needs a"
+                    + " vendor profile rather than a guess.", e);
+        }
+    }
+
+    /** The contents of a DER OCTET STRING of exactly {@code expected} bytes, or the input. */
+    private static byte[] unwrapIfOctetString(byte[] value, int expected) {
+        if (value.length == expected) {
+            return value;
+        }
+        try {
+            ASN1Primitive parsed = ASN1Primitive.fromByteArray(value);
+            if (parsed instanceof ASN1OctetString octets) {
+                return octets.getOctets();
+            }
+        } catch (IOException | RuntimeException e) {
+            if (log.isDebugEnabled()) {
+                log.debug("CKA_EC_POINT is not a DER OCTET STRING: " + e.getMessage());
+            }
+        }
+        return value;
     }
 
     /**

@@ -215,6 +215,88 @@ correct — the two agree on every algorithm they share.
 Sources: Luna HSM Firmware 7.9.0 Customer Release Notes; the ML-DSA and ML-KEM programming guides
 and the "Post Quantum Algorithms" page in the Luna SDK documentation at `thalesdocs.com`.
 
+### What the standard mechanism space actually holds
+
+Recorded on 2026-09-19, by decoding every mechanism SoftHSMv3 advertises against the OASIS PKCS#11
+v3.2 header. It is written down because the first pass of this work guessed instead, and guessed
+wrong.
+
+- **LMS is reachable.** `CKM_HSS_KEY_PAIR_GEN` (`0x4032`) and `CKM_HSS` (`0x4033`) are advertised by
+  SoftHSMv3 with key-pair-generation and signing flags, and EJBCA declares `SIGALG_LMS`. HSS is the
+  multi-tree form of LMS (RFC 8554), which is what "LMS" means in practice.
+- **XMSS and XMSS^MT too** (`0x4034`–`0x4037`), with no EJBCA signature algorithm for either.
+- **kimbo11ng supports none of them, on purpose.** LMS and XMSS are *stateful*: a private key signs
+  a bounded number of times, and reusing a state index makes forgery possible. NIST SP 800-208
+  requires the state to live in the module, which rules out key backup and restore — restoring is
+  duplicating the state. For a CA that is a direct conflict with HA and disaster recovery, and a key
+  that expires by use rather than by date is something EJBCA would also have to understand. This is
+  a class of key with different lifecycle semantics, not a mechanism to map. Revisit only as a
+  deliberate decision.
+- **FALCON has no PKCS#11 mechanism at all.** Not one occurrence in the v3.2 header. A token could
+  only offer it as a vendor mechanism, which needs a profile. EJBCA declares `SIGALG_FALCON512` and
+  `SIGALG_FALCON1024` regardless.
+- **The `CKM_HASH_ML_DSA_*` and `CKM_HASH_SLH_DSA_*` blocks** (22 mechanisms, `0x1f`–`0x3f`) are the
+  pre-hash variants of FIPS 204 and 205. kimbo11ng uses the pure ones, `CKM_ML_DSA` (`0x1d`) and
+  `CKM_SLH_DSA` (`0x2e`), and EJBCA has no signature algorithm for the pre-hash forms.
+
+`Pkcs11MechanismNames` now names all 198 mechanisms the bindings predate, so a dump reads as an
+inventory. On SoftHSMv3 that leaves 8 of 165 as hex: six vendor-defined, which no standard name can
+describe, and two beyond the published header. Expect a Luna to leave its own vendor set unnamed —
+that residue is the interesting part of the output, not a defect in it.
+
+### Classical algorithms to settle in the same session
+
+The profile covers post-quantum only. Everything classical is decided by the mechanism probe at
+registration time, so there is no table to be wrong — but there is still an answer to record, and
+since 0f1c5f6 the set is wider than RSA and ECDSA. `everyClassicalAlgorithm` in `HsmContract`
+iterates the provider's own registered services, so whatever the Luna advertises is generated,
+signed with and verified in the same run; nothing here needs editing when an algorithm is added.
+
+What to read off that run, none of it verified against hardware yet:
+
+| Question | Why it is not obvious |
+| --- | --- |
+| Does Luna advertise `CKM_EDDSA` and `CKM_EC_EDWARDS_KEY_PAIR_GEN`? | Documented as supported from firmware 7.7. If it does, Ed25519 and Ed448 become usable CA keys. |
+| Which `CKA_EC_PARAMS` spelling does it want for Edwards? | v3.0 permits the OID and a `PrintableString`. kimbo11ng sends the OID and refuses the other by name. A Luna wanting `"edwards25519"` needs a profile, and the refusal message says so. |
+| Is `CKA_EC_POINT` bare or DER-wrapped for Edwards? | Both are accepted, and the lengths disambiguate, but which one it is belongs in this table. |
+| Are the SHA-3 combinations advertised **and** implemented? | The common divergence: a token lists `CKM_SHA3_256_RSA_PKCS` and then fails `C_SignInit`. The probe cannot see that; only signing can. |
+| Ed448 at all? | Several HSMs ship Ed25519 and not Ed448. The two are separate rows in the run for that reason. |
+
+### The ML-DSA signing parameters nobody sends
+
+PKCS#11 v3.2 gives every post-quantum signature two inputs beyond the message, through
+`CK_SIGN_ADDITIONAL_CONTEXT` for the pure mechanisms and `CK_HASH_SIGN_ADDITIONAL_CONTEXT` for the
+pre-hash ones:
+
+```c
+typedef struct CK_SIGN_ADDITIONAL_CONTEXT {
+     CK_HEDGE_TYPE   hedgeVariant;
+     CK_BYTE_PTR     pContext;
+     CK_ULONG        ulContextLen;
+} CK_SIGN_ADDITIONAL_CONTEXT;
+```
+
+kimbo11ng sends **no mechanism parameter at all** for ML-DSA and SLH-DSA — `new CKM(mechanism)` —
+and so takes whatever the token defaults to. That is almost certainly right, and it is not verified:
+
+| Field | What it has to be | Why it is invisible until hardware |
+| --- | --- | --- |
+| `pContext` | **empty**, for X.509 | FIPS 204 binds a context string of up to 255 bytes into the signature. A token defaulting to anything else produces signatures of the right length, under the right OID, that nothing verifies. SoftHSMv3 evidently defaults to empty, because the round trip passes; another token need not. |
+| `hedgeVariant` | either, but recorded | `CKH_HEDGE_PREFERRED` (0) is randomised, `CKH_DETERMINISTIC_REQUIRED` (2) is not. **Both verify**, so no round-trip test can ever tell them apart. FIPS mode may force one, and some audits ask for determinism so a signature can be reproduced. |
+
+Neither is worth sending explicitly before measuring: a token that rejects a parameter it did not
+expect would fail generation outright, so guessing here costs more than it buys. What the hardware
+session records is what the Luna does by default, and `HsmContract` already answers the first half
+— an ML-DSA signature it makes has to verify under BouncyCastle with an empty context, so a
+non-empty default shows up as a failure naming the algorithm.
+
+**Pre-hash is not wanted here, and that is a decision.** The `CKM_HASH_ML_DSA_*` mechanisms compute
+a different FIPS 204 variant under different OIDs. The certificate OIDs this project writes —
+`2.16.840.1.101.3.4.3.17/18/19` — are pure ML-DSA, EJBCA declares no pre-hash spelling, and the
+IETF profile for ML-DSA in X.509 uses pure. A CA signing with HashML-DSA would produce signatures
+relying parties do not expect. Pre-hash belongs to document signing (CAdES/PAdES), which is not
+this component.
+
 **Not yet verified against hardware.** Everything above is from vendor documentation. Running
 `HsmConformanceIT` against a Luna is what turns it into a fact, and the failure will name which row
 is wrong.

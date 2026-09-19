@@ -63,7 +63,17 @@ aborts deployment when `!isRunningEnterprise() && hasNonCeSupportedTokenTypes()`
   `StartupSingletonBean` in `ejbca-ejb.jar`.
 - **Response:** the image build patches that one method out of the official `ejbca-ejb.jar` and fails
   if the method is not found (`docker/ejbca-hsm/`). A moved or renamed method makes the build loud
-  instead of the CA silently refusing to start.
+  instead of the CA silently refusing to start. The build then has the JVM load the patched class with
+  the verifier forced on, so a malformed rewrite fails there too (checked with a deliberately broken
+  patch, which the `javap` check alone accepts). Each refusal is itself covered by
+  `docker/ejbca-hsm/test.sh` (`just patcher-test`), which builds synthetic classes with the method
+  renamed, no longer calling the check, or called a second time elsewhere, and asserts the patcher
+  says so. Run it before trusting the anchors on a bump — it needs no EJBCA image and takes seconds.
+- **Limits of the approach:** the patcher knows one method name and one call. It cannot see a check
+  added in another class, or a change to *what* the method does beyond calling the check. ASM 9.7.1
+  reads class files up to Java 23; a release built for a newer Java stops the build until ASM is bumped.
+  The end-to-end guard is the integration suite, which restarts EJBCA with a `Pkcs11NgCryptoToken` row
+  in the database.
 - **Watch for:** the check moving into `CryptoTokenSessionBean`, a second check on the token
   *create* path, or the check becoming a licence check rather than a type check. Each needs a new
   anchor, and the last is a decision for a person, not a patch.
@@ -236,6 +246,8 @@ position above.
    re-typed is a fix. Read the `CryptoTokenFactory` registrations it prints against W2.
 3. **Re-measure the runtime.** `java -version` in the image → the compile-target table and `pom.xml`.
 4. **Check each watch item above** against the new source: W1 above all, then W3 and W5.
+   `just patcher-test` first: it is the cheapest of these and tells you whether the W1 anchors still
+   describe anything real.
 5. **Compare bytes** for `jacknji11` and `jna` (W7).
 6. **Bump the pins** together: `justfile` (`ejbca_version`, `ejbca_digest`, `ejbca_deps`),
    `docker/Dockerfile` `FROM`, `pom.xml` versions, `.github/workflows/ci.yml`.

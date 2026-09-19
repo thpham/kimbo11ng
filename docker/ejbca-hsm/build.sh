@@ -54,6 +54,19 @@ fi
 echo "   javap: checkHsmTokensNotUsedInCommunityEdition() is a single 'return'"
 install -m 0664 "$WORK/ejbca-ejb.jar" "$OUT/ejbca-ejb.jar"
 
+# Independent of the two checks above: have the JVM's verifier accept the rewritten class. The Jakarta
+# EE APIs come from the application server rather than the EAR, so find them; without them nothing
+# could be verified, and that is a failure, not a skip.
+jakarta="$(find /opt/keyfactor -path '*/layers/base/jakarta/*/api/main/*.jar' 2>/dev/null | tr '\n' ':')"
+if [ -z "$jakarta" ]; then
+    echo "no Jakarta EE API jars found under /opt/keyfactor; cannot link-check the patched class" >&2
+    exit 1
+fi
+# The patched jar goes first, so it is the copy of the class that gets loaded (the EAR's lib/ holds
+# the original under the same name). LinkCheck fails if the class came from anywhere else.
+java -Xverify:all -cp "$OUT/ejbca-ejb.jar:$EAR/lib/*:$jakarta" "$HERE/LinkCheck.java" \
+    "$OUT/ejbca-ejb.jar" org.ejbca.core.ejb.StartupSingletonBean
+
 echo "== crypto token classes"
 classes="org/cesecore/keys/token/PKCS11CryptoToken.class
 org/cesecore/keys/token/AzureCryptoToken.class
@@ -82,4 +95,7 @@ for cls in $classes; do
         || { echo "$cls is missing from ejbca-hsm-tokens.jar" >&2; exit 1; }
 done
 echo "   $(jar tf "$OUT/ejbca-hsm-tokens.jar" | grep -c '\.class$') classes in ejbca-hsm-tokens.jar"
+java -Xverify:all -cp "$OUT/ejbca-hsm-tokens.jar:$EAR/lib/*:$jakarta" "$HERE/LinkCheck.java" \
+    "$OUT/ejbca-hsm-tokens.jar" org.cesecore.keys.token.PKCS11CryptoToken \
+    org.cesecore.keys.token.AzureCryptoToken org.cesecore.keys.token.AzureProvider
 echo "== done"

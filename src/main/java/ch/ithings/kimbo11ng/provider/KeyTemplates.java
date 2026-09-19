@@ -94,6 +94,39 @@ public final class KeyTemplates {
     }
 
     /**
+     * Templates for an Edwards key pair — Ed25519 or Ed448.
+     *
+     * <p>Shaped like {@link #ec} and for the same reasons, with one difference that matters:
+     * {@code CKA_EC_PARAMS} here carries the signature algorithm's own OID (id-Ed25519
+     * {@code 1.3.101.112}, id-Ed448 {@code 1.3.101.113}) rather than a named-curve OID. PKCS#11
+     * v3.0 also permits a {@code PrintableString} of {@code "edwards25519"}, and a token that wants
+     * that spelling instead needs a profile, not a second branch here.
+     */
+    public static Pair edwards(byte[] label, byte[] keyId, String curveName) throws IOException {
+        byte[] ecParams = new ASN1ObjectIdentifier(edwardsOid(curveName)).getEncoded();
+        List<CKA> pub = new ArrayList<>(List.of(
+                new CKA(CKA.CLASS, CKO.PUBLIC_KEY),
+                new CKA(CKA.KEY_TYPE, CKK.CKK_EC_EDWARDS),
+                new CKA(CKA.LABEL, label),
+                new CKA(CKA.ID, keyId),
+                new CKA(CKA.EC_PARAMS, ecParams),
+                new CKA(CKA.TOKEN, true),
+                new CKA(CKA.VERIFY, true)));
+        // Same read-only reasoning as ec(): the curve is an input to the public template only.
+        List<CKA> priv = new ArrayList<>(privateBase(label, keyId, CKK.CKK_EC_EDWARDS));
+        return new Pair(pub, priv);
+    }
+
+    /** {@code null} unless {@code name} is an Edwards signature curve this provider generates. */
+    public static String edwardsOid(String name) {
+        return switch (name.toUpperCase(Locale.ROOT)) {
+            case "ED25519", "EDWARDS25519", "1.3.101.112" -> "1.3.101.112";
+            case "ED448", "EDWARDS448", "1.3.101.113" -> "1.3.101.113";
+            default -> null;
+        };
+    }
+
+    /**
      * Templates for a post-quantum key pair described by {@code entry}, with the default KEM
      * spelling.
      *
@@ -204,7 +237,7 @@ public final class KeyTemplates {
                 new CKA(CKA.PRIVATE, true),
                 new CKA(CKA.SENSITIVE, true),
                 new CKA(CKA.EXTRACTABLE, false)));
-        if (keyType != CKK.RSA && keyType != CKK.EC) {
+        if (keyType != CKK.RSA && keyType != CKK.EC && keyType != CKK.CKK_EC_EDWARDS) {
             return priv;
         }
         priv.add(new CKA(CKA.SIGN, true));

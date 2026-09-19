@@ -4,6 +4,7 @@
  */
 package ch.ithings.kimbo11ng;
 
+import ch.ithings.kimbo11ng.p11.Pkcs11ModuleRegistry;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import com.keyfactor.util.keys.token.BaseCryptoToken;
 import com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException;
@@ -50,13 +51,24 @@ public class Kimbo11ngCryptoToken extends BaseCryptoToken implements P11SlotUser
     private static final Logger log = Logger.getLogger(Kimbo11ngCryptoToken.class);
 
     private transient CryptoTokenImpl impl;
+    /**
+     * Transient on purpose: a deserialized token must reach for the process-wide registry, which is
+     * what keeps "initialise each library exactly once" true across the deployment.
+     */
+    private transient Pkcs11ModuleRegistry modules;
 
+    public Kimbo11ngCryptoToken() throws InstantiationException {
+        this(Pkcs11ModuleRegistry.shared());
+    }
+
+    /** For tests, which supply a registry backed by a fake token. Mirrors {@link CryptoTokenImpl}. */
     // The bridge is inherently self-referential: CryptoTokenImpl needs the protected
     // BaseCryptoToken methods this class exposes. It stores the reference without using it.
     @SuppressWarnings("this-escape")
-    public Kimbo11ngCryptoToken() throws InstantiationException {
+    protected Kimbo11ngCryptoToken(Pkcs11ModuleRegistry modules) throws InstantiationException {
         super();
-        impl = new CryptoTokenImpl(this);
+        this.modules = modules;
+        impl = new CryptoTokenImpl(this, modules);
         if (log.isDebugEnabled()) {
             // getClass(), not a constant: the subclass alias should name itself in the log.
             log.debug(getClass().getSimpleName() + " instantiated");
@@ -73,7 +85,10 @@ public class Kimbo11ngCryptoToken extends BaseCryptoToken implements P11SlotUser
     public void activate(char[] authCode)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
         if (impl == null) {
-            impl = new CryptoTokenImpl(this);
+            // Deserialized: both transient fields are gone, so this falls back to the shared
+            // registry — the right answer for a token that arrived without one.
+            impl = new CryptoTokenImpl(this,
+                    modules == null ? Pkcs11ModuleRegistry.shared() : modules);
         }
         impl.activate(authCode);
     }

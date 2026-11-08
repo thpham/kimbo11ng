@@ -440,6 +440,101 @@ public abstract class HsmContract {
         return mac.doFinal(message);
     }
 
+    // ------------------------------------------------------------------ composite ML-DSA
+
+    /**
+     * ML-DSA with a non-empty context string, which only composite signatures need.
+     *
+     * <p>The one thing about composites a fake cannot settle: whether the token honours
+     * {@code CK_SIGN_ADDITIONAL_CONTEXT} on {@code CKM_ML_DSA}. A token that ignored it would sign
+     * with the empty context, and the signature would verify under that and not under the one
+     * asked for — so both are checked.
+     */
+    @Test
+    @DisplayName("binds an ML-DSA context string, as composite signatures require")
+    void mlDsaContextIsBound() throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", "ML-DSA-44") != null,
+                "the token does not offer ML-DSA-44");
+        String alias = alias("mldsa-context");
+        impl.generateKeyPair("ML-DSA-44", alias);
+        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        byte[] message = ("kimbo11ng hsm contract " + alias).getBytes(StandardCharsets.UTF_8);
+        org.bouncycastle.jcajce.spec.ContextParameterSpec context =
+                new org.bouncycastle.jcajce.spec.ContextParameterSpec(
+                        "COMPSIG-MLDSA44-RSA2048-PSS-SHA256".getBytes(StandardCharsets.US_ASCII));
+
+        Signature signer = Signature.getInstance("ML-DSA-44", impl.getProvider());
+        signer.initSign((PrivateKey) keyStore.engineGetKey(alias, pin()));
+        signer.setParameter(context);
+        signer.update(message);
+        byte[] signature = signer.sign();
+
+        PublicKey publicKey = keyStore.getPublicKey(alias);
+        assertTrue(verifiesMlDsa(publicKey, message, signature, context),
+                "the signature does not verify under the context it was asked for: the token"
+                        + " rejected or mangled CK_SIGN_ADDITIONAL_CONTEXT");
+        assertFalse(verifiesMlDsa(publicKey, message, signature, null),
+                "the signature verifies under the empty context, so the token ignored the one it"
+                        + " was sent — every composite signature from it would fail to verify");
+    }
+
+    private static boolean verifiesMlDsa(PublicKey key, byte[] message, byte[] signature,
+            java.security.spec.AlgorithmParameterSpec context) throws Exception {
+        Signature verifier = Signature.getInstance("ML-DSA", BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(key);
+        if (context != null) {
+            verifier.setParameter(context);
+        }
+        verifier.update(message);
+        return verifier.verify(signature);
+    }
+
+    /**
+     * Composite signatures, built from two token keys exactly as EJBCA's
+     * {@code CryptoTokenCompositeWrapper} builds them, and verified by BouncyCastle — the scenario
+     * of issue #12.
+     */
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({
+        "MLDSA44-RSA2048-PSS-SHA256, ML-DSA-44, 2048",
+        "MLDSA65-ECDSA-P384-SHA512,  ML-DSA-65, secp384r1",
+        "MLDSA44-Ed25519-SHA512,     ML-DSA-44, Ed25519"})
+    @DisplayName("signs a composite with two token keys, verifiable outside this provider")
+    void compositeSignature(String name, String pqSpec, String classicalSpec) throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", name) != null,
+                "the token does not offer both halves of " + name);
+        // Not EJBCA's -COMPQ/-COMPC suffixes: a leftover from a failed cleanup must not turn up in
+        // EJBCA as half of a composite key.
+        String pqAlias = alias("composite-" + name + "-pq");
+        String classicalAlias = alias("composite-" + name + "-classical");
+        impl.generateKeyPair(pqSpec, pqAlias);
+        impl.generateKeyPair(classicalSpec, classicalAlias);
+        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+
+        org.bouncycastle.asn1.ASN1ObjectIdentifier oid = org.bouncycastle.jcajce.provider
+                .asymmetric.compositesignatures.CompositeIndex.getSupportedIdentifiers().stream()
+                .filter(o -> org.bouncycastle.jcajce.provider.asymmetric.compositesignatures
+                        .CompositeIndex.getAlgorithmName(o).equals(name))
+                .findFirst().orElseThrow();
+        PrivateKey privateKey = new org.bouncycastle.jcajce.CompositePrivateKey(oid,
+                (PrivateKey) keyStore.engineGetKey(pqAlias, pin()),
+                (PrivateKey) keyStore.engineGetKey(classicalAlias, pin()));
+        PublicKey publicKey = new org.bouncycastle.jcajce.CompositePublicKey(oid,
+                keyStore.getPublicKey(pqAlias), keyStore.getPublicKey(classicalAlias));
+
+        byte[] message = ("kimbo11ng hsm contract " + name).getBytes(StandardCharsets.UTF_8);
+        Signature signer = Signature.getInstance(name, impl.getProvider());
+        signer.initSign(privateKey);
+        signer.update(message);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance(name, BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(publicKey);
+        verifier.update(message);
+        assertTrue(verifier.verify(signature),
+                name + " produced a signature BouncyCastle will not verify");
+    }
+
     @Test
     @DisplayName("signs with EC and the signature verifies outside this provider")
     void ecSignatureIsVerifiable() throws Exception {

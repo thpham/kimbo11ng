@@ -905,6 +905,74 @@ class EjbcaContainerIT {
             "--token", "ItClassic", "--alias", "it-classic");
     }
 
+    // ─── Composite ML-DSA (issue #12) ─────────────────────────────────────────
+    //
+    // EJBCA's CryptoTokenCompositeWrapper turns an alias ending in -COMPOSITE into a -COMPQ and a
+    // -COMPC key on the token, and signs with them through this provider. Before kimbo11ng offered
+    // the composite services, testkey failed with "No algorithm in the available list could be
+    // used for private key of algorithm MLDSA44-RSA2048-PSS-SHA256". The ML-DSA half also has to
+    // reach the token with its context string; SoftHSMv3 honouring it is what lets the BC
+    // verification below pass at all.
+
+    private static final String COMPOSITE = "MLDSA44-RSA2048-PSS-SHA256";
+    /** id-MLDSA44-RSA2048-PSS-SHA256, draft-ietf-lamps-pq-composite-sigs. */
+    private static final String COMPOSITE_OID = "1.3.6.1.5.5.7.6.37";
+
+    @Test @Order(26)
+    void compositeKey_generatesAndTests() throws Exception {
+        assertKeyGenSucceeds("it-comp-COMPOSITE", COMPOSITE);
+        assertKeyTestSucceeds("it-comp-COMPOSITE");
+    }
+
+    @Test @Order(27)
+    void compositeRootCa_selfSignsVerifiably() throws Exception {
+        // No --keyspec: the key already exists, and ca init's keyspec parser predates composites.
+        ContainerState ejbca = ejbcaContainer();
+        String alias = "it-compCA-COMPOSITE";
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "generatekey",
+            "--token", "TestHSM", "--alias", alias, "--keyspec", COMPOSITE);
+        ejbca.execInContainer("bash", "-c",
+            "printf 'certSignKey " + alias + "\\ncrlSignKey " + alias + "\\n"
+            + "defaultKey " + alias + "\\ntestKey " + alias + "\\n' > /tmp/it-compCA.properties");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "ca", "init",
+            "--caname", "Composite-RootCA",
+            "--dn", "CN=Composite Root CA,O=ithings,C=CH",
+            "--tokenName", "TestHSM",
+            "--tokenPass", "1234",
+            "--tokenprop", "/tmp/it-compCA.properties",
+            "-v", "3650",
+            "--policy", "null",
+            "-s", COMPOSITE);
+
+        ensureBouncyCastle();
+        X509Certificate ca = caCertificate("Composite-RootCA");
+        assertEquals(COMPOSITE_OID, ca.getSigAlgOID(), "sigAlgOID=" + ca.getSigAlgOID());
+        // Both halves have to verify, so this fails if either the ML-DSA context or the PSS
+        // parameters reached the token wrong.
+        ca.verify(ca.getPublicKey(), "BC");
+    }
+
+    @Test @Order(28)
+    void compositeCa_issuesCompositeSignedCert() throws Exception {
+        ensureBouncyCastle();
+        X509Certificate cert = enrollKeystoreAndGetCert(
+            "it-compee", "CN=it-compee.ithings.ch,O=ithings,C=CH", "Composite-RootCA");
+
+        assertEquals(COMPOSITE_OID, cert.getSigAlgOID(), "sigAlgOID=" + cert.getSigAlgOID());
+        cert.verify(caCertificate("Composite-RootCA").getPublicKey(), "BC");
+    }
+
+    /**
+     * BouncyCastle, installed. It is the composite verifier, and with it installed the JDK's
+     * certificate parser also decodes the composite public key through it.
+     */
+    private static void ensureBouncyCastle() {
+        if (java.security.Security.getProvider("BC") == null) {
+            java.security.Security.addProvider(
+                new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        }
+    }
+
     private static ContainerState ejbcaContainer() {
         return COMPOSE.getContainerByServiceName("ejbca-1").orElseThrow(
             () -> new IllegalStateException("ejbca-1 container not found"));

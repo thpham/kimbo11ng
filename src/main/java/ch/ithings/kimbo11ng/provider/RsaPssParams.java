@@ -88,6 +88,23 @@ final class RsaPssParams {
                 spec.getSaltLength());
     }
 
+    /**
+     * The {@code CKM_SHAnnn_RSA_PKCS_PSS} mechanism that hashes with the spec's message digest.
+     *
+     * <p>For {@code RSASSA-PSS}, where the JCA name says nothing about the hash and the
+     * {@code PSSParameterSpec} says everything. The digest named in the mechanism and the one in its
+     * parameter block have to agree, which is why both come from the same spec.
+     */
+    static long signMechanism(PSSParameterSpec spec) throws InvalidAlgorithmParameterException {
+        return switch (normalize(spec.getDigestAlgorithm())) {
+            case "SHA256" -> org.pkcs11.jacknji11.CKM.SHA256_RSA_PKCS_PSS;
+            case "SHA384" -> org.pkcs11.jacknji11.CKM.SHA384_RSA_PKCS_PSS;
+            case "SHA512" -> org.pkcs11.jacknji11.CKM.SHA512_RSA_PKCS_PSS;
+            default -> throw new InvalidAlgorithmParameterException(
+                    "No PSS mechanism is registered for digest " + spec.getDigestAlgorithm());
+        };
+    }
+
     /** {@code "SHA-256/MGF1-SHA-256/salt=32"}, for a message that has to name both sides. */
     static String describe(byte[] encoded) {
         int width = ULong.ULONG_SIZE.size();

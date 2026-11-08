@@ -8,9 +8,12 @@ constants and a conformance test.
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.6.3, JackNJI11 1.3.1, BouncyCastle 1.84 (phases 0–8 were built against 9.3.7 / BC 1.80.2) |
 | **Status** | Phases 0–8 complete.                                 |
+| **Tests**  | Verified 2026-11-08: 859 unit + 5 artifact (`mvn verify`); 29 `EjbcaContainerIT` + 23 `CliContainerIT` (`mvn verify -Pit`); 23 `HsmConformanceIT` on SoftHSMv3 (`just hsm-it`) |
 
 > Measurements below dated to phases 0–8 (BC 1.80.2, `release=17`, EJBCA 9.3.7) are kept as they were
-> taken. The current baseline, and what moved between the two releases, is in
+> taken — including the test counts in each phase's **Landed** and **Gate** lines, which record what
+> the suite was when that phase closed. The current counts are the **Tests** row above. The current
+> baseline, and what moved between the two releases, is in
 > [EJBCA_UPSTREAM_WATCH.md](EJBCA_UPSTREAM_WATCH.md).
 
 > This plan was drafted, then adversarially reviewed against the actual EJBCA bytecode in

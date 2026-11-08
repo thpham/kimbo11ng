@@ -262,7 +262,7 @@ What to read off that run, none of it verified against hardware yet:
 | Are the SHA-3 combinations advertised **and** implemented? | The common divergence: a token lists `CKM_SHA3_256_RSA_PKCS` and then fails `C_SignInit`. The probe cannot see that; only signing can. |
 | Ed448 at all? | Several HSMs ship Ed25519 and not Ed448. The two are separate rows in the run for that reason. |
 
-### The ML-DSA signing parameters nobody sends
+### The ML-DSA signing parameters
 
 PKCS#11 v3.2 gives every post-quantum signature two inputs beyond the message, through
 `CK_SIGN_ADDITIONAL_CONTEXT` for the pure mechanisms and `CK_HASH_SIGN_ADDITIONAL_CONTEXT` for the
@@ -276,19 +276,28 @@ typedef struct CK_SIGN_ADDITIONAL_CONTEXT {
 } CK_SIGN_ADDITIONAL_CONTEXT;
 ```
 
-kimbo11ng sends **no mechanism parameter at all** for ML-DSA and SLH-DSA — `new CKM(mechanism)` —
-and so takes whatever the token defaults to. That is almost certainly right, and it is not verified:
+For a plain ML-DSA or SLH-DSA signature — every certificate a CA with such a key signs — kimbo11ng
+sends **no mechanism parameter at all**, `new CKM(mechanism)`, and so takes whatever the token
+defaults to. PKCS#11 v3.2 defines that default as `CKH_HEDGE_PREFERRED` with an empty context.
+
+It sends the block only when a caller sets a **non-empty context** through `ContextParameterSpec`,
+which BouncyCastle's composite signatures always do on their ML-DSA half: draft-ietf-lamps-pq-
+composite-sigs signs with the composite's label, e.g. `COMPSIG-MLDSA44-RSA2048-PSS-SHA256`, as the
+FIPS 204 context. `hedgeVariant` is then `CKH_HEDGE_PREFERRED`, so the context is the only thing that
+differs from the default. See `SignAdditionalContext`.
 
 | Field | What it has to be | Why it is invisible until hardware |
 | --- | --- | --- |
-| `pContext` | **empty**, for X.509 | FIPS 204 binds a context string of up to 255 bytes into the signature. A token defaulting to anything else produces signatures of the right length, under the right OID, that nothing verifies. SoftHSMv3 evidently defaults to empty, because the round trip passes; another token need not. |
-| `hedgeVariant` | either, but recorded | `CKH_HEDGE_PREFERRED` (0) is randomised, `CKH_DETERMINISTIC_REQUIRED` (2) is not. **Both verify**, so no round-trip test can ever tell them apart. FIPS mode may force one, and some audits ask for determinism so a signature can be reproduced. |
+| `pContext` | **empty** for a plain X.509 signature; the composite's label inside a composite | FIPS 204 binds a context string of up to 255 bytes into the signature. A token defaulting to anything other than empty, or ignoring the one it is sent, produces signatures of the right length, under the right OID, that nothing verifies. |
+| `hedgeVariant` | either, but recorded | `CKH_HEDGE_PREFERRED` (0) lets the token choose, `CKH_HEDGE_REQUIRED` (1) is randomised, `CKH_DETERMINISTIC_REQUIRED` (2) is not. Thales documents that Luna hedges under `CKH_HEDGE_PREFERRED`. **Both kinds verify**, so no round-trip test can ever tell them apart. FIPS mode may force one, and some audits ask for determinism so a signature can be reproduced. |
 
-Neither is worth sending explicitly before measuring: a token that rejects a parameter it did not
-expect would fail generation outright, so guessing here costs more than it buys. What the hardware
-session records is what the Luna does by default, and `HsmContract` already answers the first half
-— an ML-DSA signature it makes has to verify under BouncyCastle with an empty context, so a
-non-empty default shows up as a failure naming the algorithm.
+Nothing more is worth sending before measuring: a token that rejects a parameter it did not expect
+would fail every plain ML-DSA signature, so guessing here costs more than it buys. `HsmContract`
+answers both halves of the context question. Its signatures under an empty context have to verify
+under BouncyCastle, so a non-empty default shows up as a failure naming the algorithm.
+`mlDsaContextIsBound` signs with a context and checks that the signature verifies under it and
+**not** under the empty one, so a token that ignores `CK_SIGN_ADDITIONAL_CONTEXT` fails there — as
+every composite signature it made would.
 
 **Pre-hash is not wanted here, and that is a decision.** The `CKM_HASH_ML_DSA_*` mechanisms compute
 a different FIPS 204 variant under different OIDs. The certificate OIDs this project writes —
@@ -297,6 +306,9 @@ IETF profile for ML-DSA in X.509 uses pure. A CA signing with HashML-DSA would p
 relying parties do not expect. Pre-hash belongs to document signing (CAdES/PAdES), which is not
 this component.
 
-**Not yet verified against hardware.** Everything above is from vendor documentation. Running
-`HsmConformanceIT` against a Luna is what turns it into a fact, and the failure will name which row
-is wrong.
+**Verified against SoftHSMv3, not yet against hardware.** `just hsm-it` runs `HsmContract` on the
+image's SoftHSMv3, which passes both context checks and the composite round trips. For Luna,
+everything above is from vendor documentation: Thales documents `CK_SIGN_ADDITIONAL_CONTEXT` as an
+optional parameter of `CKM_ML_DSA` from firmware 7.9.0, and gives no maximum context length.
+Running `HsmConformanceIT` against a Luna is what turns it into a fact, and the failure will name
+which row is wrong.

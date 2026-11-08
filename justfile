@@ -166,6 +166,14 @@ it:
 it-only:
     cd {{module_dir}} && mvn -Pit test-compile failsafe:integration-test failsafe:verify
 
+# HsmConformanceIT needs a real PKCS#11 library, and SoftHSMv3 exists only inside the image, so this
+# runs the test class in a throwaway container from it, on a fresh token. It tests this checkout's
+# classes; the image only supplies the library. Under a minute. See scripts/hsm-it.sh.
+#
+# The HSM contract against real SoftHSMv3 (needs the image, from `just docker-build`)
+hsm-it:
+    {{module_dir}}/scripts/hsm-it.sh
+
 # Needs a JDK and network access for ASM (or ASM_JAR set); no EJBCA image, seconds to run.
 #
 # Prove StartupCheckPatcher still refuses what it should

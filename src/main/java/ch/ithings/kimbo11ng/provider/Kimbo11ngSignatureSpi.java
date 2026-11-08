@@ -8,6 +8,7 @@ import ch.ithings.kimbo11ng.p11.P11Slot;
 import org.apache.log4j.Logger;
 import ch.ithings.kimbo11ng.p11.Pkcs11Errors;
 import ch.ithings.kimbo11ng.p11.SessionLease;
+import ch.ithings.kimbo11ng.p11.TokenCapabilities;
 import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.DERSequence;
@@ -46,17 +47,34 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
         long resolve(Kimbo11ngPrivateKey key) throws InvalidKeyException;
     }
 
+    /** Which parameters a service accepts, which is the only way the three kinds differ. */
+    private enum Kind {
+        /** RSA, ECDSA, EdDSA: the mechanism, and any PSS block, are fixed by the JCA name. */
+        CLASSICAL,
+        /** ML-DSA, SLH-DSA: the mechanism comes from the key, and a context string is accepted. */
+        PQC,
+        /** {@code RSASSA-PSS}: mechanism and parameter block both come from a PSSParameterSpec. */
+        RSASSA_PSS
+    }
+
+    private static final byte[] NO_CONTEXT = new byte[0];
+
+    private final Kind kind;
     private final MechanismResolver resolver;
     private final boolean ecdsaDerEncoding;
-    private final byte[] mechanismParam;
+    /** Fixed for the {@code SHAnnnwithRSAandMGF1} services; set by setParameter for RSASSA-PSS. */
+    private byte[] mechanismParam;
+    /** The FIPS 204/205 context string; empty, the default, sends no mechanism parameter. */
+    private byte[] context = NO_CONTEXT;
 
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
     private P11Slot slot;
     private Kimbo11ngPrivateKey signingKey;
     private long mechanism = -1;
 
-    private Kimbo11ngSignatureSpi(MechanismResolver resolver, boolean ecdsaDerEncoding,
+    private Kimbo11ngSignatureSpi(Kind kind, MechanismResolver resolver, boolean ecdsaDerEncoding,
             byte[] mechanismParam) {
+        this.kind = kind;
         this.resolver = resolver;
         this.ecdsaDerEncoding = ecdsaDerEncoding;
         this.mechanismParam = mechanismParam;
@@ -74,12 +92,26 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
      */
     public static Kimbo11ngSignatureSpi fixed(long ckMechanism, boolean ecdsaDerEncoding,
             byte[] mechanismParam) {
-        return new Kimbo11ngSignatureSpi(key -> ckMechanism, ecdsaDerEncoding, mechanismParam);
+        return new Kimbo11ngSignatureSpi(Kind.CLASSICAL, key -> ckMechanism, ecdsaDerEncoding,
+                mechanismParam);
+    }
+
+    /**
+     * {@code RSASSA-PSS}, whose hash and salt length are whatever the caller's
+     * {@code PSSParameterSpec} says.
+     *
+     * <p>This is the name BouncyCastle's composite signatures ask for as their RSA-PSS half, and it
+     * cannot be one of the fixed {@code SHAnnnwithRSAandMGF1} services: the spec arrives through
+     * {@code setParameter}, after the {@code Signature} exists. Signing without one is refused
+     * rather than defaulted, because a PSS signature with an assumed hash verifies for nobody.
+     */
+    public static Kimbo11ngSignatureSpi rsassaPss() {
+        return new Kimbo11ngSignatureSpi(Kind.RSASSA_PSS, null, false, null);
     }
 
     /** ML-DSA and SLH-DSA: the key's algorithm row fixes the mechanism. */
     public static Kimbo11ngSignatureSpi fromKeyEntry() {
-        return new Kimbo11ngSignatureSpi(key -> {
+        return new Kimbo11ngSignatureSpi(Kind.PQC, key -> {
             AlgorithmEntry entry = key.entry().orElseThrow(() -> new InvalidKeyException(
                     "Key " + key.getAlias() + " carries no algorithm entry, so its PKCS#11 signing"
                     + " mechanism is unknown. Post-quantum keys must be created through the "
@@ -94,6 +126,12 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
 
     @Override
     protected void engineInitSign(PrivateKey privateKey) throws InvalidKeyException {
+        // Forgotten first, so a refusal below leaves nothing to sign with.
+        // java.security.Signature stays in its SIGN state when initSign throws; were the previous
+        // key kept, the next sign() would use it without anyone having asked.
+        signingKey = null;
+        slot = null;
+        buffer.reset();
         if (!(privateKey instanceof Kimbo11ngPrivateKey p11Key)) {
             throw new InvalidKeyException("Key must be a Kimbo11ngPrivateKey, got: "
                     + privateKey.getClass().getName());
@@ -102,7 +140,11 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
             throw new InvalidKeyException("Key " + p11Key.getAlias()
                     + " has no slot; it was probably deserialized.");
         }
-        mechanism = resolver.resolve(p11Key);
+        if (kind != Kind.RSASSA_PSS) {
+            // RSASSA-PSS has no mechanism until its PSSParameterSpec arrives, which may be before
+            // or after this; it is not the key's to decide.
+            mechanism = resolver.resolve(p11Key);
+        }
         signingKey = p11Key;
         slot = p11Key.slot();
         buffer.reset();
@@ -133,6 +175,18 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
         }
         byte[] data = buffer.toByteArray();
         buffer.reset();
+        if (kind == Kind.RSASSA_PSS && mechanismParam == null) {
+            throw new SignatureException("RSASSA-PSS needs a PSSParameterSpec before signing: the"
+                    + " hash and salt length come from it, and this provider will not guess them");
+        }
+        if (kind == Kind.RSASSA_PSS && !slot.capabilities().canSign(mechanism)) {
+            // The service is offered when the token signs with any PSS mechanism; the hash only
+            // arrives with the spec. Refusing here names what is missing, where C_SignInit would
+            // answer CKR_MECHANISM_INVALID and name nothing. An unprobed token answers yes.
+            throw new SignatureException("RSASSA-PSS was asked for "
+                    + RsaPssParams.describe(mechanismParam) + ", and the token does not advertise "
+                    + TokenCapabilities.name(mechanism) + " for signing");
+        }
         try {
             return signOnce(data);
         } catch (Exception first) {
@@ -171,16 +225,31 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
      * meaningful in the session that produced it.
      */
     private byte[] signOnce(byte[] data) throws Exception {
+        // Owns the native memory the context parameter points into; see the fence below.
+        SignAdditionalContext additional =
+                context.length == 0 ? null : new SignAdditionalContext(context);
         try (SessionLease lease = slot.borrow()) {
             CryptokiE ce = slot.ce();
             try {
                 long handle = signingKey.objectHandle(ce, lease.session());
                 // The one-argument CKM constructor fills in jacknji11's default parameter for the
-                // mechanism, which is what every mechanism here except PSS wants.
-                CKM ckm = mechanismParam == null
-                        ? new CKM(mechanism)
-                        : new CKM(mechanism, mechanismParam);
-                ce.SignInit(lease.session(), ckm, handle);
+                // mechanism, which is what every mechanism here except PSS, and ML-DSA with a
+                // context, wants.
+                CKM ckm;
+                if (additional != null) {
+                    ckm = additional.mechanism(mechanism);
+                } else if (mechanismParam != null) {
+                    ckm = new CKM(mechanism, mechanismParam);
+                } else {
+                    ckm = new CKM(mechanism);
+                }
+                try {
+                    ce.SignInit(lease.session(), ckm, handle);
+                } finally {
+                    // The context lives in JNA memory that is freed when collected, and nothing
+                    // but `additional` refers to it from Java. It has to outlive C_SignInit.
+                    java.lang.ref.Reference.reachabilityFence(additional);
+                }
                 byte[] rawSig = ce.Sign(lease.session(), data);
                 return ecdsaDerEncoding ? convertRawEcdsaToDer(rawSig) : rawSig;
             } catch (Exception e) {
@@ -227,15 +296,24 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
     }
 
     /**
-     * Accepts PSS parameters that match what the mechanism was built with, and refuses any others.
+     * Accepts the parameters each kind of service can honour, and refuses the rest by name.
      *
-     * <p>BouncyCastle's operator layer sets these when they differ from its defaults, and the
-     * inherited implementation throws {@code UnsupportedOperationException} — which would make an
-     * RSA-PSS CA with a non-default salt length fail at CA creation with nothing naming PSS.
-     * Accepting them silently would be worse: the mechanism parameter sent to the token is fixed
-     * when the service is created, so a caller asking for a different salt length would get a
-     * signature that is the right size, is not what was asked for, and fails only at the relying
-     * party.
+     * <ul>
+     *   <li><b>A context string</b> ({@code ContextParameterSpec}), for ML-DSA and SLH-DSA only.
+     *       BouncyCastle's composite signatures set one on their ML-DSA half every time; refusing it
+     *       breaks them, and ignoring it gives a signature that does not verify. See
+     *       {@link SignAdditionalContext}.</li>
+     *   <li><b>PSS parameters</b> for {@code RSASSA-PSS}, which choose its mechanism.</li>
+     *   <li><b>PSS parameters</b> for the fixed {@code SHAnnnwithRSAandMGF1} services, if they
+     *       match what the mechanism was built with. BouncyCastle's operator layer sets these when
+     *       they differ from its defaults, and the inherited implementation throws
+     *       {@code UnsupportedOperationException} — which would make an RSA-PSS CA with a
+     *       non-default salt length fail at CA creation with nothing naming PSS. Accepting them
+     *       silently would be worse: the mechanism parameter sent to the token is fixed when the
+     *       service is created, so a caller asking for a different salt length would get a
+     *       signature that is the right size, is not what was asked for, and fails only at the
+     *       relying party.</li>
+     * </ul>
      */
     @Override
     protected void engineSetParameter(java.security.spec.AlgorithmParameterSpec params)
@@ -243,9 +321,22 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
         if (params == null) {
             return;
         }
+        if (params instanceof org.bouncycastle.jcajce.spec.ContextParameterSpec ctx) {
+            setContext(ctx.getContext());
+            return;
+        }
         if (!(params instanceof java.security.spec.PSSParameterSpec pss)) {
             throw new java.security.InvalidAlgorithmParameterException(
-                    "Only PSSParameterSpec is supported, got " + params.getClass().getName());
+                    "Only PSSParameterSpec and ContextParameterSpec are supported, got "
+                    + params.getClass().getName());
+        }
+        if (kind == Kind.RSASSA_PSS) {
+            // Both computed before either is assigned, so a refused spec leaves the previous one.
+            long pssMechanism = RsaPssParams.signMechanism(pss);
+            byte[] pssParam = RsaPssParams.forSpec(pss);
+            mechanism = pssMechanism;
+            mechanismParam = pssParam;
+            return;
         }
         if (mechanismParam == null) {
             throw new java.security.InvalidAlgorithmParameterException(
@@ -261,6 +352,26 @@ public class Kimbo11ngSignatureSpi extends SignatureSpi {
                     + " token cannot honour a different salt length or digest here; request the"
                     + " matching SHAnnnwithRSAandMGF1 algorithm instead.");
         }
+    }
+
+    private void setContext(byte[] requested)
+            throws java.security.InvalidAlgorithmParameterException {
+        byte[] value = requested == null ? NO_CONTEXT : requested;
+        if (kind != Kind.PQC) {
+            if (value.length == 0) {
+                // The empty context is what every signature has; asking for it changes nothing.
+                return;
+            }
+            throw new java.security.InvalidAlgorithmParameterException(
+                    "A context string applies to ML-DSA and SLH-DSA only; this is a classical "
+                    + "signature, which has none");
+        }
+        if (value.length > SignAdditionalContext.MAX_CONTEXT_LENGTH) {
+            throw new java.security.InvalidAlgorithmParameterException(
+                    "FIPS 204 and 205 limit the context to "
+                    + SignAdditionalContext.MAX_CONTEXT_LENGTH + " bytes, got " + value.length);
+        }
+        context = value.clone();
     }
 
     @Override

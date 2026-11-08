@@ -422,7 +422,8 @@ public abstract class ProfileConformanceKit {
             if (!entry.canSign()) {
                 return;
             }
-            // The fake returns a synthetic post-quantum signature, so nothing here can verify one.
+            // Not verified here: the fake's signature is real only for the standard ML-DSA key
+            // lengths, and synthetic for SLH-DSA and for a vendor table with lengths of its own.
             // What is under test is that the profile's signing mechanism was accepted by a token
             // advertising only this profile's numbering — where a table that shifts the generation
             // mechanism but forgets the signing one fails.

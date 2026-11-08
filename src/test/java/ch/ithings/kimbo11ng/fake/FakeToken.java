@@ -73,9 +73,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  *
  * <p>RSA and EC keys are real BouncyCastle keys, so signatures verify and {@code CKA_EC_POINT}
- * carries a genuine curve point. PQC keys are random material of the exact FIPS public-key length
- * (ML-DSA 1312/1952/2592, ML-KEM 800/1184/1568, SLH-DSA 32/48/64): enough to exercise parameter-set
- * resolution, OID selection and length cross-validation, which is all the plumbing under test.
+ * carries a genuine curve point. ML-DSA keys are real too, so their signatures verify, and ML-KEM
+ * keys are genuine encapsulation keys, because BouncyCastle 1.84 refuses random bytes for one.
+ * SLH-DSA keys are random material of the exact FIPS public-key length (32/48/64) and sign
+ * synthetically — real SLH-DSA costs seconds per operation. See {@link #pqcMaterial}.
  *
  * <p>Not thread-safe by accident: it is synchronized on the instance precisely so that concurrency
  * tests observe the token's own serialization, not a data race inside the double.
@@ -130,6 +131,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private int sessionInfoCalls;
     private int loginCalls;
     private int findObjectsCalls;
+    private byte[] lastSignParameter;
+    private long lastSignHedge = -1;
 
     // ---- fault-injection knobs (0.3) ----
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
@@ -382,6 +385,22 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return new ArrayList<>(objects.keySet());
     }
 
+    /**
+     * The mechanism parameter of the last {@code C_SignInit}, as raw bytes, or {@code null} when it
+     * carried none. Lets a test tell "sent an empty parameter" from "sent nothing".
+     */
+    public synchronized byte[] lastSignParameter() {
+        return lastSignParameter == null ? null : lastSignParameter.clone();
+    }
+
+    /**
+     * The {@code hedgeVariant} of the last ML-DSA {@code CK_SIGN_ADDITIONAL_CONTEXT} this token
+     * accepted, or -1 if the last {@code C_SignInit} carried none.
+     */
+    public synchronized long lastSignHedge() {
+        return lastSignHedge;
+    }
+
     /** Raw attribute value as the token holds it, for assertions. */
     public synchronized byte[] attribute(long handle, long cka) {
         Map<Long, byte[]> o = objects.get(handle);
@@ -398,6 +417,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
         int findIndex;
         long signKey = -1;
         long signMechanism = -1;
+        /** The ML-DSA context from {@code CK_SIGN_ADDITIONAL_CONTEXT}, or null for none. */
+        byte[] signContext;
+        /** The PSS parameters from {@code CK_RSA_PKCS_PSS_PARAMS}, or null for a non-PSS sign. */
+        java.security.spec.PSSParameterSpec signPss;
         long verifyKey = -1;
         long verifyMechanism = -1;
 
@@ -1350,12 +1373,111 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (!objects.containsKey(key)) {
             return CKR.KEY_HANDLE_INVALID;
         }
+        // Recorded before it is judged, so a test can see what a refused C_SignInit was sent.
+        byte[] parameter = parameterBytes(mechanism);
+        lastSignParameter = parameter;
+        lastSignHedge = -1;
         if (!pssParamIsValid(mechanism)) {
             return CKR.MECHANISM_PARAM_INVALID;
         }
+        java.security.spec.PSSParameterSpec pss = null;
+        if (isPss(mechanism.mechanism)) {
+            pss = pssSpec(mechanism.mechanism, parameter);
+            if (pss == null) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
+        }
+        byte[] context = null;
+        if (mechanism.mechanism == CKM_ML_DSA && parameter != null) {
+            context = signAdditionalContext(mechanism);
+            if (context == null) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
+            lastSignHedge = mechanism.pParameter.getNativeLong(0).longValue();
+        }
         s.signKey = key;
         s.signMechanism = mechanism.mechanism;
+        s.signContext = context;
+        s.signPss = pss;
         return CKR.OK;
+    }
+
+    /** The mechanism parameter as bytes, wherever jacknji11 put it, or null when there is none. */
+    private static byte[] parameterBytes(CKM mechanism) {
+        if (mechanism.bParameter != null) {
+            return mechanism.bParameter.clone();
+        }
+        if (mechanism.pParameter != null && mechanism.ulParameterLen > 0) {
+            return mechanism.pParameter.getByteArray(0, (int) mechanism.ulParameterLen);
+        }
+        return null;
+    }
+
+    /**
+     * Reads {@code CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant, pContext, ulContextLen }} the way a
+     * v3.2 module does: packed, as jacknji11 packs every PKCS#11 structure. Returns the context, or
+     * null when the block is not that structure — which a real token answers with
+     * {@code CKR_MECHANISM_PARAM_INVALID}.
+     */
+    private static byte[] signAdditionalContext(CKM mechanism) {
+        int ulong = com.sun.jna.Native.LONG_SIZE;
+        int pointer = com.sun.jna.Native.POINTER_SIZE;
+        if (mechanism.pParameter == null || mechanism.ulParameterLen != 2L * ulong + pointer) {
+            return null;
+        }
+        com.sun.jna.Pointer block = mechanism.pParameter;
+        // CKH_HEDGE_PREFERRED, CKH_HEDGE_REQUIRED, CKH_DETERMINISTIC_REQUIRED, and nothing else. A
+        // caller that never wrote the field sends whatever the allocator left there — often zero,
+        // so this catches an unwritten field only some of the time.
+        long hedge = block.getNativeLong(0).longValue();
+        if (hedge < 0 || hedge > 2) {
+            return null;
+        }
+        long length = block.getNativeLong(ulong + pointer).longValue();
+        if (length == 0) {
+            return new byte[0];
+        }
+        com.sun.jna.Pointer context = block.getPointer(ulong);
+        return context == null ? null : context.getByteArray(0, (int) length);
+    }
+
+    private static boolean isPss(long ckm) {
+        return ckm == CKM.SHA256_RSA_PKCS_PSS || ckm == CKM.SHA384_RSA_PKCS_PSS
+                || ckm == CKM.SHA512_RSA_PKCS_PSS;
+    }
+
+    /**
+     * The {@code PSSParameterSpec} a {@code CK_RSA_PKCS_PSS_PARAMS} block describes, so the fake
+     * signs with the salt length it was sent rather than one it assumes; or null when the block is
+     * one it cannot honour faithfully.
+     *
+     * <p>Refused: a {@code hashAlg} other than the digest the {@code CKM_SHAnnn_RSA_PKCS_PSS}
+     * mechanism itself names, and an MGF1 over a different digest. A real token may reject the
+     * first and may honour the second; this one refuses both rather than sign something other than
+     * what it was asked for, which is the failure a fake must never hide.
+     */
+    private static java.security.spec.PSSParameterSpec pssSpec(long ckm, byte[] parameter) {
+        int width = ULong.ULONG_SIZE.size();
+        long hash = ULong.b2ulong(Arrays.copyOfRange(parameter, 0, width));
+        long mgf = ULong.b2ulong(Arrays.copyOfRange(parameter, width, 2 * width));
+        long salt = ULong.b2ulong(Arrays.copyOfRange(parameter, 2 * width, 3 * width));
+        // {mechanism, its CKM_SHAnnn digest, its CKG_MGF1_SHAnnn}; names[i] is the JCA digest name
+        long[][] rows = {
+            {CKM.SHA256_RSA_PKCS_PSS, 0x250, 2},
+            {CKM.SHA384_RSA_PKCS_PSS, 0x260, 3},
+            {CKM.SHA512_RSA_PKCS_PSS, 0x270, 4}};
+        String[] names = {"SHA-256", "SHA-384", "SHA-512"};
+        for (int i = 0; i < rows.length; i++) {
+            if (rows[i][0] == ckm) {
+                if (hash != rows[i][1] || mgf != rows[i][2]) {
+                    return null;
+                }
+                return new java.security.spec.PSSParameterSpec(names[i], "MGF1",
+                        new java.security.spec.MGF1ParameterSpec(names[i]), (int) salt,
+                        java.security.spec.PSSParameterSpec.TRAILER_FIELD_BC);
+            }
+        }
+        return null;
     }
 
     @Override
@@ -1389,6 +1511,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
         outLen.value = signature.length;
         s.signKey = -1;
         s.signMechanism = -1;
+        s.signContext = null;
+        s.signPss = null;
         return CKR.OK;
     }
 
@@ -1424,8 +1548,15 @@ public final class FakeToken extends UnsupportedNativeProvider {
         PrivateKey privateKey = java.security.KeyFactory
                 .getInstance(algorithm, BC)
                 .generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(key.get(PRIVATE_MATERIAL)));
-        Signature sig = Signature.getInstance(signatureAlgorithm(s.signMechanism, algorithm), BC);
+        Signature sig = Signature.getInstance(s.signPss != null ? "RSASSA-PSS"
+                : signatureAlgorithm(s.signMechanism, algorithm), BC);
         sig.initSign(privateKey);
+        if (s.signPss != null) {
+            sig.setParameter(s.signPss);
+        }
+        if (s.signContext != null) {
+            sig.setParameter(new org.bouncycastle.jcajce.spec.ContextParameterSpec(s.signContext));
+        }
         sig.update(data);
         byte[] der = sig.sign();
         // PKCS#11 returns ECDSA as the raw r||s pair, not DER — mirroring that is essential,
@@ -1451,8 +1582,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return keyAlgorithm;
         }
         if ("ML-DSA".equals(keyAlgorithm)) {
-            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest
-            // and no context string, which is what BouncyCastle's bare "ML-DSA" does.
+            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest,
+            // which is what BouncyCastle's bare "ML-DSA" does. The context string is whatever
+            // CK_SIGN_ADDITIONAL_CONTEXT carried, empty when no parameter was sent; sign() applies it.
             return "ML-DSA";
         }
         if ("EC".equals(keyAlgorithm)) {
@@ -1505,18 +1637,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (ckm == CKM.SHA512_RSA_PKCS) {
             return "SHA512withRSA";
         }
-        // PSS through BouncyCastle's own SHAxxxwithRSAandMGF1, which uses a salt equal to the
-        // digest length — the same choice RsaPssParams encodes. If the two ever disagree, a
-        // signature produced here stops verifying and the round-trip test says so.
-        if (ckm == CKM.SHA256_RSA_PKCS_PSS) {
-            return "SHA256withRSAandMGF1";
-        }
-        if (ckm == CKM.SHA384_RSA_PKCS_PSS) {
-            return "SHA384withRSAandMGF1";
-        }
-        if (ckm == CKM.SHA512_RSA_PKCS_PSS) {
-            return "SHA512withRSAandMGF1";
-        }
+        // The PSS mechanisms never get here: sign() uses RSASSA-PSS with the hash and salt length
+        // decoded from the CK_RSA_PKCS_PSS_PARAMS the caller sent, as a token does. A caller that
+        // sent the wrong salt length gets a signature that fails at the verifier, which is what
+        // the round-trip tests check.
         return "SHA256withRSA";
     }
 

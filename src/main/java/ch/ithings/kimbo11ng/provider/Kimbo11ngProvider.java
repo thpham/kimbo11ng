@@ -60,11 +60,10 @@ public final class Kimbo11ngProvider extends Provider {
 
     /**
      * A classical signature service: the JCA name EJBCA asks for, the mechanism behind it, whether
-     * the token's raw {@code r||s} output needs DER-wrapping, and the mechanism parameter block.
+     * the token's raw {@code r||s} output needs DER-wrapping, the mechanism parameter block, and
+     * the OIDs it also answers to.
      *
      * @param mechanismParam non-null only for RSA-PSS; see {@link RsaPssParams}
-     */
-    /**
      * @param oidAliases OIDs this algorithm must also answer to, or empty.
      *        <p>BouncyCastle's operator layer resolves a signer from an {@code AlgorithmIdentifier},
      *        and {@code OperatorHelper} only turns that back into a JCA name for the algorithms its
@@ -134,6 +133,73 @@ public final class Kimbo11ngProvider extends Provider {
                     List.of("1.3.101.112")),
             new ClassicalSignature("Ed448", CKM.EDDSA, false, null,
                     List.of("1.3.101.113")));
+
+    /** The PSS mechanisms behind {@code RSASSA-PSS}; it is offered if the token signs with any. */
+    private static final List<Long> PSS_MECHANISMS = List.of(CKM.SHA256_RSA_PKCS_PSS,
+            CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS);
+
+    private static final String RSASSA_PSS = "RSASSA-PSS";
+
+    /**
+     * A composite ML-DSA signature (draft-ietf-lamps-pq-composite-sigs), offered when this provider
+     * offers both halves.
+     *
+     * @param mlDsa     the ML-DSA service the post-quantum half needs
+     * @param classical the service whose presence means the token can sign the classical half. For
+     *                  the PSS rows that is the fixed {@code SHAnnnwithRSAandMGF1} service with the
+     *                  hash BouncyCastle's {@code PSSParameterSpec} for the row names — BC itself asks
+     *                  for {@code RSASSA-PSS}, which is offered whenever any PSS mechanism is, and so
+     *                  says nothing about whether this hash is there.
+     */
+    private record CompositeSignature(String name, String oid, String mlDsa, String classical) {
+    }
+
+    /**
+     * Every pure composite BouncyCastle 1.84 implements, with the halves its {@code CompositeIndex}
+     * pairs it with — except two families, left out on purpose:
+     *
+     * <ul>
+     *   <li>The pre-hash ({@code HashMLDSA…}) forms. EJBCA's composite wrapper produces none of
+     *       their OIDs, and they are a different signature under different OIDs.</li>
+     *   <li>The three RSA PKCS#1 v1.5 forms ({@code …-PKCS15-…}). Keyfactor: "EJBCA does not support
+     *       the legacy PKCS#1 v1.5 signature scheme with composite keys"; an RSA classical half
+     *       always signs with PSS. Offering them would be surface EJBCA never asks for.</li>
+     * </ul>
+     *
+     * {@code CompositeSignatureTest.tableMatchesBouncyCastle} fails if a BouncyCastle upgrade adds a
+     * row this table lacks, and {@code noPkcs15Composites} if the excluded set changes.
+     */
+    private static final List<CompositeSignature> COMPOSITE_SIGNATURES = List.of(
+            new CompositeSignature("MLDSA44-RSA2048-PSS-SHA256", "1.3.6.1.5.5.7.6.37",
+                    "ML-DSA-44", "SHA256withRSAandMGF1"),
+            new CompositeSignature("MLDSA44-Ed25519-SHA512", "1.3.6.1.5.5.7.6.39",
+                    "ML-DSA-44", "Ed25519"),
+            new CompositeSignature("MLDSA44-ECDSA-P256-SHA256", "1.3.6.1.5.5.7.6.40",
+                    "ML-DSA-44", "SHA256withECDSA"),
+            new CompositeSignature("MLDSA65-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.41",
+                    "ML-DSA-65", "SHA256withRSAandMGF1"),
+            new CompositeSignature("MLDSA65-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.43",
+                    "ML-DSA-65", "SHA384withRSAandMGF1"),
+            new CompositeSignature("MLDSA65-ECDSA-P256-SHA512", "1.3.6.1.5.5.7.6.45",
+                    "ML-DSA-65", "SHA256withECDSA"),
+            new CompositeSignature("MLDSA65-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.46",
+                    "ML-DSA-65", "SHA384withECDSA"),
+            new CompositeSignature("MLDSA65-ECDSA-brainpoolP256r1-SHA512", "1.3.6.1.5.5.7.6.47",
+                    "ML-DSA-65", "SHA256withECDSA"),
+            new CompositeSignature("MLDSA65-Ed25519-SHA512", "1.3.6.1.5.5.7.6.48",
+                    "ML-DSA-65", "Ed25519"),
+            new CompositeSignature("MLDSA87-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.49",
+                    "ML-DSA-87", "SHA384withECDSA"),
+            new CompositeSignature("MLDSA87-ECDSA-brainpoolP384r1-SHA512", "1.3.6.1.5.5.7.6.50",
+                    "ML-DSA-87", "SHA384withECDSA"),
+            new CompositeSignature("MLDSA87-Ed448-SHAKE256", "1.3.6.1.5.5.7.6.51",
+                    "ML-DSA-87", "Ed448"),
+            new CompositeSignature("MLDSA87-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.52",
+                    "ML-DSA-87", "SHA256withRSAandMGF1"),
+            new CompositeSignature("MLDSA87-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.53",
+                    "ML-DSA-87", "SHA384withRSAandMGF1"),
+            new CompositeSignature("MLDSA87-ECDSA-P521-SHA512", "1.3.6.1.5.5.7.6.54",
+                    "ML-DSA-87", "SHA512withECDSA"));
 
     /**
      * Digest services, as {@code {standardName, alias...}}.
@@ -217,9 +283,17 @@ public final class Kimbo11ngProvider extends Provider {
                 keys.add("Signature:" + row.jcaName());
             }
         }
+        if (signsAnyPss(capabilities)) {
+            keys.add("Signature:" + RSASSA_PSS);
+        }
         for (AlgorithmEntry entry : runtime.algorithms().supported()) {
             if (entry.canSign()) {
                 keys.add("Signature:" + entry.canonicalName());
+            }
+        }
+        for (CompositeSignature row : COMPOSITE_SIGNATURES) {
+            if (bothHalvesOffered(row, keys)) {
+                keys.add("Signature:" + row.name());
             }
         }
         for (SecretKeyType type : SecretKeyType.all()) {
@@ -231,6 +305,28 @@ public final class Kimbo11ngProvider extends Provider {
             }
         }
         return keys;
+    }
+
+    /**
+     * The two services a composite is gated on, as {@code [mlDsa, classical]}, or null for a
+     * composite this provider does not offer. Package-private, for the test that checks every row
+     * against BouncyCastle's own pairing table: a wrong row is invisible to any signing test.
+     */
+    static List<String> compositeHalves(String compositeName) {
+        return COMPOSITE_SIGNATURES.stream()
+                .filter(row -> row.name().equals(compositeName))
+                .map(row -> List.of(row.mlDsa(), row.classical()))
+                .findFirst().orElse(null);
+    }
+
+    private static boolean signsAnyPss(TokenCapabilities capabilities) {
+        return PSS_MECHANISMS.stream().anyMatch(capabilities::canSign);
+    }
+
+    /** Whether {@code offered}, a set of {@code "type:algorithm"} keys, has both of the row's halves. */
+    private static boolean bothHalvesOffered(CompositeSignature row, Set<String> offered) {
+        return offered.contains("Signature:" + row.mlDsa())
+                && offered.contains("Signature:" + row.classical());
     }
 
     private static String nameFor(TokenRuntime runtime) {
@@ -301,6 +397,19 @@ public final class Kimbo11ngProvider extends Provider {
             classical++;
         }
 
+        // RSASSA-PSS takes its hash from a PSSParameterSpec rather than its name, which is how
+        // BouncyCastle's composite signatures ask for their RSA-PSS half.
+        if (signsAnyPss(capabilities)) {
+            putService(new Service(this, "Signature", RSASSA_PSS,
+                    Kimbo11ngSignatureSpi.class.getName(), null, null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return Kimbo11ngSignatureSpi.rsassaPss();
+                }
+            });
+            registeredServices.add("Signature:" + RSASSA_PSS);
+        }
+
         // One signature service per signing algorithm the token can actually do — the profile
         // table already intersected with the probe, so an algorithm the firmware lacks is not
         // advertised here either. The mechanism is resolved from the key at init, so nothing here
@@ -319,6 +428,28 @@ public final class Kimbo11ngProvider extends Provider {
             });
             registeredServices.add("Signature:" + entry.canonicalName());
             registered++;
+        }
+
+        // Composite ML-DSA, for EJBCA's CryptoTokenCompositeWrapper. Only where both halves are on
+        // offer, which the loops above have just decided: a composite whose classical half the
+        // firmware lacks would be picked by EJBCA and then fail mid-signature.
+        int composite = 0;
+        for (CompositeSignature row : COMPOSITE_SIGNATURES) {
+            if (!bothHalvesOffered(row, registeredServices)) {
+                continue;
+            }
+            org.bouncycastle.asn1.ASN1ObjectIdentifier oid =
+                    new org.bouncycastle.asn1.ASN1ObjectIdentifier(row.oid());
+            putService(new Service(this, "Signature", row.name(),
+                    Kimbo11ngCompositeSignatureSpi.class.getName(), List.of(row.oid()), null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return new Kimbo11ngCompositeSignatureSpi(row.name(), oid,
+                            Kimbo11ngProvider.this);
+                }
+            });
+            registeredServices.add("Signature:" + row.name());
+            composite++;
         }
 
         // Digests, in software, because BouncyCastle's operator layer resolves every helper it
@@ -389,7 +520,8 @@ public final class Kimbo11ngProvider extends Provider {
         if (log.isDebugEnabled()) {
             log.debug("Registered provider " + getName() + " with " + classical + " of "
                     + CLASSICAL_SIGNATURES.size() + " classical and " + registered
-                    + " post-quantum signature services, plus " + symmetric
+                    + " post-quantum signature services, " + composite + " composite ones, plus "
+                    + symmetric
                     + " symmetric ones, from profile " + initialRuntime.profile().name());
         }
     }

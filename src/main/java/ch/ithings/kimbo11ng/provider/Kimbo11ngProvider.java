@@ -11,6 +11,7 @@ import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 
+import java.security.NoSuchAlgorithmException;
 import java.security.Provider;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -443,6 +444,30 @@ public final class Kimbo11ngProvider extends Provider {
         };
     }
 
+    /**
+     * A secret-key generator over {@code owner}'s slot.
+     *
+     * <p>The symmetric counterpart of {@link #keyStore(TokenRuntime)}. The {@code KeyGenerator}
+     * service, like every service here, builds on the slot of whichever crypto token last
+     * initialised on this (library, slot). That is harmless for generation — sessions, library,
+     * capabilities and login all belong to the slot, not to a token — but a crypto token that
+     * generates a key should do so through its own slot rather than rely on that.
+     *
+     * @throws NoSuchAlgorithmException if this provider does not offer the service because the
+     *         token does not generate the key: the refusal {@code KeyGenerator.getInstance} gives,
+     *         which callers can fall back on
+     */
+    public javax.crypto.KeyGenerator keyGenerator(TokenRuntime owner, SecretKeyType type)
+            throws NoSuchAlgorithmException {
+        if (getService("KeyGenerator", type.jcaName()) == null) {
+            throw new NoSuchAlgorithmException(
+                    "no such algorithm: " + type.jcaName() + " for provider " + getName());
+        }
+        return new javax.crypto.KeyGenerator(
+                new Kimbo11ngKeyGeneratorSpi(owner.slot(), type), this, type.jcaName()) {
+        };
+    }
+
     private void registerServices(TokenRuntime initialRuntime) {
         putService(new Service(this, "KeyStore", "PKCS11",
                 Kimbo11ngKeyStoreSpi.class.getName(), null, null) {
@@ -555,6 +580,11 @@ public final class Kimbo11ngProvider extends Provider {
             });
         }
 
+        // The generator services below take the slot of whichever crypto token last initialised on
+        // this (library, slot): the JCA hands a service no caller to bind to. That is harmless —
+        // the sessions, library, capabilities and login they use are the slot's — and the crypto
+        // token itself does not come through them: it generates key pairs on its own path and
+        // secret keys through keyGenerator(owner, type). They stay for callers that ask the JCA.
         putService(new Service(this, "KeyPairGenerator", "RSA",
                 Kimbo11ngKeyPairGeneratorSpi.RSA.class.getName(), null, null) {
             @Override

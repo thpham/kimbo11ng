@@ -301,5 +301,11 @@ class SymmetricKeyTest {
         // The Mac stays: CKM_SHA256_HMAC is still advertised, and a key created elsewhere on this
         // token would still be usable with it.
         assertNotNull(restricted.getProvider().getService("Mac", "HmacSHA256"));
+
+        // And generating one is refused as an unknown algorithm, which a caller can fall back on,
+        // not as a token failure wrapped in a KeyStoreException.
+        restricted.activate("1234".toCharArray());
+        assertThrows(NoSuchAlgorithmException.class,
+                () -> restricted.generateKey("HmacSHA256", 256, "refused"));
     }
 }

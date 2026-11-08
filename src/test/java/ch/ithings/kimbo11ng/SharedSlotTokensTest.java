@@ -191,6 +191,22 @@ class SharedSlotTokensTest {
     }
 
     @Test
+    @DisplayName("a token generates a secret key it can use after a second token initialised")
+    void secretKeyAfterASecondToken() throws Exception {
+        // A guard, not a regression test: the generator used to take the second token's slot,
+        // which shares everything generation needs. It must keep working through the first's own.
+        TestBridge bridge = new TestBridge();
+        CryptoTokenImpl first = token(1, bridge);
+        token(2, new TestBridge());
+
+        first.generateKey("HmacSHA256", 256, "firstMac");
+
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256", first.getProvider());
+        mac.init((javax.crypto.SecretKey) bridge.bridgeGetKeyStore().getKey("firstMac", null));
+        org.junit.jupiter.api.Assertions.assertEquals(32, mac.doFinal(new byte[] {1, 2, 3}).length);
+    }
+
+    @Test
     @DisplayName("a token reactivated after EJBCA's throwaway instances of it still sees its keys")
     void reactivationAfterThrowawayInstances() throws Exception {
         // EJBCA instantiates and inits a token more than once — two short-lived copies with id -1

@@ -318,7 +318,7 @@ public class CryptoTokenImpl {
 
         SecretKey key;
         try {
-            KeyGenerator generator = KeyGenerator.getInstance(type.jcaName(), p11Provider);
+            KeyGenerator generator = p11Provider.keyGenerator(current, type);
             generator.init(bits);
             key = generator.generateKey();
         } catch (NoSuchAlgorithmException e) {

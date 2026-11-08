@@ -372,7 +372,7 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 932 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 938 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 30 EJBCA + 27 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
@@ -409,6 +409,14 @@ Beyond the standard EJBCA token properties (`sharedLibrary`, `slotLabelValue`, `
 | `kimbo11ng.keyid.backfill`             | true    | Write a `CKA_ID` onto legacy keys that have none                    |
 | `kimbo11ng.strict.publickey`           | false   | Make an OID disagreement fatal when enumerating existing keys       |
 | `kimbo11ng.pqc.kemUsage`               | both    | ML-KEM usage attributes: `both`, `v32` only, or `legacy` only        |
+| `kimbo11ng.keygen.restrictUsages`      | true    | Generate signing-only keys with encryption, wrapping and recovery explicitly off |
+
+`kimbo11ng.keygen.restrictUsages` exists because PKCS#11 leaves the default of a usage attribute
+the template omits to the token. SoftHSMv3 turns them all on, so an EC, Edwards, ML-DSA or SLH-DSA
+key also came back `CKA_DECRYPT`, `CKA_UNWRAP` and `CKA_SIGN_RECOVER`, and EJBCA showed it as
+SIGN_ENCRYPT. These keys are now generated with those attributes set to false. RSA and ML-KEM keys
+are unchanged. Keys generated earlier keep the attributes they were created with. Set the property
+to `false` for an HSM whose policy refuses the explicit values.
 
 `kimbo11ng.pqc.kemUsage` is worth a word, because the default sends two pairs and that looks like
 indecision until you see who reads them.

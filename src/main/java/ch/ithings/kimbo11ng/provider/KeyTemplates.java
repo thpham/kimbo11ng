@@ -33,6 +33,9 @@ import java.util.Locale;
  */
 public final class KeyTemplates {
 
+    /** Token property; {@code false} drops the explicit denials, see {@link Pair#withoutDenials}. */
+    public static final String RESTRICT_USAGES = "kimbo11ng.keygen.restrictUsages";
+
     /** Bytes of {@code CKA_ID}. Random rather than derived, so no second call is needed. */
     private static final int KEY_ID_BYTES = 16;
 
@@ -90,6 +93,7 @@ public final class KeyTemplates {
         // is an attempt to set a read-only attribute: SoftHSMv3 answers CKR_ATTRIBUTE_READ_ONLY
         // and the whole generation fails.
         List<CKA> priv = new ArrayList<>(privateBase(label, keyId, CKK.EC));
+        denyEncryption(pub, priv);
         return new Pair(pub, priv);
     }
 
@@ -114,6 +118,7 @@ public final class KeyTemplates {
                 new CKA(CKA.VERIFY, true)));
         // Same read-only reasoning as ec(): the curve is an input to the public template only.
         List<CKA> priv = new ArrayList<>(privateBase(label, keyId, CKK.CKK_EC_EDWARDS));
+        denyEncryption(pub, priv);
         return new Pair(pub, priv);
     }
 
@@ -176,6 +181,7 @@ public final class KeyTemplates {
         if (entry.canSign()) {
             pub.add(new CKA(CKA.VERIFY, true));
             priv.add(new CKA(CKA.SIGN, true));
+            denyEncryption(pub, priv);
         } else {
             // Encapsulation is a public-key operation, decapsulation a private-key one.
             if (kemUsage.sendsV32()) {
@@ -225,6 +231,31 @@ public final class KeyTemplates {
             template.add(new CKA(CKA.UNWRAP, true));
         }
         return template;
+    }
+
+    /** The usage attributes a signing-only key is denied; see {@link #denyEncryption}. */
+    private static final java.util.Set<Long> DENIED_ON_SIGNING_KEYS =
+            java.util.Set.of(CKA.ENCRYPT, CKA.WRAP, CKA.VERIFY_RECOVER, CKA.DECRYPT, CKA.UNWRAP,
+                    CKA.SIGN_RECOVER);
+
+    /**
+     * Says no to encryption, wrapping and signature recovery on a key that can only sign, rather
+     * than saying nothing.
+     *
+     * <p>PKCS#11 leaves the default of an omitted usage attribute to the token, and SoftHSMv3
+     * defaults these to true: every EC, Edwards and ML-DSA key came back {@code CKA_DECRYPT},
+     * {@code CKA_UNWRAP} and {@code CKA_SIGN_RECOVER} as well as {@code CKA_SIGN}. EJBCA's admin UI
+     * turned that into SIGN_ENCRYPT, and the key passed any HSM policy that filters on those
+     * attributes. No mechanism encrypts, wraps or recovers with these key types, so nothing that
+     * worked stops working. RSA keeps them: it is generated able to encrypt and to wrap.
+     */
+    private static void denyEncryption(List<CKA> pub, List<CKA> priv) {
+        pub.add(new CKA(CKA.ENCRYPT, false));
+        pub.add(new CKA(CKA.WRAP, false));
+        pub.add(new CKA(CKA.VERIFY_RECOVER, false));
+        priv.add(new CKA(CKA.DECRYPT, false));
+        priv.add(new CKA(CKA.UNWRAP, false));
+        priv.add(new CKA(CKA.SIGN_RECOVER, false));
     }
 
     private static List<CKA> privateBase(byte[] label, byte[] keyId, long keyType) {
@@ -288,6 +319,23 @@ public final class KeyTemplates {
         public Pair {
             publicTemplate = List.copyOf(publicTemplate);
             privateTemplate = List.copyOf(privateTemplate);
+        }
+
+        /**
+         * The templates without the explicit denials {@link KeyTemplates#denyEncryption} adds,
+         * leaving those attributes to the token's defaults as before. What
+         * {@link KeyTemplates#RESTRICT_USAGES}{@code =false} generates with, for an HSM policy that
+         * refuses the explicit values.
+         */
+        public Pair withoutDenials() {
+            return new Pair(stripDenials(publicTemplate), stripDenials(privateTemplate));
+        }
+
+        private static List<CKA> stripDenials(List<CKA> template) {
+            return template.stream()
+                    .filter(a -> !(DENIED_ON_SIGNING_KEYS.contains(a.type)
+                            && Boolean.FALSE.equals(a.getValueBool())))
+                    .toList();
         }
 
         public CKA[] pub() {

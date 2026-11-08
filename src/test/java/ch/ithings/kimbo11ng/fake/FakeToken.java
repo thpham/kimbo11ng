@@ -216,6 +216,20 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return this;
     }
 
+    private boolean defaultUsagesTrue;
+
+    /**
+     * Default the encryption, wrapping and recovery attributes a key-pair template leaves out to
+     * true, as SoftHSMv3 does.
+     * PKCS#11 leaves those defaults to the token. By default the fake leaves them absent, so a
+     * signing key reported no encryption usage here while the same key on SoftHSMv3 reported
+     * {@code CKA_DECRYPT}.
+     */
+    public FakeToken defaultUsagesTrue() {
+        defaultUsagesTrue = true;
+        return this;
+    }
+
     private Runnable onLogin = () -> { };
 
     /**
@@ -1194,6 +1208,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
             }
         } catch (Exception e) {
             return CKR.GENERAL_ERROR;
+        }
+        if (defaultUsagesTrue) {
+            // What SoftHSMv3 was seen doing with the usage attributes a template leaves out, on
+            // RSA, EC, Edwards and ML-DSA keys alike: setting them true. Measured 2026-11-08: an EC
+            // private key generated with CKA_SIGN alone reported 261, 263, 264 and 265.
+            for (long cka : new long[] {CKA.ENCRYPT, CKA.WRAP, CKA.VERIFY_RECOVER}) {
+                pub.putIfAbsent(cka, new byte[] {1});
+            }
+            for (long cka : new long[] {CKA.DECRYPT, CKA.UNWRAP, CKA.SIGN_RECOVER}) {
+                priv.putIfAbsent(cka, new byte[] {1});
+            }
         }
         pubOut.value = store(pub);
         privOut.value = store(priv);

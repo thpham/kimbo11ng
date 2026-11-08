@@ -248,4 +248,66 @@ class KeyUsageTest {
             impl.requireTestableKeyPair("neverGenerated");
         }
     }
+
+    /**
+     * The same questions on a token that sets the usages a template leaves out, as SoftHSMv3 does.
+     *
+     * <p>The tests above pass on the plain fake because it leaves those attributes absent. On
+     * SoftHSMv3 every signing key came back {@code CKA_DECRYPT} and {@code CKA_UNWRAP} as well, so
+     * EJBCA's admin UI showed an ML-DSA, EC or Ed25519 key as SIGN_ENCRYPT.
+     */
+    @Nested
+    @DisplayName("on a token that defaults usages to true")
+    class TokenDefaults {
+
+        @BeforeEach
+        void permissiveToken() {
+            token.defaultUsagesTrue();
+        }
+
+        @Test
+        @DisplayName("a signing key reports sign and verify only, whatever its family")
+        void signingKeys() throws Exception {
+            String[][] keys = {{"secp256r1", "ecKey"}, {"Ed25519", "edKey"},
+                {"ML-DSA-65", "mlDsaKey"}, {"SLH-DSA-SHA2-128F", "slhDsaKey"}};
+            for (String[] key : keys) {
+                impl.generateKeyPair(key[0], key[1]);
+                assertEquals(Set.of(SIGN), impl.getKeyUsagesFromPrivateKey(key[1]), key[0]);
+                assertEquals(Set.of(CKA.SIGN), impl.getKeyUsagesFromKey(key[1], true),
+                        key[0] + ": no decrypt or unwrap on a key that can only sign");
+                assertEquals(Set.of(CKA.VERIFY), impl.getKeyUsagesFromKey(key[1], false),
+                        key[0] + ": no encrypt or wrap on its public half");
+            }
+        }
+
+        @Test
+        @DisplayName("an RSA key and an ML-KEM key keep the usages they are generated for")
+        void otherKeysUnchanged() throws Exception {
+            impl.generateKeyPair("2048", "rsaKey");
+            impl.generateKeyPair("ML-KEM-768", "kemKey");
+
+            assertEquals(Set.of(DECRYPT, SIGN), impl.getKeyUsagesFromPrivateKey("rsaKey"));
+            assertTrue(impl.getKeyUsagesFromPrivateKey("kemKey").contains(DECRYPT),
+                    "EJBCA reads CKA_DECRYPT to recognise a KEM key");
+        }
+
+        @Test
+        @DisplayName("the property turns the restriction off, restoring the token's defaults")
+        void killSwitch() throws Exception {
+            Properties properties = new Properties();
+            properties.setProperty(CryptoTokenImpl.SHLIB_LABEL_KEY, "/nonexistent/libfake.so");
+            properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, "SLOT_INDEX");
+            properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, "0");
+            properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
+            properties.setProperty(
+                    ch.ithings.kimbo11ng.provider.KeyTemplates.RESTRICT_USAGES, "false");
+            CryptoTokenImpl unrestricted =
+                    new CryptoTokenImpl(new TestBridge(), new Pkcs11ModuleRegistry(path -> token));
+            unrestricted.init(properties, null, 61);
+            unrestricted.activate("1234".toCharArray());
+
+            unrestricted.generateKeyPair("secp256r1", "ecKey");
+            assertEquals(Set.of(DECRYPT, SIGN), unrestricted.getKeyUsagesFromPrivateKey("ecKey"));
+        }
+    }
 }

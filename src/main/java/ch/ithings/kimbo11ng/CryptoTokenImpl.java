@@ -79,6 +79,8 @@ public class CryptoTokenImpl {
     private final Pkcs11ModuleRegistry modules;
     private volatile TokenRuntime runtime;
     private volatile Kimbo11ngProvider p11Provider;
+    /** {@link KeyTemplates#RESTRICT_USAGES}, read at init. */
+    private volatile boolean restrictUsages = true;
 
     public CryptoTokenImpl(CryptoTokenBridge bridge) {
         this(bridge, Pkcs11ModuleRegistry.shared());
@@ -675,7 +677,7 @@ public class CryptoTokenImpl {
 
     private void generateEc(TokenRuntime current, byte[] label, byte[] keyId, String curveName,
             String alias) throws Exception {
-        KeyTemplates.Pair templates = KeyTemplates.ec(label, keyId, curveName);
+        KeyTemplates.Pair templates = usagePolicy(KeyTemplates.ec(label, keyId, curveName));
         generateAndRegister(current, templates, keyId, CKM.EC_KEY_PAIR_GEN, alias, "EC", null,
                 PublicKeyReader::readEcPublicKey);
         log.info("Generated EC key pair '" + alias + "' on curve " + curveName);
@@ -683,7 +685,7 @@ public class CryptoTokenImpl {
 
     private void generateEdwards(TokenRuntime current, byte[] label, byte[] keyId,
             String curveName, String alias) throws Exception {
-        KeyTemplates.Pair templates = KeyTemplates.edwards(label, keyId, curveName);
+        KeyTemplates.Pair templates = usagePolicy(KeyTemplates.edwards(label, keyId, curveName));
         // The JCA algorithm is the curve's own name: unlike EC, where one "EC" algorithm covers
         // every curve, Ed25519 and Ed448 are distinct algorithms with distinct signature schemes.
         String jcaName = "1.3.101.112".equals(KeyTemplates.edwardsOid(curveName))
@@ -695,8 +697,8 @@ public class CryptoTokenImpl {
 
     private void generatePqc(TokenRuntime current, byte[] label, byte[] keyId,
             AlgorithmEntry entry, String alias) throws Exception {
-        KeyTemplates.Pair templates = KeyTemplates.pqc(label, keyId, entry, current.profile(),
-                current.kemUsage());
+        KeyTemplates.Pair templates = usagePolicy(KeyTemplates.pqc(label, keyId, entry,
+                current.profile(), current.kemUsage()));
         // The entry is passed rather than re-derived from the token, so the OID recorded in the
         // SubjectPublicKeyInfo is the one the key was actually generated as.
         generateAndRegister(current, templates, keyId, entry.ckmKeyPairGen(), alias,
@@ -704,6 +706,11 @@ public class CryptoTokenImpl {
                 (ce, session, handle) -> PublicKeyReader.readPqcPublicKey(ce, session, handle,
                         entry));
         log.info("Generated " + entry.canonicalName() + " key pair '" + alias + "'");
+    }
+
+    /** The templates as generated, or without their usage denials when the property says so. */
+    private KeyTemplates.Pair usagePolicy(KeyTemplates.Pair templates) {
+        return restrictUsages ? templates : templates.withoutDenials();
     }
 
     /** Reads a freshly generated public key from its object handle. */
@@ -838,6 +845,8 @@ public class CryptoTokenImpl {
         // names the property instead of a key silently generated with the other spelling.
         // The profile's own answer unless the operator overrides it, so adding a vendor whose
         // tokens want a different spelling stays a table change rather than a code change.
+        restrictUsages = Boolean.parseBoolean(
+                properties.getProperty(KeyTemplates.RESTRICT_USAGES, "true"));
         KemUsage kemUsage = KemUsage.parse(properties.getProperty(KemUsage.PROPERTY),
                 profile.defaultKemUsage());
         TokenRuntime newRuntime = new TokenRuntime(slot, algorithms, backfill, policy, kemUsage);

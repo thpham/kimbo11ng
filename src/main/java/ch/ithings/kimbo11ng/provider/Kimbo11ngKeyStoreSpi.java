@@ -482,15 +482,31 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                 } else if (keyType == CKK.CKK_EC_EDWARDS) {
                     algorithm = edwardsAlgorithm(ce, session, handle);
                     if (algorithm == null) {
+                        for (long pub : publicHalves(ce, session, handle, alias)) {
+                            algorithm = edwardsAlgorithm(ce, session, pub);
+                            if (algorithm != null) {
+                                break;
+                            }
+                        }
+                    }
+                    if (algorithm == null) {
                         log.warn("Skipping key '" + alias + "' (handle " + handle + "): it is an"
-                                + " Edwards key whose CKA_EC_PARAMS the token does not report, so"
-                                + " there is no way to tell Ed25519 from Ed448. Signing with the"
-                                + " wrong one produces a signature nothing verifies.");
+                                + " Edwards key whose CKA_EC_PARAMS the token reports on neither"
+                                + " half, so there is no way to tell Ed25519 from Ed448. Signing"
+                                + " with the wrong one produces a signature nothing verifies.");
                         continue;
                     }
                 } else {
-                    entry = profile.lookupByKeyType(keyType,
-                            readParameterSet(ce, session, handle, profile));
+                    OptionalLong parameterSet = readParameterSet(ce, session, handle, profile);
+                    if (parameterSet.isEmpty()) {
+                        for (long pub : publicHalves(ce, session, handle, alias)) {
+                            parameterSet = readParameterSet(ce, session, pub, profile);
+                            if (parameterSet.isPresent()) {
+                                break;
+                            }
+                        }
+                    }
+                    entry = profile.lookupByKeyType(keyType, parameterSet);
                     if (entry.isEmpty()) {
                         log.warn("Skipping key '" + alias + "' (handle " + handle
                                 + "): profile " + profile.name() + " does not describe CKK 0x"
@@ -521,9 +537,10 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
      *
      * <p>Unlike EC — where one JCA algorithm covers every curve and the parameters travel with the
      * public key — Ed25519 and Ed448 are separate algorithms, so the name has to be settled before
-     * the private key object is built. PKCS#11 v3.0 puts {@code CKA_EC_PARAMS} on the private half
-     * of an Edwards pair, which is what makes this readable without the public object; a token that
-     * withholds it leaves the key unusable rather than defaulted.
+     * the private key object is built. PKCS#11 v3.0 lets a token put {@code CKA_EC_PARAMS} on the
+     * private half of an Edwards pair, but does not make it: SoftHSMv3 reports it on the public
+     * object only. So the caller asks the private object first and the public half second, and a
+     * token that withholds it from both leaves the key unusable rather than defaulted.
      */
     private static String edwardsAlgorithm(CryptokiE ce, long session, long handle) {
         try {
@@ -544,6 +561,26 @@ public final class Kimbo11ngKeyStoreSpi extends KeyStoreSpi {
                         + e.getMessage());
             }
             return null;
+        }
+    }
+
+    /**
+     * The public objects of the pair a private key belongs to, found as the public key itself is
+     * found later: by {@code CKA_ID}, and by label when the key has none. Asked only when the
+     * private object withholds an attribute enumeration needs, so a token that answers on the
+     * private half costs no extra search.
+     */
+    private static long[] publicHalves(CryptokiE ce, long session, long privateHandle,
+            String alias) {
+        try {
+            return new P11KeyRef(P11KeyRef.readCkaId(ce, session, privateHandle), alias, null)
+                    .findAll(ce, session, CKO.PUBLIC_KEY, true);
+        } catch (RuntimeException e) {
+            if (log.isDebugEnabled()) {
+                log.debug("Could not look up the public half of '" + alias + "': "
+                        + e.getMessage());
+            }
+            return new long[0];
         }
     }
 

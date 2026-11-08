@@ -10,6 +10,7 @@ import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import ch.ithings.kimbo11ng.p11.Pkcs11v32;
 import ch.ithings.kimbo11ng.profile.PqcMechanismProfile;
 import ch.ithings.kimbo11ng.profile.ProfileResolver;
+import ch.ithings.kimbo11ng.provider.Kimbo11ngProvider.CompositeAlgorithm;
 import com.keyfactor.util.keys.CachingKeyStoreWrapper;
 import org.pkcs11.jacknji11.CKA;
 import org.pkcs11.jacknji11.CKK;
@@ -88,10 +89,17 @@ final class ObjectCommands {
      * <p>Deliberately not a re-derivation from {@code C_FindObjects}. Going through the key store is
      * what makes the output an answer to "what will the CA see", including the cases where that
      * answer is "less than you put there".
+     *
+     * <p>Composite keys are where "what the CA sees" differs from the alias list: EJBCA's
+     * {@code CryptoTokenCompositeWrapper} shows a {@code -COMPQ}/{@code -COMPC} pair as one
+     * {@code -COMPOSITE} key and hides the halves. The table keeps the halves, because they are
+     * what kimbo11ng publishes; a section under it says what EJBCA will make of them, and which
+     * halves it will not show at all.
      */
     private static Command listKeyPairs() {
         return Command.sessionLevel("listkeypairs",
-                "Lists the aliases kimbo11ng publishes to EJBCA, with each key's algorithm.",
+                "Lists the aliases kimbo11ng publishes to EJBCA, with each key's algorithm, and"
+                        + " the composite keys EJBCA will show.",
                 List.of(),
                 (env, args) -> {
                     try (TokenHandle handle = TokenHandle.session(env, args)) {
@@ -119,8 +127,55 @@ final class ObjectCommands {
                             out.println(keyRow(alias, "key pair", publicKey.getAlgorithm(),
                                     keyLength(publicKey)));
                         }
+                        printComposites(out, handle, aliases);
                     }
                 });
+    }
+
+    /**
+     * What EJBCA will make of the composite halves in this slot: one line per {@code -COMPOSITE}
+     * key, with the anomalies that make EJBCA show it differently or not at all. Nothing is
+     * printed when the slot holds no half.
+     */
+    private static void printComposites(PrintStream out, TokenHandle handle, List<String> aliases)
+            throws Exception {
+        java.util.SortedSet<String> composites = new java.util.TreeSet<>();
+        for (String alias : aliases) {
+            CompositeKeys.compositeOf(alias).ifPresent(composites::add);
+        }
+        if (composites.isEmpty()) {
+            return;
+        }
+        List<CompositeAlgorithm> table = handle.token().getProvider().compositeAlgorithms();
+        out.println();
+        out.println("Composite keys EJBCA will show:");
+        for (String composite : composites) {
+            CompositeKeys.Halves halves = CompositeKeys.halvesOf(composite).orElseThrow();
+            String pair = "(" + halves.pq() + " + " + halves.classical() + ")";
+            boolean hasPq = aliases.contains(halves.pq());
+            boolean hasClassical = aliases.contains(halves.classical());
+            if (!hasPq || !hasClassical) {
+                String missing = hasPq ? halves.classical() : halves.pq();
+                String present = hasPq ? halves.pq() : halves.classical();
+                out.println("  " + composite + "  incomplete: " + missing + " missing, so EJBCA"
+                        + " will not show this key (" + present + ")");
+                continue;
+            }
+            PublicKey pq = handle.token().readPublicKey(halves.pq(), true);
+            PublicKey classical = handle.token().readPublicKey(halves.classical(), true);
+            java.util.Optional<CompositeAlgorithm> match = pq == null || classical == null
+                    ? java.util.Optional.empty()
+                    : CompositeKeys.match(table, pq, classical);
+            if (match.isEmpty()) {
+                out.println("  " + composite + "  not a defined composite: no composite ML-DSA"
+                        + " algorithm pairs these two keys " + pair);
+            } else if (!match.get().offered()) {
+                out.println("  " + composite + "  " + match.get().name()
+                        + ", which this token cannot sign " + pair);
+            } else {
+                out.println("  " + composite + "  " + match.get().name() + "  " + pair);
+            }
+        }
     }
 
     private static Command showObjectAttributes() {

@@ -148,6 +148,9 @@ RUN ln -s /opt/keyfactor/ejbca/dist/ejbca.ear/lib/kimbo11ng-jar-with-dependencie
 # launcher sources those two instead.
 COPY cli/kimbo11ng-cli.sh /usr/local/bin/kimbo11ng-cli
 RUN chmod +x /usr/local/bin/kimbo11ng-cli
+# The user the tool runs as when a `docker exec` arrives as root: EJBCA's, the same APP_UID
+# init-hsm.sh drops to, so the token objects it writes are ones the CA can read.
+ENV KIMBO11NG_RUN_AS=10001
 
 # init-hsm.sh runs as root to fix volume permissions, link an optional Luna client and init the
 # SoftHSM token, then drops to user 10001 via gosu before exec'ing start.sh

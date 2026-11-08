@@ -127,12 +127,17 @@ public class CryptoTokenImpl {
                         + e.getMessage(), e);
             }
         }
+        // Read once, so the login and the keystore are about the same runtime even if an init
+        // swaps it meanwhile.
+        TokenRuntime current = runtime;
         try {
             // P11Slot.login classifies the CKR itself, so a missing token surfaces as offline and
             // only a rejected credential surfaces as an authentication failure. Previously every
             // failure here — including "no token in slot" — was reported as a bad PIN.
-            runtime.slot().login(authCode);
-            KeyStore ks = KeyStore.getInstance("PKCS11", p11Provider);
+            current.slot().login(authCode);
+            // Bound to this token's runtime, not to whichever token last initialised on the slot;
+            // see Kimbo11ngProvider.keyStore.
+            KeyStore ks = p11Provider.keyStore(current);
             ks.load(null, authCode);
             bridge.bridgeSetKeyStore(ks);
         } catch (CryptoTokenOfflineException | CryptoTokenAuthenticationFailedException e) {
@@ -171,7 +176,10 @@ public class CryptoTokenImpl {
         }
     }
 
-    /** Deactivates, then drains the session pool. The library itself stays initialized. */
+    /**
+     * Deactivates, then drains the session pool unless another token on the slot is still logged
+     * in through it. The library itself stays initialized.
+     */
     public void reset() {
         deactivate();
         TokenRuntime current = runtime;
@@ -313,7 +321,7 @@ public class CryptoTokenImpl {
 
         SecretKey key;
         try {
-            KeyGenerator generator = KeyGenerator.getInstance(type.jcaName(), p11Provider);
+            KeyGenerator generator = p11Provider.keyGenerator(current, type);
             generator.init(bits);
             key = generator.generateKey();
         } catch (NoSuchAlgorithmException e) {
@@ -911,6 +919,17 @@ public class CryptoTokenImpl {
     public P11Slot getSlot() {
         TokenRuntime current = runtime;
         return current == null ? null : current.slot();
+    }
+
+    /**
+     * This token's keystore SPI, or {@code null} before the first activation.
+     *
+     * <p>Not {@code getProvider().getKeyStoreSpi()}: the provider is shared by every token on the
+     * slot and answers for whichever initialised last.
+     */
+    public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
+        TokenRuntime current = runtime;
+        return current == null ? null : current.keyStoreSpi();
     }
 
     public PqcMechanismProfile getPqcProfile() {

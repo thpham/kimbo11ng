@@ -248,8 +248,9 @@ class CryptoTokenContractTest {
             cryptoToken.generateKeyPair(keySpec, "edKey");
 
             // Enumeration is the half that can silently go wrong: the algorithm has to be settled
-            // from CKA_EC_PARAMS on the private object, because Ed25519 and Ed448 are distinct JCA
-            // algorithms and only the token knows which this is.
+            // from CKA_EC_PARAMS — on the private object, or its public half where the token keeps
+            // it only there — because Ed25519 and Ed448 are distinct JCA algorithms and only the
+            // token knows which this is.
             assertEquals(keySpec, cryptoToken.getPublicKey("edKey").getAlgorithm());
             assertTrue(cryptoToken.doesPrivateKeyExist("edKey"));
             assertTrue(cryptoToken.getAliases().contains("edKey"));

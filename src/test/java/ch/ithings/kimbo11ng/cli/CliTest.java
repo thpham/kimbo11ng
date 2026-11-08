@@ -548,6 +548,362 @@ class CliTest {
         assertTrue(stdout().contains("signed and verified with SHA256withRSA"), stdout());
     }
 
+    // ---- composite keys: testkeypair ----
+
+    /** The two halves of a composite, made the way Keyfactor documents for keys made elsewhere. */
+    private void halves(String pq, String pqSpec, String classical, String classicalSpec) {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", pq, "--key-spec", pqSpec),
+                stderr());
+        assertEquals(Main.OK, session("generatekeypair", "--alias", classical,
+                "--key-spec", classicalSpec), stderr());
+        out.reset();
+        err.reset();
+    }
+
+    @Test
+    @DisplayName("testkeypair signs and verifies a composite from its two halves")
+    void compositeTestKeyPair() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.OK, session("testkeypair", "--alias", "foo-COMPOSITE"), stderr());
+        assertTrue(stdout().contains("Alias foo-COMPOSITE signed and verified with"
+                + " MLDSA44-RSA2048-PSS-SHA256 ("), stdout());
+    }
+
+    @Test
+    @DisplayName("testkeypair follows EJBCA's key-sequence suffix to the halves")
+    void compositeWithSequenceSuffix() {
+        halves("signKey-COMPQ00001", "ML-DSA-44", "signKey-COMPC00001", "2048");
+        assertEquals(Main.OK, session("testkeypair", "--alias", "signKey-COMPOSITE00001"),
+                stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair names the half that is missing")
+    void compositeMissingHalf() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPQ",
+                "--key-spec", "ML-DSA-44"), stderr());
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("foo-COMPC is missing"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair treats a composite alias with no halves as a composite, as EJBCA does")
+    void compositeWithoutHalves() {
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("foo-COMPQ and foo-COMPC are missing"), stderr());
+        assertFalse(stderr().contains("No key on the token under alias 'foo-COMPOSITE'"),
+                stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair refuses a pair that is no defined composite")
+    void compositeUndefinedPair() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "4096");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("not a defined composite"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair refuses a non-ML-DSA post-quantum half without a stack trace")
+    void compositeWithNonMlDsaHalf() {
+        halves("foo-COMPQ", "SLH-DSA-SHA2-128F", "foo-COMPC", "2048");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("not a defined composite"), stderr());
+        assertFalse(stderr().contains("Exception") || stderr().contains("at ch.ithings"),
+                stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair calls a secret key under a half's name no composite, not a lost key")
+    void compositeWithSecretClassicalHalf() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPQ",
+                "--key-spec", "ML-DSA-44"), stderr());
+        assertEquals(Main.OK, session("generatekey", "--alias", "foo-COMPC",
+                "--key-spec", "HmacSHA256"), stderr());
+        err.reset();
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("not a defined composite"), stderr());
+        assertTrue(stderr().contains("foo-COMPC") && stderr().contains("secret key"), stderr());
+        assertFalse(stderr().contains("no readable public key"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair calls a secret key as the post-quantum half no composite")
+    void compositeWithSecretPqHalf() {
+        assertEquals(Main.OK, session("generatekey", "--alias", "foo-COMPQ",
+                "--key-spec", "HmacSHA256"), stderr());
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPC",
+                "--key-spec", "2048"), stderr());
+        err.reset();
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("not a defined composite"), stderr());
+        assertTrue(stderr().contains("foo-COMPQ") && stderr().contains("secret key"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair calls an ML-KEM post-quantum half no composite")
+    void compositeWithMlKemHalf() {
+        halves("foo-COMPQ", "ML-KEM-768", "foo-COMPC", "2048");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("not a defined composite"), stderr());
+    }
+
+    @Test
+    @DisplayName("an undefined pair's refusal says what to do about it")
+    void undefinedPairSaysWhatToDo() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "4096");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("capabilities"), stderr());
+        assertTrue(stderr().contains("deleteobject --alias"), stderr());
+        assertTrue(stderr().contains("foo-COMPQ (ML-DSA-44) and foo-COMPC (RSA 4096)"),
+                stderr());
+    }
+
+    @Test
+    @DisplayName("generatekeypair and testkeypair handle a brainpool composite end to end")
+    void brainpoolComposite() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "bp-COMPOSITE",
+                "--key-spec", "MLDSA65-ECDSA-brainpoolP256r1-SHA512"), stderr());
+        out.reset();
+        assertEquals(Main.OK, session("testkeypair", "--alias", "bp-COMPOSITE"), stderr());
+        assertTrue(stdout().contains("signed and verified with"
+                + " MLDSA65-ECDSA-brainpoolP256r1-SHA512"), stdout());
+    }
+
+    @Test
+    @DisplayName("generatekeypair and testkeypair handle an Ed25519 composite end to end")
+    void ed25519Composite() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "ed-COMPOSITE",
+                "--key-spec", "MLDSA44-Ed25519-SHA512"), stderr());
+        out.reset();
+        assertEquals(Main.OK, session("testkeypair", "--alias", "ed-COMPOSITE"), stderr());
+        assertTrue(stdout().contains("signed and verified with MLDSA44-Ed25519-SHA512"),
+                stdout());
+    }
+
+    @Test
+    @DisplayName("testkeypair says when this token cannot sign the composite")
+    void compositeNotOffered() {
+        token.hideMechanism(org.pkcs11.jacknji11.CKM.SHA256_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA384_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA512_RSA_PKCS_PSS);
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("cannot sign MLDSA44-RSA2048-PSS-SHA256"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair refuses a --signature-algorithm that is not this pair's composite")
+    void compositeOverrideMismatch() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.USAGE, session("testkeypair", "--alias", "foo-COMPOSITE",
+                "--signature-algorithm", "MLDSA65-RSA3072-PSS-SHA512"));
+        assertTrue(stderr().contains("does not match"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair accepts a --signature-algorithm that is this pair's composite")
+    void compositeOverrideMatching() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.OK, session("testkeypair", "--alias", "foo-COMPOSITE",
+                "--signature-algorithm", "MLDSA44-RSA2048-PSS-SHA256"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair diagnoses a token that ignores the ML-DSA context")
+    void diagnosesIgnoredContext() {
+        token.ignoreSignContext();
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("the token ignores the ML-DSA context"), stderr());
+    }
+
+    @Test
+    @DisplayName("testkeypair diagnoses a token that rejects the ML-DSA context")
+    void diagnosesRejectedContext() {
+        token.rejectSignContext();
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-COMPOSITE"));
+        assertTrue(stderr().contains("the token rejects CK_SIGN_ADDITIONAL_CONTEXT"), stderr());
+    }
+
+    // ---- composite keys: generatekeypair ----
+
+    @Test
+    @DisplayName("generatekeypair makes both halves of a composite, which then tests")
+    void generatesCompositeHalves() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"), stderr());
+        assertTrue(stdout().contains("Generated composite key pair foo-COMPOSITE: foo-COMPQ"
+                + " (ML-DSA-44) and foo-COMPC (RSA 2048)"), stdout());
+        out.reset();
+        assertEquals(Main.OK, session("testkeypair", "--alias", "foo-COMPOSITE"), stderr());
+    }
+
+    @Test
+    @DisplayName("generatekeypair makes an EC composite, named by its curve")
+    void generatesEcComposite() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "ec-COMPOSITE",
+                "--key-spec", "MLDSA65-ECDSA-P384-SHA512"), stderr());
+        assertTrue(stdout().contains("(secp384r1)"), stdout());
+        out.reset();
+        assertEquals(Main.OK, session("testkeypair", "--alias", "ec-COMPOSITE"), stderr());
+    }
+
+    @Test
+    @DisplayName("a composite key spec needs an alias ending in -COMPOSITE")
+    void compositeSpecNeedsSuffix() {
+        assertEquals(Main.USAGE, session("generatekeypair", "--alias", "foo",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"));
+        assertTrue(stderr().contains("-COMPOSITE"), stderr());
+    }
+
+    @Test
+    @DisplayName("an alias ending in -COMPOSITE needs a composite key spec")
+    void suffixNeedsCompositeSpec() {
+        assertEquals(Main.USAGE, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "2048"));
+    }
+
+    @Test
+    @DisplayName("generatekeypair refuses a composite one of whose halves already exists")
+    void refusesTakenHalf() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPC",
+                "--key-spec", "2048"), stderr());
+        assertEquals(Main.FAILED, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"));
+        assertTrue(stderr().contains("foo-COMPC"), stderr());
+        out.reset();
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        // A table row, not a mention: the composite section rightly names foo-COMPQ as missing.
+        assertTrue(stdout().lines().noneMatch(line -> line.trim().startsWith("foo-COMPQ")),
+                "nothing may be generated: " + stdout());
+    }
+
+    @Test
+    @DisplayName("generatekeypair refuses the PKCS#1 v1.5 composites and says why")
+    void refusesPkcs15Composite() {
+        assertEquals(Main.FAILED, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PKCS15-SHA256"));
+        assertTrue(stderr().contains("PKCS#1 v1.5"), stderr());
+    }
+
+    @Test
+    @DisplayName("generatekeypair refuses a composite this token cannot sign")
+    void refusesNotOfferedComposite() {
+        token.hideMechanism(org.pkcs11.jacknji11.CKM.SHA256_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA384_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA512_RSA_PKCS_PSS);
+        assertEquals(Main.FAILED, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"));
+        assertTrue(stderr().contains("cannot sign"), stderr());
+    }
+
+    @Test
+    @DisplayName("generatekeypair removes the first half when the second cannot be made")
+    void rollsBackFirstHalf() {
+        // Gating is on signing, so the composite stays offered while RSA generation fails.
+        token.hideMechanism(org.pkcs11.jacknji11.CKM.RSA_PKCS_KEY_PAIR_GEN);
+        assertEquals(Main.FAILED, session("generatekeypair", "--alias", "foo-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"));
+        assertTrue(stderr().contains("Removed foo-COMPQ again"), stderr());
+        assertTrue(stderr().contains("CKM_RSA_PKCS_KEY_PAIR_GEN"),
+                "the reason the second half failed is part of the message: " + stderr());
+        assertFalse(stderr().contains(".."), "no doubled full stop: " + stderr());
+        out.reset();
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        assertFalse(stdout().contains("foo-COMPQ"), stdout());
+        assertFalse(stdout().contains("foo-COMPC"), stdout());
+    }
+
+    // ---- composite keys: listkeypairs ----
+
+    /** The listkeypairs line that names {@code composite}, from the composite section. */
+    private String compositeLine(String composite) {
+        String listing = stdout();
+        int section = listing.indexOf("Composite keys EJBCA will show");
+        assertTrue(section >= 0, listing);
+        return listing.substring(section).lines()
+                .filter(line -> line.contains(composite)).findFirst()
+                .orElseThrow(() -> new AssertionError("no line for " + composite + ":\n" + listing));
+    }
+
+    @Test
+    @DisplayName("listkeypairs shows the composite EJBCA will make of two halves")
+    void listsCompositeSection() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        String line = compositeLine("foo-COMPOSITE");
+        assertTrue(line.contains("MLDSA44-RSA2048-PSS-SHA256"), line);
+        assertTrue(line.contains("(foo-COMPQ + foo-COMPC)"), line);
+        String table = stdout().substring(0, stdout().indexOf("Composite keys EJBCA will show"));
+        assertTrue(table.contains("foo-COMPQ") && table.contains("foo-COMPC"),
+                "the halves stay in the table, as published: " + table);
+    }
+
+    @Test
+    @DisplayName("listkeypairs has no composite section when there is no composite half")
+    void noSectionWithoutComposites() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "signKey",
+                "--key-spec", "2048"), stderr());
+        out.reset();
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        assertFalse(stdout().contains("Composite keys"), stdout());
+    }
+
+    @Test
+    @DisplayName("listkeypairs flags a half without its partner, which EJBCA will not show")
+    void flagsOrphanHalf() {
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "foo-COMPQ",
+                "--key-spec", "ML-DSA-44"), stderr());
+        out.reset();
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        String line = compositeLine("foo-COMPOSITE");
+        assertTrue(line.contains("foo-COMPC missing"), line);
+        assertTrue(line.contains("EJBCA will not show"), line);
+        assertTrue(line.contains("(foo-COMPQ)"), "the half that is there is named: " + line);
+    }
+
+    @Test
+    @DisplayName("listkeypairs flags a pair that is no defined composite")
+    void flagsUndefinedPair() {
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "4096");
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        assertTrue(compositeLine("foo-COMPOSITE").contains("not a defined composite"),
+                stdout());
+    }
+
+    @Test
+    @DisplayName("listkeypairs flags a composite this token cannot sign")
+    void flagsNotOffered() {
+        token.hideMechanism(org.pkcs11.jacknji11.CKM.SHA256_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA384_RSA_PKCS_PSS,
+                org.pkcs11.jacknji11.CKM.SHA512_RSA_PKCS_PSS);
+        halves("foo-COMPQ", "ML-DSA-44", "foo-COMPC", "2048");
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        assertTrue(compositeLine("foo-COMPOSITE").contains("cannot sign"), stdout());
+    }
+
+    @Test
+    @DisplayName("listkeypairs shows one composite per key sequence")
+    void listsEachKeySequence() {
+        halves("signKey-COMPQ00001", "ML-DSA-44", "signKey-COMPC00001", "2048");
+        halves("signKey-COMPQ00002", "ML-DSA-44", "signKey-COMPC00002", "2048");
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        assertTrue(compositeLine("signKey-COMPOSITE00001")
+                .contains("(signKey-COMPQ00001 + signKey-COMPC00001)"), stdout());
+        assertTrue(compositeLine("signKey-COMPOSITE00002")
+                .contains("(signKey-COMPQ00002 + signKey-COMPC00002)"), stdout());
+    }
+
+    @Test
+    @DisplayName("a lower-case -composite alias is an ordinary alias, as for EJBCA")
+    void compositeSuffixIsCaseSensitive() {
+        assertEquals(Main.FAILED, session("testkeypair", "--alias", "foo-composite"));
+        assertTrue(stderr().contains("No key on the token under alias 'foo-composite'"),
+                stderr());
+    }
+
     @Test
     @DisplayName("a post-quantum key pair generates and appears under its alias")
     void postQuantumKeyPair() {
@@ -623,6 +979,61 @@ class CliTest {
         assertTrue(stdout().contains("HANDLE"), stdout());
         assertTrue(stdout().contains("private_key"), stdout());
         assertTrue(stdout().contains("public_key"), stdout());
+    }
+
+    /**
+     * A slot that already holds one of everything, the way a token in use does: the listing and
+     * inspection commands have to show each object and keep going, rather than stop at the first
+     * kind they did not expect.
+     */
+    @Test
+    @DisplayName("the listing commands show every kind of key in one slot, composites included")
+    void mixedSlotListsEveryKind() {
+        String[][] keyPairs = {
+            {"mixRsa", "2048"}, {"mixEc", "secp256r1"}, {"mixEd", "Ed25519"},
+            {"mixMlDsa", "ML-DSA-65"}, {"mixSlh", "SLH-DSA-SHA2-128F"}, {"mixKem", "ML-KEM-768"},
+            {"orphan-COMPQ", "ML-DSA-44"}};
+        for (String[] key : keyPairs) {
+            assertEquals(Main.OK, session("generatekeypair", "--alias", key[0],
+                    "--key-spec", key[1]), stderr());
+        }
+        assertEquals(Main.OK, session("generatekey", "--alias", "mixHmac",
+                "--key-spec", "HmacSHA256"), stderr());
+        assertEquals(Main.OK, session("generatekeypair", "--alias", "mix-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"), stderr());
+        List<String> aliases = new ArrayList<>(List.of("mixHmac", "mix-COMPQ", "mix-COMPC"));
+        for (String[] key : keyPairs) {
+            aliases.add(key[0]);
+        }
+
+        out.reset();
+        assertEquals(Main.OK, session("listkeypairs"), stderr());
+        for (String alias : aliases) {
+            assertTrue(stdout().contains(alias), alias + " missing from listkeypairs:\n" + stdout());
+        }
+        assertTrue(compositeLine("mix-COMPOSITE").contains("MLDSA44-RSA2048-PSS-SHA256"),
+                stdout());
+        assertTrue(compositeLine("orphan-COMPOSITE").contains("orphan-COMPC missing"), stdout());
+
+        out.reset();
+        assertEquals(Main.OK, session("listobjects"), stderr());
+        for (String alias : aliases) {
+            assertTrue(stdout().contains(alias), alias + " missing from listobjects:\n" + stdout());
+        }
+
+        Map<String, String> keyTypes = Map.of("mixMlDsa", "ML_DSA", "mixSlh", "SLH_DSA",
+                "mixKem", "ML_KEM", "mix-COMPQ", "ML_DSA", "mix-COMPC", "RSA");
+        for (String alias : aliases) {
+            out.reset();
+            assertEquals(Main.OK, session("showobjectattributes", "--alias", alias),
+                    alias + ": " + stderr());
+            assertTrue(stdout().contains("Objects labelled '" + alias + "'"), stdout());
+            String keyType = keyTypes.get(alias);
+            if (keyType != null) {
+                assertTrue(stdout().contains(keyType), alias + " is not named " + keyType + ":\n"
+                        + stdout());
+            }
+        }
     }
 
     @Test

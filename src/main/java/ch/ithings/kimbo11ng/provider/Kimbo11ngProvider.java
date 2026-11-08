@@ -11,9 +11,13 @@ import ch.ithings.kimbo11ng.profile.AlgorithmEntry;
 import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 
+import java.security.NoSuchAlgorithmException;
 import java.security.Provider;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -39,6 +43,8 @@ public final class Kimbo11ngProvider extends Provider {
 
     private static final ConcurrentMap<String, Kimbo11ngProvider> INSTANCES =
             new ConcurrentHashMap<>();
+    /** Unqualified provider name to the canonical path of the library that took it; see nameFor. */
+    private static final ConcurrentMap<String, String> NAME_OWNERS = new ConcurrentHashMap<>();
 
     /**
      * The capability-dependent services currently registered, as {@code "type:algorithm"}, so that
@@ -60,11 +66,10 @@ public final class Kimbo11ngProvider extends Provider {
 
     /**
      * A classical signature service: the JCA name EJBCA asks for, the mechanism behind it, whether
-     * the token's raw {@code r||s} output needs DER-wrapping, and the mechanism parameter block.
+     * the token's raw {@code r||s} output needs DER-wrapping, the mechanism parameter block, and
+     * the OIDs it also answers to.
      *
      * @param mechanismParam non-null only for RSA-PSS; see {@link RsaPssParams}
-     */
-    /**
      * @param oidAliases OIDs this algorithm must also answer to, or empty.
      *        <p>BouncyCastle's operator layer resolves a signer from an {@code AlgorithmIdentifier},
      *        and {@code OperatorHelper} only turns that back into a JCA name for the algorithms its
@@ -134,6 +139,112 @@ public final class Kimbo11ngProvider extends Provider {
                     List.of("1.3.101.112")),
             new ClassicalSignature("Ed448", CKM.EDDSA, false, null,
                     List.of("1.3.101.113")));
+
+    /** The PSS mechanisms behind {@code RSASSA-PSS}; it is offered if the token signs with any. */
+    private static final List<Long> PSS_MECHANISMS = List.of(CKM.SHA256_RSA_PKCS_PSS,
+            CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS);
+
+    private static final String RSASSA_PSS = "RSASSA-PSS";
+
+    /**
+     * A composite ML-DSA signature (draft-ietf-lamps-pq-composite-sigs), offered when this provider
+     * offers both halves.
+     *
+     * @param mlDsa     the ML-DSA service the post-quantum half needs
+     * @param classical the service whose presence means the token can sign the classical half. For
+     *                  the PSS rows that is the fixed {@code SHAnnnwithRSAandMGF1} service with the
+     *                  hash BouncyCastle's {@code PSSParameterSpec} for the row names — BC itself asks
+     *                  for {@code RSASSA-PSS}, which is offered whenever any PSS mechanism is, and so
+     *                  says nothing about whether this hash is there.
+     * @param classicalKeySpec the classical half's key, in the spelling
+     *                  {@code CryptoTokenImpl.generateKeyPair} takes: an RSA size, a curve name, or
+     *                  {@code Ed25519}/{@code Ed448}
+     */
+    private record CompositeSignature(String name, String oid, String mlDsa, String classical,
+            String classicalKeySpec) {
+    }
+
+    /**
+     * One composite this provider knows, as a tool outside EJBCA needs to see it: what the two
+     * halves are, and whether this token can sign it.
+     *
+     * <p>The command-line tool generates, tests and lists composite keys from this and from
+     * nothing else, so it cannot disagree with what the provider registers.
+     *
+     * @param name               the JCA name, e.g. {@code MLDSA44-RSA2048-PSS-SHA256}
+     * @param oid                its OID, dotted
+     * @param mlDsaKeySpec       the post-quantum half's key spec, e.g. {@code ML-DSA-44}
+     * @param classicalKeySpec   the classical half's key spec: an RSA size, a curve name, or
+     *                           {@code Ed25519}/{@code Ed448}
+     * @param classicalSignature the service the classical half is signed with on its own
+     * @param offered            whether this provider registers the composite for this token
+     */
+    public record CompositeAlgorithm(String name, String oid, String mlDsaKeySpec,
+            String classicalKeySpec, String classicalSignature, boolean offered) {
+    }
+
+    /**
+     * The composites BouncyCastle implements that this provider deliberately never offers, with why.
+     * The pre-hash forms are not listed: they are a different signature, not a refused choice.
+     */
+    private static final Map<String, String> EXCLUDED_COMPOSITES = excluded();
+
+    private static Map<String, String> excluded() {
+        String reason = "EJBCA does not support the legacy PKCS#1 v1.5 signature scheme with"
+                + " composite keys; an RSA classical half always signs with PSS";
+        Map<String, String> map = new LinkedHashMap<>();
+        map.put("MLDSA44-RSA2048-PKCS15-SHA256", reason);
+        map.put("MLDSA65-RSA3072-PKCS15-SHA512", reason);
+        map.put("MLDSA65-RSA4096-PKCS15-SHA512", reason);
+        return Collections.unmodifiableMap(map);
+    }
+
+    /**
+     * Every pure composite BouncyCastle 1.84 implements, with the halves its {@code CompositeIndex}
+     * pairs it with — except two families, left out on purpose:
+     *
+     * <ul>
+     *   <li>The pre-hash ({@code HashMLDSA…}) forms. EJBCA's composite wrapper produces none of
+     *       their OIDs, and they are a different signature under different OIDs.</li>
+     *   <li>The three RSA PKCS#1 v1.5 forms ({@code …-PKCS15-…}). Keyfactor: "EJBCA does not support
+     *       the legacy PKCS#1 v1.5 signature scheme with composite keys"; an RSA classical half
+     *       always signs with PSS. Offering them would be surface EJBCA never asks for.</li>
+     * </ul>
+     *
+     * {@code CompositeSignatureTest.tableMatchesBouncyCastle} fails if a BouncyCastle upgrade adds a
+     * row this table lacks, and {@code noPkcs15Composites} if the excluded set changes.
+     */
+    private static final List<CompositeSignature> COMPOSITE_SIGNATURES = List.of(
+            new CompositeSignature("MLDSA44-RSA2048-PSS-SHA256", "1.3.6.1.5.5.7.6.37",
+                    "ML-DSA-44", "SHA256withRSAandMGF1", "2048"),
+            new CompositeSignature("MLDSA44-Ed25519-SHA512", "1.3.6.1.5.5.7.6.39",
+                    "ML-DSA-44", "Ed25519", "Ed25519"),
+            new CompositeSignature("MLDSA44-ECDSA-P256-SHA256", "1.3.6.1.5.5.7.6.40",
+                    "ML-DSA-44", "SHA256withECDSA", "secp256r1"),
+            new CompositeSignature("MLDSA65-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.41",
+                    "ML-DSA-65", "SHA256withRSAandMGF1", "3072"),
+            new CompositeSignature("MLDSA65-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.43",
+                    "ML-DSA-65", "SHA384withRSAandMGF1", "4096"),
+            new CompositeSignature("MLDSA65-ECDSA-P256-SHA512", "1.3.6.1.5.5.7.6.45",
+                    "ML-DSA-65", "SHA256withECDSA", "secp256r1"),
+            new CompositeSignature("MLDSA65-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.46",
+                    "ML-DSA-65", "SHA384withECDSA", "secp384r1"),
+            new CompositeSignature("MLDSA65-ECDSA-brainpoolP256r1-SHA512", "1.3.6.1.5.5.7.6.47",
+                    "ML-DSA-65", "SHA256withECDSA", "brainpoolP256r1"),
+            new CompositeSignature("MLDSA65-Ed25519-SHA512", "1.3.6.1.5.5.7.6.48",
+                    "ML-DSA-65", "Ed25519", "Ed25519"),
+            new CompositeSignature("MLDSA87-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.49",
+                    "ML-DSA-87", "SHA384withECDSA", "secp384r1"),
+            new CompositeSignature("MLDSA87-ECDSA-brainpoolP384r1-SHA512", "1.3.6.1.5.5.7.6.50",
+                    "ML-DSA-87", "SHA384withECDSA", "brainpoolP384r1"),
+            new CompositeSignature("MLDSA87-Ed448-SHAKE256", "1.3.6.1.5.5.7.6.51",
+                    "ML-DSA-87", "Ed448", "Ed448"),
+            new CompositeSignature("MLDSA87-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.52",
+                    "ML-DSA-87", "SHA256withRSAandMGF1", "3072"),
+            new CompositeSignature("MLDSA87-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.53",
+                    "ML-DSA-87", "SHA384withRSAandMGF1", "4096"),
+            new CompositeSignature("MLDSA87-ECDSA-P521-SHA512", "1.3.6.1.5.5.7.6.54",
+                    "ML-DSA-87", "SHA512withECDSA", "secp521r1"));
 
     /**
      * Digest services, as {@code {standardName, alias...}}.
@@ -217,9 +328,17 @@ public final class Kimbo11ngProvider extends Provider {
                 keys.add("Signature:" + row.jcaName());
             }
         }
+        if (signsAnyPss(capabilities)) {
+            keys.add("Signature:" + RSASSA_PSS);
+        }
         for (AlgorithmEntry entry : runtime.algorithms().supported()) {
             if (entry.canSign()) {
                 keys.add("Signature:" + entry.canonicalName());
+            }
+        }
+        for (CompositeSignature row : COMPOSITE_SIGNATURES) {
+            if (bothHalvesOffered(row, keys)) {
+                keys.add("Signature:" + row.name());
             }
         }
         for (SecretKeyType type : SecretKeyType.all()) {
@@ -233,9 +352,90 @@ public final class Kimbo11ngProvider extends Provider {
         return keys;
     }
 
+    /**
+     * Every composite this provider knows, in table order, each marked with whether it is
+     * registered for this token — the list a tool outside EJBCA reads instead of keeping its own.
+     * A composite the token cannot sign is still listed, with {@code offered} false, so a caller
+     * can tell "this token cannot" from "no such composite".
+     */
+    public List<CompositeAlgorithm> compositeAlgorithms() {
+        return COMPOSITE_SIGNATURES.stream()
+                .map(row -> new CompositeAlgorithm(row.name(), row.oid(), row.mlDsa(),
+                        row.classicalKeySpec(), row.classical(),
+                        getService("Signature", row.name()) != null))
+                .toList();
+    }
+
+    /**
+     * The composites deliberately never offered, each with the reason, in a stable order. Not in
+     * {@link #compositeAlgorithms()}: they are refused choices, not unsupported ones.
+     */
+    public static Map<String, String> excludedComposites() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(EXCLUDED_COMPOSITES));
+    }
+
+    /**
+     * The two services a composite is gated on, as {@code [mlDsa, classical]}, or null for a
+     * composite this provider does not offer. Package-private, for the test that checks every row
+     * against BouncyCastle's own pairing table: a wrong row is invisible to any signing test.
+     */
+    static List<String> compositeHalves(String compositeName) {
+        return COMPOSITE_SIGNATURES.stream()
+                .filter(row -> row.name().equals(compositeName))
+                .map(row -> List.of(row.mlDsa(), row.classical()))
+                .findFirst().orElse(null);
+    }
+
+    private static boolean signsAnyPss(TokenCapabilities capabilities) {
+        return PSS_MECHANISMS.stream().anyMatch(capabilities::canSign);
+    }
+
+    /** Whether {@code offered}, a set of {@code "type:algorithm"} keys, has both of the row's halves. */
+    private static boolean bothHalvesOffered(CompositeSignature row, Set<String> offered) {
+        return offered.contains("Signature:" + row.mlDsa())
+                && offered.contains("Signature:" + row.classical());
+    }
+
+    /**
+     * The provider name for a runtime's (library, slot).
+     *
+     * <p>{@code Kimbo11ng-<library file name>-slot<n>}, the scheme EJBCA uses for SunPKCS11. The
+     * file name alone does not identify a library, though: two vendors' {@code libpkcs11.so}, or two
+     * versions of one client installed side by side, share it. Under one name they shared one
+     * provider, re-pointed at whichever HSM initialised last, which then advertised that HSM's
+     * algorithms and generated keys on it for both. The first library to claim a name keeps it, so
+     * nothing changes where file names are unique; any other gets the name qualified by a hash of
+     * its canonical path. A path always gets the same qualified name, but which of two libraries
+     * initialises first, and so keeps the plain one, can differ between restarts. That is safe
+     * because EJBCA does not persist provider names; it shows only in logs.
+     */
     private static String nameFor(TokenRuntime runtime) {
-        return "Kimbo11ng-" + runtime.slot().libraryName()
-                + "-slot" + runtime.slot().slotId();
+        P11Slot slot = runtime.slot();
+        String plain = "Kimbo11ng-" + slot.libraryName() + "-slot" + slot.slotId();
+        String owner = NAME_OWNERS.putIfAbsent(plain, slot.libPath());
+        if (owner == null || owner.equals(slot.libPath())) {
+            return plain;
+        }
+        String qualified = "Kimbo11ng-" + slot.libraryName() + "-" + pathTag(slot.libPath())
+                + "-slot" + slot.slotId();
+        if (!INSTANCES.containsKey(qualified)) {
+            log.warn("PKCS#11 libraries " + owner + " and " + slot.libPath() + " share a file"
+                    + " name; the second is served by provider " + qualified + " rather than "
+                    + plain);
+        }
+        return qualified;
+    }
+
+    /** Eight hex digits of the SHA-256 of a library's canonical path. */
+    private static String pathTag(String canonicalPath) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(canonicalPath.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest, 0, 4);
+        } catch (NoSuchAlgorithmException e) {
+            // Every Java platform is required to provide SHA-256.
+            throw new IllegalStateException(e);
+        }
     }
 
     private Kimbo11ngProvider(String name, TokenRuntime initialRuntime) {
@@ -255,8 +455,56 @@ public final class Kimbo11ngProvider extends Provider {
         return runtime.get().slot();
     }
 
+    /**
+     * The keystore SPI of whichever crypto token last initialised on this (library, slot) — not
+     * necessarily the caller's, when the slot has more than one token or EJBCA has made a
+     * throwaway copy of one. A crypto token reaches its own through
+     * {@code CryptoTokenImpl.getKeyStoreSpi()}.
+     */
     public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
         return runtime.get().keyStoreSpi();
+    }
+
+    /**
+     * A keystore over {@code owner}'s token, served by this provider.
+     *
+     * <p>What a crypto token activates with, instead of {@code KeyStore.getInstance("PKCS11", this)}.
+     * That service binds its SPI to this provider's current runtime — whichever crypto token last
+     * initialised on this (library, slot) — and EJBCA initialises more than one: two short-lived
+     * copies of every token it creates, and every other token on the same slot. A token that
+     * activated through the service then read its keys through a runtime that was not its own,
+     * while its own SPI stayed the empty one deactivation had cleared, and EJBCA listed none of
+     * its keys. This binds the SPI to the token that asks.
+     */
+    public java.security.KeyStore keyStore(TokenRuntime owner) {
+        Kimbo11ngKeyStoreSpi spi = new Kimbo11ngKeyStoreSpi(owner);
+        owner.adoptKeyStoreSpi(spi);
+        return new java.security.KeyStore(spi, this, "PKCS11") {
+        };
+    }
+
+    /**
+     * A secret-key generator over {@code owner}'s slot.
+     *
+     * <p>The symmetric counterpart of {@link #keyStore(TokenRuntime)}. The {@code KeyGenerator}
+     * service, like every service here, builds on the slot of whichever crypto token last
+     * initialised on this (library, slot). That is harmless for generation — sessions, library,
+     * capabilities and login all belong to the slot, not to a token — but a crypto token that
+     * generates a key should do so through its own slot rather than rely on that.
+     *
+     * @throws NoSuchAlgorithmException if this provider does not offer the service because the
+     *         token does not generate the key: the refusal {@code KeyGenerator.getInstance} gives,
+     *         which callers can fall back on
+     */
+    public javax.crypto.KeyGenerator keyGenerator(TokenRuntime owner, SecretKeyType type)
+            throws NoSuchAlgorithmException {
+        if (getService("KeyGenerator", type.jcaName()) == null) {
+            throw new NoSuchAlgorithmException(
+                    "no such algorithm: " + type.jcaName() + " for provider " + getName());
+        }
+        return new javax.crypto.KeyGenerator(
+                new Kimbo11ngKeyGeneratorSpi(owner.slot(), type), this, type.jcaName()) {
+        };
     }
 
     private void registerServices(TokenRuntime initialRuntime) {
@@ -301,6 +549,19 @@ public final class Kimbo11ngProvider extends Provider {
             classical++;
         }
 
+        // RSASSA-PSS takes its hash from a PSSParameterSpec rather than its name, which is how
+        // BouncyCastle's composite signatures ask for their RSA-PSS half.
+        if (signsAnyPss(capabilities)) {
+            putService(new Service(this, "Signature", RSASSA_PSS,
+                    Kimbo11ngSignatureSpi.class.getName(), null, null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return Kimbo11ngSignatureSpi.rsassaPss();
+                }
+            });
+            registeredServices.add("Signature:" + RSASSA_PSS);
+        }
+
         // One signature service per signing algorithm the token can actually do — the profile
         // table already intersected with the probe, so an algorithm the firmware lacks is not
         // advertised here either. The mechanism is resolved from the key at init, so nothing here
@@ -321,6 +582,28 @@ public final class Kimbo11ngProvider extends Provider {
             registered++;
         }
 
+        // Composite ML-DSA, for EJBCA's CryptoTokenCompositeWrapper. Only where both halves are on
+        // offer, which the loops above have just decided: a composite whose classical half the
+        // firmware lacks would be picked by EJBCA and then fail mid-signature.
+        int composite = 0;
+        for (CompositeSignature row : COMPOSITE_SIGNATURES) {
+            if (!bothHalvesOffered(row, registeredServices)) {
+                continue;
+            }
+            org.bouncycastle.asn1.ASN1ObjectIdentifier oid =
+                    new org.bouncycastle.asn1.ASN1ObjectIdentifier(row.oid());
+            putService(new Service(this, "Signature", row.name(),
+                    Kimbo11ngCompositeSignatureSpi.class.getName(), List.of(row.oid()), null) {
+                @Override
+                public Object newInstance(Object constructorParameter) {
+                    return new Kimbo11ngCompositeSignatureSpi(row.name(), oid,
+                            Kimbo11ngProvider.this);
+                }
+            });
+            registeredServices.add("Signature:" + row.name());
+            composite++;
+        }
+
         // Digests, in software, because BouncyCastle's operator layer resolves every helper it
         // needs from the provider it was handed — and building an RSA-PSS signer needs one. See
         // DelegatingMessageDigestSpi for why they are not sent to the token.
@@ -336,6 +619,11 @@ public final class Kimbo11ngProvider extends Provider {
             });
         }
 
+        // The generator services below take the slot of whichever crypto token last initialised on
+        // this (library, slot): the JCA hands a service no caller to bind to. That is harmless —
+        // the sessions, library, capabilities and login they use are the slot's — and the crypto
+        // token itself does not come through them: it generates key pairs on its own path and
+        // secret keys through keyGenerator(owner, type). They stay for callers that ask the JCA.
         putService(new Service(this, "KeyPairGenerator", "RSA",
                 Kimbo11ngKeyPairGeneratorSpi.RSA.class.getName(), null, null) {
             @Override
@@ -389,7 +677,8 @@ public final class Kimbo11ngProvider extends Provider {
         if (log.isDebugEnabled()) {
             log.debug("Registered provider " + getName() + " with " + classical + " of "
                     + CLASSICAL_SIGNATURES.size() + " classical and " + registered
-                    + " post-quantum signature services, plus " + symmetric
+                    + " post-quantum signature services, " + composite + " composite ones, plus "
+                    + symmetric
                     + " symmetric ones, from profile " + initialRuntime.profile().name());
         }
     }

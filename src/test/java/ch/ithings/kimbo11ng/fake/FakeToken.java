@@ -73,9 +73,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  *
  * <p>RSA and EC keys are real BouncyCastle keys, so signatures verify and {@code CKA_EC_POINT}
- * carries a genuine curve point. PQC keys are random material of the exact FIPS public-key length
- * (ML-DSA 1312/1952/2592, ML-KEM 800/1184/1568, SLH-DSA 32/48/64): enough to exercise parameter-set
- * resolution, OID selection and length cross-validation, which is all the plumbing under test.
+ * carries a genuine curve point. ML-DSA keys are real too, so their signatures verify, and ML-KEM
+ * keys are genuine encapsulation keys, because BouncyCastle 1.84 refuses random bytes for one.
+ * SLH-DSA keys are random material of the exact FIPS public-key length (32/48/64) and sign
+ * synthetically — real SLH-DSA costs seconds per operation. See {@link #pqcMaterial}.
  *
  * <p>Not thread-safe by accident: it is synchronized on the instance precisely so that concurrency
  * tests observe the token's own serialization, not a data race inside the double.
@@ -130,11 +131,14 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private int sessionInfoCalls;
     private int loginCalls;
     private int findObjectsCalls;
+    private byte[] lastSignParameter;
+    private long lastSignHedge = -1;
 
     // ---- fault-injection knobs (0.3) ----
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
     private final Set<Long> omittedAttributes = new HashSet<>();
     private final Set<Long> emptyAttributes = new HashSet<>();
+    private final Set<Long> omittedPrivateAttributes = new HashSet<>();
     private String pqcSpkiOid;
     private final Set<Long> readOnlyAttributes = new HashSet<>();
     private final Map<Long, Long> vendorMechanisms = new HashMap<>();
@@ -144,6 +148,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Map<Long, Long> mechanismFlags = new HashMap<>();
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
+    private boolean enforceLogin;
+    private boolean ignoreSignContext;
+    private boolean rejectSignContext;
     private PqcMechanismProfile profile;
     /** What this token says its session ceiling is, for C_GetTokenInfo. */
     private static final long MAX_SESSIONS = 64;
@@ -166,6 +173,26 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     // ---------------------------------------------------------------- knobs
 
+    /**
+     * Accept an ML-DSA {@code CK_SIGN_ADDITIONAL_CONTEXT} and sign with the empty context anyway —
+     * the token a composite signature fails on silently: the right length, the right OID, and an
+     * ML-DSA half that verifies under no context but the one nobody asked for.
+     */
+    public FakeToken ignoreSignContext() {
+        ignoreSignContext = true;
+        return this;
+    }
+
+    /**
+     * Refuse an ML-DSA {@code C_SignInit} that carries a {@code CK_SIGN_ADDITIONAL_CONTEXT}, with
+     * {@code CKR_MECHANISM_PARAM_INVALID}, as a token without context support does. Plain ML-DSA,
+     * which sends no parameter, still signs.
+     */
+    public FakeToken rejectSignContext() {
+        rejectSignContext = true;
+        return this;
+    }
+
     /** Report {@code CKA_EC_POINT} raw instead of DER-wrapped, as several HSMs do. */
     public FakeToken ecPointEncoding(EcPointEncoding encoding) {
         this.ecPointEncoding = encoding;
@@ -175,6 +202,63 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** Hide an attribute entirely, as a vendor that does not implement it would. */
     public FakeToken omitAttribute(long cka) {
         omittedAttributes.add(cka);
+        return this;
+    }
+
+    /**
+     * Enforce the login, as a real token does: with no user logged in, a private object is left
+     * out of {@code C_FindObjects} and refused by {@code C_SignInit} with
+     * {@code CKR_USER_NOT_LOGGED_IN}. By default the fake requires a login only to generate keys,
+     * which is why a token logged out by another one sharing its slot went unnoticed.
+     */
+    public FakeToken enforceLogin() {
+        enforceLogin = true;
+        return this;
+    }
+
+    private Runnable onLogin = () -> { };
+
+    /**
+     * Runs {@code hook} inside every successful {@code C_Login}, before it returns: the one point
+     * where something racing a login can be made to happen deterministically.
+     */
+    public FakeToken onLogin(Runnable hook) {
+        onLogin = hook;
+        return this;
+    }
+
+    private Runnable beforeLogout = () -> { };
+
+    /**
+     * Runs {@code hook} at the start of every {@code C_Logout}, before the token acts on it and
+     * outside the fake's lock, so another thread can reach the token while a logout is in flight.
+     */
+    public FakeToken beforeLogout(Runnable hook) {
+        beforeLogout = hook;
+        return this;
+    }
+
+    /** {@code CKA_PRIVATE} true, or a private or secret key that does not say — PKCS#11's default. */
+    private static boolean isPrivateObject(Map<Long, byte[]> attributes) {
+        byte[] flag = attributes.get(CKA.PRIVATE);
+        if (flag != null) {
+            return flag.length > 0 && flag[0] != 0;
+        }
+        byte[] objectClass = attributes.get(CKA.CLASS);
+        return Arrays.equals(objectClass, encodeLong(CKO.PRIVATE_KEY))
+                || Arrays.equals(objectClass, encodeLong(CKO.SECRET_KEY));
+    }
+
+    /**
+     * Hide an attribute on private-key objects only, leaving it on their public halves.
+     *
+     * <p>SoftHSMv3 does this for {@code CKA_EC_PARAMS} on an Edwards private key: the curve is on
+     * the public object and nowhere else, so code that reads it from the private half finds
+     * nothing. Some modules may do the same for {@code CKA_PARAMETER_SET}. The default fake puts
+     * both on the private object, as PKCS#11 allows — which is exactly how the gap went unseen.
+     */
+    public FakeToken omitPrivateAttribute(long cka) {
+        omittedPrivateAttributes.add(cka);
         return this;
     }
 
@@ -306,6 +390,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
      */
     public synchronized FakeToken dropAllSessions() {
         sessions.clear();
+        // The login goes with them, as it does when the last session closes.
+        logOutIfLastSessionClosed();
         return this;
     }
 
@@ -382,6 +468,22 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return new ArrayList<>(objects.keySet());
     }
 
+    /**
+     * The mechanism parameter of the last {@code C_SignInit}, as raw bytes, or {@code null} when it
+     * carried none. Lets a test tell "sent an empty parameter" from "sent nothing".
+     */
+    public synchronized byte[] lastSignParameter() {
+        return lastSignParameter == null ? null : lastSignParameter.clone();
+    }
+
+    /**
+     * The {@code hedgeVariant} of the last ML-DSA {@code CK_SIGN_ADDITIONAL_CONTEXT} this token
+     * accepted, or -1 if the last {@code C_SignInit} carried none.
+     */
+    public synchronized long lastSignHedge() {
+        return lastSignHedge;
+    }
+
     /** Raw attribute value as the token holds it, for assertions. */
     public synchronized byte[] attribute(long handle, long cka) {
         Map<Long, byte[]> o = objects.get(handle);
@@ -398,6 +500,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
         int findIndex;
         long signKey = -1;
         long signMechanism = -1;
+        /** The ML-DSA context from {@code CK_SIGN_ADDITIONAL_CONTEXT}, or null for none. */
+        byte[] signContext;
+        /** The PSS parameters from {@code CK_RSA_PKCS_PSS_PARAMS}, or null for a non-PSS sign. */
+        java.security.spec.PSSParameterSpec signPss;
         long verifyKey = -1;
         long verifyMechanism = -1;
 
@@ -735,7 +841,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_CloseSession(long handle) {
-        return sessions.remove(handle) == null ? CKR.SESSION_HANDLE_INVALID : CKR.OK;
+        if (sessions.remove(handle) == null) {
+            return CKR.SESSION_HANDLE_INVALID;
+        }
+        logOutIfLastSessionClosed();
+        return CKR.OK;
     }
 
     @Override
@@ -744,7 +854,18 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.SLOT_ID_INVALID;
         }
         sessions.clear();
+        logOutIfLastSessionClosed();
         return CKR.OK;
+    }
+
+    /**
+     * PKCS#11 ends the login when the application's last session on the token closes. Modelled
+     * only under {@link #enforceLogin()}, the knob that makes the fake care about login at all.
+     */
+    private void logOutIfLastSessionClosed() {
+        if (enforceLogin && sessions.isEmpty()) {
+            loggedIn = false;
+        }
     }
 
     @Override
@@ -784,11 +905,18 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.PIN_INCORRECT;
         }
         loggedIn = true;
+        onLogin.run();
         return CKR.OK;
     }
 
     @Override
-    public synchronized long C_Logout(long handle) {
+    public long C_Logout(long handle) {
+        // Outside the fake's monitor, so the hook can let another thread call into the token.
+        beforeLogout.run();
+        return logout(handle);
+    }
+
+    private synchronized long logout(long handle) {
         if (session(handle) == null) {
             return CKR.SESSION_HANDLE_INVALID;
         }
@@ -837,8 +965,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.OBJECT_HANDLE_INVALID;
         }
         long rv = CKR.OK;
+        boolean privateKey = Arrays.equals(attrs.get(CKA.CLASS), encodeLong(CKO.PRIVATE_KEY));
         for (CKA cka : template) {
-            byte[] value = omittedAttributes.contains(cka.type) ? null : attrs.get(cka.type);
+            boolean omitted = omittedAttributes.contains(cka.type)
+                    || (privateKey && omittedPrivateAttributes.contains(cka.type));
+            byte[] value = omitted ? null : attrs.get(cka.type);
             if (value != null && emptyAttributes.contains(cka.type)) {
                 value = new byte[0];
             }
@@ -908,7 +1039,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
                     break;
                 }
             }
-            if (match) {
+            if (match && !(enforceLogin && !loggedIn && isPrivateObject(e.getValue()))) {
                 hits.add(e.getKey());
             }
         }
@@ -1247,8 +1378,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
      * <p>{@code CKA_EC_POINT} is the algorithm's own public-key encoding — 32 bytes for Ed25519,
      * 57 for Ed448 — not a {@code 04 || X || Y} curve point, and it goes through the same
      * {@link #ecPointEncoding} knob so a test can present either the bare or the DER-wrapped form.
-     * {@code CKA_EC_PARAMS} is put on the private object too, which is where the enumeration path
-     * has to read it to tell Ed25519 from Ed448 before the public half is available.
+     * {@code CKA_EC_PARAMS} is put on the private object too, as PKCS#11 allows; enumeration reads
+     * it there first and from the public half otherwise. SoftHSMv3 keeps it on the public object
+     * only — {@link #omitPrivateAttribute} reproduces that.
      */
     private void generateEdwards(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
         byte[] ecParams = pub.get(CKA.EC_PARAMS);
@@ -1350,12 +1482,120 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (!objects.containsKey(key)) {
             return CKR.KEY_HANDLE_INVALID;
         }
+        if (enforceLogin && !loggedIn && isPrivateObject(objects.get(key))) {
+            return CKR.USER_NOT_LOGGED_IN;
+        }
+        // Recorded before it is judged, so a test can see what a refused C_SignInit was sent.
+        byte[] parameter = parameterBytes(mechanism);
+        lastSignParameter = parameter;
+        lastSignHedge = -1;
         if (!pssParamIsValid(mechanism)) {
             return CKR.MECHANISM_PARAM_INVALID;
         }
+        java.security.spec.PSSParameterSpec pss = null;
+        if (isPss(mechanism.mechanism)) {
+            pss = pssSpec(mechanism.mechanism, parameter);
+            if (pss == null) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
+        }
+        byte[] context = null;
+        if (mechanism.mechanism == CKM_ML_DSA && parameter != null) {
+            if (rejectSignContext) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
+            context = signAdditionalContext(mechanism);
+            if (context == null) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
+            lastSignHedge = mechanism.pParameter.getNativeLong(0).longValue();
+            if (ignoreSignContext) {
+                context = null;
+            }
+        }
         s.signKey = key;
         s.signMechanism = mechanism.mechanism;
+        s.signContext = context;
+        s.signPss = pss;
         return CKR.OK;
+    }
+
+    /** The mechanism parameter as bytes, wherever jacknji11 put it, or null when there is none. */
+    private static byte[] parameterBytes(CKM mechanism) {
+        if (mechanism.bParameter != null) {
+            return mechanism.bParameter.clone();
+        }
+        if (mechanism.pParameter != null && mechanism.ulParameterLen > 0) {
+            return mechanism.pParameter.getByteArray(0, (int) mechanism.ulParameterLen);
+        }
+        return null;
+    }
+
+    /**
+     * Reads {@code CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant, pContext, ulContextLen }} the way a
+     * v3.2 module does: packed, as jacknji11 packs every PKCS#11 structure. Returns the context, or
+     * null when the block is not that structure — which a real token answers with
+     * {@code CKR_MECHANISM_PARAM_INVALID}.
+     */
+    private static byte[] signAdditionalContext(CKM mechanism) {
+        int ulong = com.sun.jna.Native.LONG_SIZE;
+        int pointer = com.sun.jna.Native.POINTER_SIZE;
+        if (mechanism.pParameter == null || mechanism.ulParameterLen != 2L * ulong + pointer) {
+            return null;
+        }
+        com.sun.jna.Pointer block = mechanism.pParameter;
+        // CKH_HEDGE_PREFERRED, CKH_HEDGE_REQUIRED, CKH_DETERMINISTIC_REQUIRED, and nothing else. A
+        // caller that never wrote the field sends whatever the allocator left there — often zero,
+        // so this catches an unwritten field only some of the time.
+        long hedge = block.getNativeLong(0).longValue();
+        if (hedge < 0 || hedge > 2) {
+            return null;
+        }
+        long length = block.getNativeLong(ulong + pointer).longValue();
+        if (length == 0) {
+            return new byte[0];
+        }
+        com.sun.jna.Pointer context = block.getPointer(ulong);
+        return context == null ? null : context.getByteArray(0, (int) length);
+    }
+
+    private static boolean isPss(long ckm) {
+        return ckm == CKM.SHA256_RSA_PKCS_PSS || ckm == CKM.SHA384_RSA_PKCS_PSS
+                || ckm == CKM.SHA512_RSA_PKCS_PSS;
+    }
+
+    /**
+     * The {@code PSSParameterSpec} a {@code CK_RSA_PKCS_PSS_PARAMS} block describes, so the fake
+     * signs with the salt length it was sent rather than one it assumes; or null when the block is
+     * one it cannot honour faithfully.
+     *
+     * <p>Refused: a {@code hashAlg} other than the digest the {@code CKM_SHAnnn_RSA_PKCS_PSS}
+     * mechanism itself names, and an MGF1 over a different digest. A real token may reject the
+     * first and may honour the second; this one refuses both rather than sign something other than
+     * what it was asked for, which is the failure a fake must never hide.
+     */
+    private static java.security.spec.PSSParameterSpec pssSpec(long ckm, byte[] parameter) {
+        int width = ULong.ULONG_SIZE.size();
+        long hash = ULong.b2ulong(Arrays.copyOfRange(parameter, 0, width));
+        long mgf = ULong.b2ulong(Arrays.copyOfRange(parameter, width, 2 * width));
+        long salt = ULong.b2ulong(Arrays.copyOfRange(parameter, 2 * width, 3 * width));
+        // {mechanism, its CKM_SHAnnn digest, its CKG_MGF1_SHAnnn}; names[i] is the JCA digest name
+        long[][] rows = {
+            {CKM.SHA256_RSA_PKCS_PSS, 0x250, 2},
+            {CKM.SHA384_RSA_PKCS_PSS, 0x260, 3},
+            {CKM.SHA512_RSA_PKCS_PSS, 0x270, 4}};
+        String[] names = {"SHA-256", "SHA-384", "SHA-512"};
+        for (int i = 0; i < rows.length; i++) {
+            if (rows[i][0] == ckm) {
+                if (hash != rows[i][1] || mgf != rows[i][2]) {
+                    return null;
+                }
+                return new java.security.spec.PSSParameterSpec(names[i], "MGF1",
+                        new java.security.spec.MGF1ParameterSpec(names[i]), (int) salt,
+                        java.security.spec.PSSParameterSpec.TRAILER_FIELD_BC);
+            }
+        }
+        return null;
     }
 
     @Override
@@ -1389,6 +1629,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
         outLen.value = signature.length;
         s.signKey = -1;
         s.signMechanism = -1;
+        s.signContext = null;
+        s.signPss = null;
         return CKR.OK;
     }
 
@@ -1424,8 +1666,15 @@ public final class FakeToken extends UnsupportedNativeProvider {
         PrivateKey privateKey = java.security.KeyFactory
                 .getInstance(algorithm, BC)
                 .generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(key.get(PRIVATE_MATERIAL)));
-        Signature sig = Signature.getInstance(signatureAlgorithm(s.signMechanism, algorithm), BC);
+        Signature sig = Signature.getInstance(s.signPss != null ? "RSASSA-PSS"
+                : signatureAlgorithm(s.signMechanism, algorithm), BC);
         sig.initSign(privateKey);
+        if (s.signPss != null) {
+            sig.setParameter(s.signPss);
+        }
+        if (s.signContext != null) {
+            sig.setParameter(new org.bouncycastle.jcajce.spec.ContextParameterSpec(s.signContext));
+        }
         sig.update(data);
         byte[] der = sig.sign();
         // PKCS#11 returns ECDSA as the raw r||s pair, not DER — mirroring that is essential,
@@ -1451,8 +1700,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return keyAlgorithm;
         }
         if ("ML-DSA".equals(keyAlgorithm)) {
-            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest
-            // and no context string, which is what BouncyCastle's bare "ML-DSA" does.
+            // CKM_ML_DSA is pure ML-DSA: the signature covers the message itself, with no digest,
+            // which is what BouncyCastle's bare "ML-DSA" does. The context string is whatever
+            // CK_SIGN_ADDITIONAL_CONTEXT carried, empty when no parameter was sent; sign() applies it.
             return "ML-DSA";
         }
         if ("EC".equals(keyAlgorithm)) {
@@ -1505,18 +1755,10 @@ public final class FakeToken extends UnsupportedNativeProvider {
         if (ckm == CKM.SHA512_RSA_PKCS) {
             return "SHA512withRSA";
         }
-        // PSS through BouncyCastle's own SHAxxxwithRSAandMGF1, which uses a salt equal to the
-        // digest length — the same choice RsaPssParams encodes. If the two ever disagree, a
-        // signature produced here stops verifying and the round-trip test says so.
-        if (ckm == CKM.SHA256_RSA_PKCS_PSS) {
-            return "SHA256withRSAandMGF1";
-        }
-        if (ckm == CKM.SHA384_RSA_PKCS_PSS) {
-            return "SHA384withRSAandMGF1";
-        }
-        if (ckm == CKM.SHA512_RSA_PKCS_PSS) {
-            return "SHA512withRSAandMGF1";
-        }
+        // The PSS mechanisms never get here: sign() uses RSASSA-PSS with the hash and salt length
+        // decoded from the CK_RSA_PKCS_PSS_PARAMS the caller sent, as a token does. A caller that
+        // sent the wrong salt length gets a signature that fails at the verifier, which is what
+        // the round-trip tests check.
         return "SHA256withRSA";
     }
 

@@ -71,6 +71,14 @@ public final class Pkcs11v32 {
     /** {@code CKM_SLH_DSA}, the signing mechanism. */
     public static final long CKM_SLH_DSA = 0x0000002EL;
 
+    // ---- Hedging, for CK_SIGN_ADDITIONAL_CONTEXT ----
+
+    /**
+     * {@code CKH_HEDGE_PREFERRED}: randomised signing where the token can, deterministic otherwise.
+     * Zero, so it is also what a token assumes when no parameter is sent.
+     */
+    public static final long CKH_HEDGE_PREFERRED = 0x00000000L;
+
     // ---- Attributes ----
 
     /** {@code CKA_PARAMETER_SET}, holding the {@code CKP_*} value that names the parameter set. */

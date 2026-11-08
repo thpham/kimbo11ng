@@ -544,8 +544,9 @@ final class InfoCommands {
     /**
      * A labelled list that wraps under its own label instead of running off the terminal.
      *
-     * <p>The Signature row alone is twenty-six algorithm names — over a thousand characters, which
-     * the terminal folds back to column zero and so ends up indistinguishable from the next label.
+     * <p>The Signature row alone runs to dozens of algorithm names on a token that has everything —
+     * classical, post-quantum and composite — well over a thousand characters, which the terminal
+     * folds back to column zero and so ends up indistinguishable from the next label.
      */
     private static void wrapped(PrintStream out, String label, List<String> values,
             String suffix) {

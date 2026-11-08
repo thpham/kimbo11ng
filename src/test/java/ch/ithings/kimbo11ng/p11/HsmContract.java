@@ -274,7 +274,7 @@ public abstract class HsmContract {
         String alias = alias("rsa-identity");
         impl.generateKeyPair("2048", alias);
 
-        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
         byte[] keyId = keyStore.referenceFor(alias).ckaId();
         assertNotNull(keyId, "generation did not write a CKA_ID, so the key has no durable identity");
 
@@ -337,6 +337,76 @@ public abstract class HsmContract {
         }
     }
 
+    /**
+     * An Edwards key found again by a fresh enumeration, which is what a restart or a reactivation
+     * does. The classical round trip above signs with the key generation just registered, so it
+     * never asks the token which curve the key is on — and SoftHSMv3 answers that only on the
+     * public half, which made every Edwards key vanish at the first restart.
+     */
+    @ParameterizedTest
+    @CsvSource({"Ed25519", "Ed448"})
+    @DisplayName("finds an Edwards key again after everything cached has been discarded")
+    void edwardsKeySurvivesRestart(String curve) throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", curve) != null,
+                "the token does not offer " + curve);
+        String alias = alias("restart-" + curve);
+        impl.generateKeyPair(curve, alias);
+
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
+        keyStore.clear();
+        slot().invalidateHandles();
+        keyStore.engineLoad(null, pin());
+
+        assertTrue(keyStore.engineContainsAlias(alias), alias + " did not survive re-enumeration");
+        signAndVerify(alias, curve);
+    }
+
+    /**
+     * A second crypto token on the same slot, activated and then deactivated, leaves this one
+     * logged in. PKCS#11 login belongs to the application and the slot, so a token that sent
+     * {@code C_Logout} for itself logged out every other token on the slot too — on real hardware
+     * the next signature fails with {@code CKR_USER_NOT_LOGGED_IN}.
+     */
+    @Test
+    @DisplayName("keeps signing after another token on the same slot deactivates")
+    void anotherTokensDeactivateKeepsThisOneLoggedIn() throws Exception {
+        String alias = alias("shared-login");
+        impl.generateKeyPair("2048", alias);
+
+        Properties properties = new Properties();
+        properties.setProperty(CryptoTokenImpl.SHLIB_LABEL_KEY, libPath());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, slotLabelType());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, slotLabelValue());
+        properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
+        properties.putAll(extraProperties());
+        CryptoTokenImpl other = new CryptoTokenImpl(new TestBridge(), registry());
+        other.init(properties, null, 73);
+        other.activate(pin());
+        other.deactivate();
+
+        signAndVerify(alias, "SHA256withRSA");
+    }
+
+    @Test
+    @DisplayName("keeps signing after another token on the same slot is reset")
+    void anotherTokensResetKeepsThisOneSigning() throws Exception {
+        String alias = alias("shared-reset");
+        impl.generateKeyPair("2048", alias);
+
+        Properties properties = new Properties();
+        properties.setProperty(CryptoTokenImpl.SHLIB_LABEL_KEY, libPath());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, slotLabelType());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, slotLabelValue());
+        properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
+        properties.putAll(extraProperties());
+        CryptoTokenImpl other = new CryptoTokenImpl(new TestBridge(), registry());
+        other.init(properties, null, 74);
+        other.activate(pin());
+        other.reset();
+
+        signAndVerify(alias, "SHA256withRSA");
+    }
+
     @Test
     @DisplayName("deletes a key so completely that it is gone from a fresh enumeration")
     void deleteRemovesBothHalves() throws Exception {
@@ -344,7 +414,7 @@ public abstract class HsmContract {
         impl.generateKeyPair("2048", alias);
         impl.deleteEntry(alias);
 
-        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
         keyStore.clear();
         keyStore.engineLoad(null, pin());
         assertFalse(keyStore.engineContainsAlias(alias),
@@ -361,7 +431,7 @@ public abstract class HsmContract {
             String alias = alias("pqc-" + entry.canonicalName());
             impl.generateKeyPair(entry.canonicalName(), alias);
 
-            Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+            Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
             keyStore.clear();
             keyStore.engineLoad(null, pin());
             assertTrue(keyStore.engineContainsAlias(alias),
@@ -409,7 +479,7 @@ public abstract class HsmContract {
         String alias = alias("hmac");
         impl.generateKey("HmacSHA256", 256, alias);
 
-        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
         assertTrue(keyStore.engineContainsAlias(alias));
         assertTrue(keyStore.isSecretKey(alias), alias + " is not registered as a secret key");
 
@@ -432,12 +502,107 @@ public abstract class HsmContract {
     /** MACs {@code message} with the token-held key registered under {@code alias}. */
     private byte[] mac(String alias, byte[] message) throws Exception {
         javax.crypto.SecretKey key = (javax.crypto.SecretKey)
-                impl.getProvider().getKeyStoreSpi().engineGetKey(alias, pin());
+                impl.getKeyStoreSpi().engineGetKey(alias, pin());
         assertNotNull(key, "no secret key for " + alias);
         assertNull(key.getEncoded(), "a sensitive key must not hand out its material");
         javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256", impl.getProvider());
         mac.init(key);
         return mac.doFinal(message);
+    }
+
+    // ------------------------------------------------------------------ composite ML-DSA
+
+    /**
+     * ML-DSA with a non-empty context string, which only composite signatures need.
+     *
+     * <p>The one thing about composites a fake cannot settle: whether the token honours
+     * {@code CK_SIGN_ADDITIONAL_CONTEXT} on {@code CKM_ML_DSA}. A token that ignored it would sign
+     * with the empty context, and the signature would verify under that and not under the one
+     * asked for — so both are checked.
+     */
+    @Test
+    @DisplayName("binds an ML-DSA context string, as composite signatures require")
+    void mlDsaContextIsBound() throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", "ML-DSA-44") != null,
+                "the token does not offer ML-DSA-44");
+        String alias = alias("mldsa-context");
+        impl.generateKeyPair("ML-DSA-44", alias);
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
+        byte[] message = ("kimbo11ng hsm contract " + alias).getBytes(StandardCharsets.UTF_8);
+        org.bouncycastle.jcajce.spec.ContextParameterSpec context =
+                new org.bouncycastle.jcajce.spec.ContextParameterSpec(
+                        "COMPSIG-MLDSA44-RSA2048-PSS-SHA256".getBytes(StandardCharsets.US_ASCII));
+
+        Signature signer = Signature.getInstance("ML-DSA-44", impl.getProvider());
+        signer.initSign((PrivateKey) keyStore.engineGetKey(alias, pin()));
+        signer.setParameter(context);
+        signer.update(message);
+        byte[] signature = signer.sign();
+
+        PublicKey publicKey = keyStore.getPublicKey(alias);
+        assertTrue(verifiesMlDsa(publicKey, message, signature, context),
+                "the signature does not verify under the context it was asked for: the token"
+                        + " rejected or mangled CK_SIGN_ADDITIONAL_CONTEXT");
+        assertFalse(verifiesMlDsa(publicKey, message, signature, null),
+                "the signature verifies under the empty context, so the token ignored the one it"
+                        + " was sent — every composite signature from it would fail to verify");
+    }
+
+    private static boolean verifiesMlDsa(PublicKey key, byte[] message, byte[] signature,
+            java.security.spec.AlgorithmParameterSpec context) throws Exception {
+        Signature verifier = Signature.getInstance("ML-DSA", BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(key);
+        if (context != null) {
+            verifier.setParameter(context);
+        }
+        verifier.update(message);
+        return verifier.verify(signature);
+    }
+
+    /**
+     * Composite signatures, built from two token keys exactly as EJBCA's
+     * {@code CryptoTokenCompositeWrapper} builds them, and verified by BouncyCastle — the scenario
+     * of issue #12.
+     */
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({
+        "MLDSA44-RSA2048-PSS-SHA256, ML-DSA-44, 2048",
+        "MLDSA65-ECDSA-P384-SHA512,  ML-DSA-65, secp384r1",
+        "MLDSA44-Ed25519-SHA512,     ML-DSA-44, Ed25519"})
+    @DisplayName("signs a composite with two token keys, verifiable outside this provider")
+    void compositeSignature(String name, String pqSpec, String classicalSpec) throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", name) != null,
+                "the token does not offer both halves of " + name);
+        // Not EJBCA's -COMPQ/-COMPC suffixes: a leftover from a failed cleanup must not turn up in
+        // EJBCA as half of a composite key.
+        String pqAlias = alias("composite-" + name + "-pq");
+        String classicalAlias = alias("composite-" + name + "-classical");
+        impl.generateKeyPair(pqSpec, pqAlias);
+        impl.generateKeyPair(classicalSpec, classicalAlias);
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
+
+        org.bouncycastle.asn1.ASN1ObjectIdentifier oid = org.bouncycastle.jcajce.provider
+                .asymmetric.compositesignatures.CompositeIndex.getSupportedIdentifiers().stream()
+                .filter(o -> org.bouncycastle.jcajce.provider.asymmetric.compositesignatures
+                        .CompositeIndex.getAlgorithmName(o).equals(name))
+                .findFirst().orElseThrow();
+        PrivateKey privateKey = new org.bouncycastle.jcajce.CompositePrivateKey(oid,
+                (PrivateKey) keyStore.engineGetKey(pqAlias, pin()),
+                (PrivateKey) keyStore.engineGetKey(classicalAlias, pin()));
+        PublicKey publicKey = new org.bouncycastle.jcajce.CompositePublicKey(oid,
+                keyStore.getPublicKey(pqAlias), keyStore.getPublicKey(classicalAlias));
+
+        byte[] message = ("kimbo11ng hsm contract " + name).getBytes(StandardCharsets.UTF_8);
+        Signature signer = Signature.getInstance(name, impl.getProvider());
+        signer.initSign(privateKey);
+        signer.update(message);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance(name, BouncyCastleProvider.PROVIDER_NAME);
+        verifier.initVerify(publicKey);
+        verifier.update(message);
+        assertTrue(verifier.verify(signature),
+                name + " produced a signature BouncyCastle will not verify");
     }
 
     @Test
@@ -458,7 +623,7 @@ public abstract class HsmContract {
      */
     private void signAndVerify(String alias, String jcaName) throws Exception {
         byte[] message = ("kimbo11ng hsm contract " + alias).getBytes(StandardCharsets.UTF_8);
-        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        Kimbo11ngKeyStoreSpi keyStore = impl.getKeyStoreSpi();
 
         PrivateKey privateKey = (PrivateKey) keyStore.engineGetKey(alias, pin());
         assertNotNull(privateKey, "no private key for " + alias);

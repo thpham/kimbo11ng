@@ -323,4 +323,68 @@ class SessionPoolTest {
         assertThrows(com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException.class,
                 () -> pool.login("wrong-pin".toCharArray()));
     }
+
+    @Test
+    @DisplayName("stays open for release while a crypto token holds its login, and closes after")
+    void closesOnlyWhenNoLoginIsHeld() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        pool.login("1234".toCharArray());
+
+        org.junit.jupiter.api.Assertions.assertFalse(pool.closeIfUnheld(),
+                "a token is logged in through the pool; draining it would log that token out");
+        pool.borrow().close();
+
+        pool.logout();
+        assertTrue(pool.closeIfUnheld(), "nothing holds the login any more");
+        assertThrows(CryptoTokenOfflineException.class, pool::borrow);
+    }
+
+    @Test
+    @DisplayName("a login racing the last logout ends logged in, not holding a logged-out slot")
+    void loginRacingTheLastLogout() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        pool.login("1234".toCharArray());
+        // Another crypto token activates while this one's C_Logout is in flight. Unserialised, its
+        // C_Login answered "already logged in", it took a hold, and the logout then landed: it held
+        // a slot that was no longer logged in, and its next signature failed.
+        Thread[] other = new Thread[1];
+        CountDownLatch otherDone = new CountDownLatch(1);
+        token.beforeLogout(() -> {
+            token.beforeLogout(() -> { });
+            other[0] = new Thread(() -> {
+                try {
+                    pool.login("1234".toCharArray());
+                } catch (Exception e) {
+                    throw new AssertionError(e);
+                } finally {
+                    otherDone.countDown();
+                }
+            });
+            other[0].start();
+            try {
+                // Long enough for an unserialised login to finish; a serialised one waits for
+                // this logout instead, and the wait simply runs out.
+                otherDone.await(300, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        pool.logout();
+        other[0].join(10_000);
+
+        assertTrue(token.isLoggedIn(), "the other token holds the login, so the slot must be logged in");
+    }
+
+    @Test
+    @DisplayName("fails a login the pool was released under rather than holding a dead pool")
+    void loginRacingARelease() {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        // The release lands after C_Login succeeded and before the hold is taken, so it saw no
+        // hold and its drain is about to close the sessions — and the login with them.
+        token.onLogin(() -> assertTrue(pool.closeIfUnheld()));
+
+        assertThrows(CryptoTokenOfflineException.class, () -> pool.login("1234".toCharArray()),
+                "a token told it is logged in through a drained pool would fail its next signature");
+    }
 }

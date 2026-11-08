@@ -4,13 +4,15 @@ Open-source PKCS#11 NG CryptoToken for [EJBCA CE](https://www.ejbca.org/) with p
 
 Backed by [JackNJI11](https://github.com/joelhockey/jacknji11) (MIT-licensed JNA PKCS#11 bindings —
 see [provenance](docs/JACKNJI11_PROVENANCE.md)) and tested against
-[softhsmv3](https://github.com/pqctoday/softhsmv3) with OpenSSL 3.6+.
+[softhsmv3](https://github.com/pqctoday-org/pqctoday-hsm) with OpenSSL 3.6+.
 
 ## Features
 
 - Drop-in `Pkcs11NgCryptoToken` for EJBCA CE 9.6.3 (9.3.7 on `main`; 9.6.3 needs the [HSM overlay](#ejbca-ce-96-and-the-hsm-overlay))
 - RSA and EC key generation and signing via PKCS#11
 - **Post-quantum cryptography**: ML-DSA (FIPS 204), ML-KEM (FIPS 203), and SLH-DSA (FIPS 205)
+- **Composite ML-DSA** signatures (draft-ietf-lamps-pq-composite-sigs) for EJBCA's `-COMPOSITE`
+  keys, with both halves signed on the token
 - Vendor-agnostic `PqcMechanismProfile` abstraction for HSM-specific PQC constants, selected
   automatically by probing the token's mechanism list — adding an HSM is a table of constants plus
   a conformance test, see [docs/VENDOR_PROFILE_CHECKLIST.md](docs/VENDOR_PROFILE_CHECKLIST.md)
@@ -34,13 +36,35 @@ fresh enumeration, and checks the OID that would land in a certificate. See
 | ML-KEM    | ML-KEM-512, ML-KEM-768, ML-KEM-1024          | generate, enumerate    | FIPS 203        |
 | SLH-DSA   | SHA2/SHAKE x 128/192/256 x S/F (12 variants) | generate, sign         | FIPS 205        |
 | Hybrid    | RSA/EC primary + ML-DSA/SLH-DSA alternative  | issue certificates     | X.509 Sec. 9.8  |
+| Composite | ML-DSA + RSA-PSS, ECDSA or EdDSA (15)        | sign, issue certificates | draft-ietf-lamps-pq-composite-sigs-13 |
+
+Composite keys are EJBCA's: an alias ending in `-COMPOSITE` is two keys on the token, `-COMPQ` and
+`-COMPC`, which EJBCA's `CryptoTokenCompositeWrapper` hands this provider as one BouncyCastle
+`CompositePrivateKey`. The message construction is BouncyCastle's, the same code EJBCA verifies with;
+what kimbo11ng adds is that each half is signed by the token, and the ML-DSA half with the domain
+label as its FIPS 204 context string — sent as `CK_SIGN_ADDITIONAL_CONTEXT`, without which the
+signature does not verify. The three RSA PKCS#1 v1.5 combinations are deliberately not offered:
+EJBCA does not support them, and always signs an RSA half with PSS.
+
+The format is that of [draft-ietf-lamps-pq-composite-sigs-13](https://datatracker.ietf.org/doc/draft-ietf-lamps-pq-composite-sigs/13/),
+the revision EJBCA 9.6.3 declares, as implemented by the BouncyCastle 1.84 it ships. The prefix,
+labels, OIDs and RSA-PSS parameters are unchanged in -19, the latest revision checked (2026-11-07).
+Because kimbo11ng delegates the message construction to BouncyCastle, a BouncyCastle upgrade can
+change the format; EJBCA verifies with the same BouncyCastle, so it would change on both sides, and
+only interoperability with other implementations is at stake.
+
+`MLDSA44-RSA2048-PSS-SHA256` is tested end to end in EJBCA, and three combinations against SoftHSMv3
+(`just hsm-it`). The context string has not yet been verified against a Thales Luna.
 
 ### Signature algorithms registered by the JCA provider
 
 `SHA{1,256,384,512}withRSA`, `SHA3-{256,384,512}withRSA`, `SHA{256,384,512}withRSAandMGF1`,
-`SHA{1,224,256,384,512}withECDSA`, `SHA3-{256,384,512}withECDSA`, `Ed25519`, `Ed448`, and one
-service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`). A service
-is registered only if the token advertises its mechanism with the matching `CKF_*` flag.
+`SHA{1,224,256,384,512}withECDSA`, `SHA3-{256,384,512}withECDSA`, `Ed25519`, `Ed448`, one
+service per signing algorithm in the active profile (`ML-DSA-44` … `SLH-DSA-SHAKE-256F`),
+`RSASSA-PSS` with its hash taken from a `PSSParameterSpec`, and 15 composites
+(`MLDSA44-RSA2048-PSS-SHA256` … `MLDSA87-ECDSA-P521-SHA512`). A service is registered only if the
+token advertises its mechanism with the matching `CKF_*` flag; a composite, only if both of its
+halves are registered.
 
 The set is chosen to match what EJBCA offers, not what is convenient: `AlgorithmTools`
 `.getSignatureAlgorithms` returns the SHA-3 and `SHA224withECDSA` spellings for every RSA and EC
@@ -99,20 +123,38 @@ docker compose exec ejbca kimbo11ng-cli listslots       # no PIN, no slot, no li
 just cli-token capabilities --slot-ref SLOT_LABEL --slot TestToken
 ```
 
+`docker exec` arrives as root, but the tool runs as EJBCA's user (uid 10001, from
+`KIMBO11NG_RUN_AS` in the image): SoftHSMv3 writes each object mode 0600, and a key made by root
+would be invisible to the CA. Files you point the tool at, such as a PIN file or an output path,
+must therefore be accessible to that user. `-e KIMBO11NG_RUN_AS=` turns this off.
+
 | Command | What it answers |
 | --- | --- |
 | `listslots`, `showinfo`, `showslotinfo`, `showtokeninfo` | does the library load, does the slot exist, is the PIN locked — none of which needs a credential |
 | `capabilities` | which algorithms this token can actually do, and the profile kimbo11ng resolves for it |
-| `listkeypairs` | the alias list EJBCA will show, built by the key store the CA reads |
+| `listkeypairs` | the alias list EJBCA will show, built by the key store the CA reads, and the composite keys EJBCA will make of `-COMPQ`/`-COMPC` halves |
 | `listobjects`, `showobjectattributes` | the raw PKCS#11 objects behind those aliases, with `CKA_SENSITIVE` and `CKA_EXTRACTABLE` |
-| `generatekeypair`, `generatekey`, `deleteobject` | the key lifecycle, post-quantum included |
-| `testkeypair` | sign and verify once, the check `HsmKeepAliveWorker` runs on a schedule |
+| `generatekeypair`, `generatekey`, `deleteobject` | the key lifecycle, post-quantum and composite included |
+| `testkeypair` | sign and verify once, the check `HsmKeepAliveWorker` runs on a schedule; on a composite, which half failed and why |
 | `signperformancetest` | throughput and per-signature latency |
 
 `capabilities` is the one with no Enterprise counterpart. The verdict it prints — *"Effective
 algorithms for profile 'pkcs11v32' (18/18 usable)"* — is today only readable in the WildFly log,
 after the crypto token has been created and EJBCA has already tried to use it. As a command it is a
 pre-flight check that needs no PIN.
+
+Composite keys follow EJBCA's naming: `generatekeypair --alias <name>-COMPOSITE --key-spec
+MLDSA44-RSA2048-PSS-SHA256` makes `<name>-COMPQ` and `<name>-COMPC`, which EJBCA then shows as one
+`<name>-COMPOSITE` key, and removes the first half again if the second cannot be made. Which
+composites exist and which the token can sign come from the provider, so the CLI cannot offer one
+the CA could not use. `testkeypair --alias <name>-COMPOSITE` is the hardware check for composites
+in one command: when the signature fails it signs each half on its own and reports whether the
+token rejects the ML-DSA context string, ignores it, or fails on the classical half.
+
+```bash
+kimbo11ng-cli generatekeypair --alias ca-COMPOSITE --key-spec MLDSA44-RSA2048-PSS-SHA256
+kimbo11ng-cli testkeypair --alias ca-COMPOSITE
+```
 
 `signperformancetest` earns its place on SLH-DSA, where the figure is not published by anyone and
 is what decides whether an HSM can serve a CA at a given issuance rate. Measured on the SoftHSMv3 in
@@ -248,6 +290,7 @@ mvn verify -Pit
 | `just mutation`           | Mutation testing (PIT): which deliberate bugs the unit tests miss, ~8 min   |
 | `just it`                 | The above plus the integration suite — run `just docker-build` first        |
 | `just it-only`            | Integration tests alone, skipping the unit suite and the gates              |
+| `just hsm-it`             | The HSM contract against real SoftHSMv3, in a throwaway container           |
 | `just cli`                | Run the command-line tool from the build tree                               |
 | `just cli-token`          | Run it inside the container, against the SoftHSMv3 slot                     |
 | `just deploy`             | Hot-reload JAR into running EJBCA container                                 |
@@ -287,7 +330,8 @@ this line were wrong? It is deliberately outside `verify` and has no threshold y
 `Signature` that carried the previous message into the next signature, and EC point prefixes that
 nothing checked. Read survivors before acting on them. Some are equivalent mutants, and some mean
 `FakeToken` is more forgiving than a real HSM — in that case fix the fake and add the case to
-`HsmContract`, which also runs against SoftHSMv3. The report is `target/pit-reports/index.html`.
+`HsmContract`, which also runs against SoftHSMv3 (`just hsm-it`). The report is
+`target/pit-reports/index.html`.
 
 **Fuzz and refusal tests.** `EcPointFuzzTest` throws bent and arbitrary bytes at the two
 `EcPointCodec` entry points and holds them to a total contract: every input yields either a point on
@@ -307,6 +351,8 @@ Testcontainers:
 - Root CAs at ML-DSA-44, ML-DSA-65, ML-DSA-87, SLH-DSA-SHA2-128F, EC P-384, RSA-PSS and Hybrid
   (RSA + ML-DSA alternative), each issuing a certificate whose signature algorithm OID is checked
 - `cryptotoken testkey` for each signing algorithm, and its refusal for ML-KEM
+- Composite ML-DSA (`MLDSA44-RSA2048-PSS-SHA256`): a `-COMPOSITE` key generated and tested, and a
+  composite root CA whose own certificate and an issued one both verify under BouncyCastle
 - A token created through EJBCA's own CLI is stored as `Pkcs11NgCryptoToken`, and the restored classic
   `PKCS11CryptoToken` creates, generates and tests a key (the HSM overlay, on 9.6)
 
@@ -315,8 +361,9 @@ from an empty database: it starts the new image on an old deployment's database 
 only if the CA signs again with the same keys.
 
 **CLI integration tests** (`CliContainerIT`) run the tool from `PATH` inside the same image, against
-real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA and a symmetric key, each generated, signed with,
-inspected and deleted. The container is started with `sleep infinity` and no application server ever
+real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA, SLH-DSA, a composite `MLDSA44-RSA2048-PSS-SHA256` and
+a symmetric key, each generated, signed with, inspected and deleted. The container is started with
+`sleep infinity` and no application server ever
 boots, which is the assertion rather than an optimisation: the tool's claim is that it answers
 "does this HSM work" before EJBCA is in the picture. It costs seconds rather than the minutes a full
 stack takes, and it is the only place three things are covered — the launcher finding its classpath,
@@ -324,11 +371,16 @@ module discovery through `environment-hsm`, and the crypto provider being instal
 every post-quantum algorithm reports as excluded.
 
 ```bash
-mvn verify               # 813 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 26 EJBCA + 23 CLI integration tests (~5 min)
+# Counts verified 2026-11-08.
+mvn verify               # 932 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 30 EJBCA + 27 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
+
+# Against real SoftHSMv3: the same contract, in a throwaway container from the image, because
+# the library exists only there. Tests this checkout's classes; under a minute.
+just hsm-it
 
 # Against real hardware: the same contract HsmContractFakeTest runs on every build.
 # Skipped when kimbo11ng.it.lib is absent. Adding kimbo11ng.it.luna.jsp additionally runs the
@@ -394,13 +446,15 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 26 tests,
-                                     #   HsmConformanceIT — real-hardware contract)
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 30 tests,
+                                     #   HsmConformanceIT — the HSM contract on a real library)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
   docker/ejbca-hsm/                  # EJBCA 9.6 overlay: start-up check patcher + restored classic tokens (LGPL, see NOTICE)
   scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
+  scripts/upgrade-swap.sh            # An old deployment's database and token, started on a new image
+  scripts/hsm-it.sh                  # HsmConformanceIT against the image's SoftHSMv3 (just hsm-it)
   docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)

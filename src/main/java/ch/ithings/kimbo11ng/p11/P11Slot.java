@@ -126,7 +126,14 @@ public final class P11Slot {
     public void reportOffline(String reason, Throwable cause) {
         log.warn("Token on slot " + slotId + " of " + module.path() + " went offline: " + reason);
         invalidateHandles();
-        loggedIn = false;
+        synchronized (this) {
+            if (loggedIn) {
+                loggedIn = false;
+                // Without a C_Logout — the token is gone — but the hold is given back, or this
+                // token would count twice once it logs in again and never log the slot out.
+                pool().releaseLoginHold();
+            }
+        }
         OfflineListener listener = offlineListener;
         if (listener != null) {
             try {
@@ -144,7 +151,8 @@ public final class P11Slot {
     /**
      * The library file name with everything but {@code [A-Za-z0-9_-]} replaced, used to build the
      * JCA provider name. Stable for a given library, which is what EJBCA relies on: it resolves
-     * providers by name and registers a name only once.
+     * providers by name and registers a name only once. Not unique: two libraries can share a file
+     * name, which the provider resolves by qualifying the second one's name.
      */
     public String libraryName() {
         return new File(module.path()).getName().replaceAll("[^a-zA-Z0-9_-]", "_");
@@ -176,7 +184,8 @@ public final class P11Slot {
     }
 
     /**
-     * Closes every session on this slot and forgets its pool.
+     * Logs this token out, and closes the slot's sessions unless another token is still logged in
+     * through them — see {@link Pkcs11Module#releaseSlot}.
      *
      * <p>The library stays initialised: see {@link Pkcs11Module} for why finalising it would break
      * other users of the same library in this JVM.

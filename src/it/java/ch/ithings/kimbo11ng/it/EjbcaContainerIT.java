@@ -123,6 +123,27 @@ class EjbcaContainerIT {
         System.out.printf("[it-timing] %-34s %6.1fs%n", name, nanos / 1_000_000_000.0);
     }
 
+    /**
+     * Writes the EJBCA server's output next to the Failsafe reports.
+     *
+     * <p>A failing test sees only what the REST API or the CLI answered; the reason is in the
+     * server log, and the containers are gone by the time a CI step could ask Docker for it. CI
+     * uploads {@code target/failsafe-reports/} when a test fails, so the log travels with the
+     * report. Runs before the Testcontainers extension stops the stack.
+     */
+    @org.junit.jupiter.api.AfterAll
+    static void keepEjbcaLog() {
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of("target", "failsafe-reports");
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve("EjbcaContainerIT-ejbca.log"), ejbcaContainer().getLogs(),
+                StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            // A missing log must not turn a passing run red, nor hide the real failure.
+            System.err.println("Could not save the EJBCA log: " + e);
+        }
+    }
+
     @BeforeAll
     static void setUp() throws Exception {
         Assumptions.assumeTrue(

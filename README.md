@@ -241,6 +241,13 @@ EJBCA_RA_PORT=19443' > .env
 mvn verify -Pit
 ```
 
+### PQC demo
+
+`just demo` seeds the running stack with three hierarchies — hybrid (ECDSA + ML-DSA), composite and
+ML-DSA — serves a hybrid and an ML-DSA web site with the X25519MLKEM768 key exchange, and checks
+every chain against BouncyCastle, OpenSSL and a live TLS connection. [docs/PQC_DEMO.md](docs/PQC_DEMO.md)
+walks through it and says what each result means for a "PQC ready" claim.
+
 ## Version Matrix
 
 All versions are centralized in the `justfile`. Run `just versions` to display:
@@ -460,9 +467,11 @@ kimbo11ng/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
   docker/ejbca-hsm/                  # EJBCA 9.6 overlay: start-up check patcher + restored classic tokens (LGPL, see NOTICE)
+  docker/demo/nginx.conf             # The PQC demo's web server: a hybrid and an ML-DSA site (just demo-web)
   scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
   scripts/upgrade-swap.sh            # An old deployment's database and token, started on a new image
   scripts/hsm-it.sh                  # HsmConformanceIT against the image's SoftHSMv3 (just hsm-it)
+  scripts/demo/                      # PQC demo: seed, check, and the BouncyCastle verifier (docs/PQC_DEMO.md)
   docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)

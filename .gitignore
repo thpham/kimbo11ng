@@ -16,3 +16,6 @@ deps/**
 
 # Local compose overrides, e.g. host port mappings (see docker-compose.yml)
 .env
+
+# PQC demo output (scripts/demo/pqc-seed.sh)
+.demo/

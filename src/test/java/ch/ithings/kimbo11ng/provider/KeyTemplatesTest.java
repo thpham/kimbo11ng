@@ -230,9 +230,19 @@ class KeyTemplatesTest {
             assertBoolean(pair.privateTemplate(), CKA.SIGN, true, "CKA_SIGN");
             assertBoolean(pair.publicTemplate(), CKA.VERIFY, true, "CKA_VERIFY");
             // A PQC signing key that also advertised CKA_DECRYPT would make
-            // BaseCryptoToken.testKeyPair run an RSA-style encryption test against it.
-            assertAbsent(pair.privateTemplate(), CKA.DECRYPT, "CKA_DECRYPT on a signing key");
-            assertAbsent(pair.publicTemplate(), CKA.ENCRYPT, "CKA_ENCRYPT on a signing key");
+            // BaseCryptoToken.testKeyPair run an RSA-style encryption test against it. Denied
+            // explicitly rather than left out: left out, SoftHSMv3 defaults it to true.
+            assertBoolean(pair.privateTemplate(), CKA.DECRYPT, false, "CKA_DECRYPT");
+            assertBoolean(pair.privateTemplate(), CKA.UNWRAP, false, "CKA_UNWRAP");
+            assertBoolean(pair.publicTemplate(), CKA.ENCRYPT, false, "CKA_ENCRYPT");
+            assertBoolean(pair.publicTemplate(), CKA.WRAP, false, "CKA_WRAP");
+            assertBoolean(pair.privateTemplate(), CKA.SIGN_RECOVER, false, "CKA_SIGN_RECOVER");
+            assertBoolean(pair.publicTemplate(), CKA.VERIFY_RECOVER, false, "CKA_VERIFY_RECOVER");
+            // And the switch that turns the denials off leaves the attributes to the token again.
+            KeyTemplates.Pair lenient = pair.withoutDenials();
+            assertAbsent(lenient.privateTemplate(), CKA.DECRYPT, "CKA_DECRYPT without denials");
+            assertAbsent(lenient.publicTemplate(), CKA.ENCRYPT, "CKA_ENCRYPT without denials");
+            assertBoolean(lenient.privateTemplate(), CKA.SIGN, true, "CKA_SIGN without denials");
         }
 
         @ParameterizedTest

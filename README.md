@@ -241,6 +241,13 @@ EJBCA_RA_PORT=19443' > .env
 mvn verify -Pit
 ```
 
+### PQC demo
+
+`just demo` seeds the running stack with three hierarchies — hybrid (ECDSA + ML-DSA), composite and
+ML-DSA — serves a hybrid and an ML-DSA web site with the X25519MLKEM768 key exchange, and checks
+every chain against BouncyCastle, OpenSSL and a live TLS connection. [docs/PQC_DEMO.md](docs/PQC_DEMO.md)
+walks through it and says what each result means for a "PQC ready" claim.
+
 ## Version Matrix
 
 All versions are centralized in the `justfile`. Run `just versions` to display:
@@ -372,7 +379,7 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 932 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 938 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 30 EJBCA + 27 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
@@ -409,6 +416,14 @@ Beyond the standard EJBCA token properties (`sharedLibrary`, `slotLabelValue`, `
 | `kimbo11ng.keyid.backfill`             | true    | Write a `CKA_ID` onto legacy keys that have none                    |
 | `kimbo11ng.strict.publickey`           | false   | Make an OID disagreement fatal when enumerating existing keys       |
 | `kimbo11ng.pqc.kemUsage`               | both    | ML-KEM usage attributes: `both`, `v32` only, or `legacy` only        |
+| `kimbo11ng.keygen.restrictUsages`      | true    | Generate signing-only keys with encryption, wrapping and recovery explicitly off |
+
+`kimbo11ng.keygen.restrictUsages` exists because PKCS#11 leaves the default of a usage attribute
+the template omits to the token. SoftHSMv3 turns them all on, so an EC, Edwards, ML-DSA or SLH-DSA
+key also came back `CKA_DECRYPT`, `CKA_UNWRAP` and `CKA_SIGN_RECOVER`, and EJBCA showed it as
+SIGN_ENCRYPT. These keys are now generated with those attributes set to false. RSA and ML-KEM keys
+are unchanged. Keys generated earlier keep the attributes they were created with. Set the property
+to `false` for an HSM whose policy refuses the explicit values.
 
 `kimbo11ng.pqc.kemUsage` is worth a word, because the default sends two pairs and that looks like
 indecision until you see who reads them.
@@ -452,9 +467,11 @@ kimbo11ng/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)
   docker/                            # Dockerfile, softhsmv3 config, optional Luna discovery
   docker/ejbca-hsm/                  # EJBCA 9.6 overlay: start-up check patcher + restored classic tokens (LGPL, see NOTICE)
+  docker/demo/nginx.conf             # The PQC demo's web server: a hybrid and an ML-DSA site (just demo-web)
   scripts/api-diff.sh                # EJBCA API-surface diff between two releases, run on a version bump
   scripts/upgrade-swap.sh            # An old deployment's database and token, started on a new image
   scripts/hsm-it.sh                  # HsmConformanceIT against the image's SoftHSMv3 (just hsm-it)
+  scripts/demo/                      # PQC demo: seed, check, and the BouncyCastle verifier (docs/PQC_DEMO.md)
   docs/                              # Design notes; EJBCA_UPSTREAM_WATCH.md tracks upstream behaviour
   docker-compose.luna.yml            # Overlay for a side-mounted Thales Luna client (optional)
   deps/ejbca/                        # Extracted EJBCA JARs (gitignored)

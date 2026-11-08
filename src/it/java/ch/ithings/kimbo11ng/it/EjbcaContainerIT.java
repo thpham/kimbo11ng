@@ -401,11 +401,11 @@ class EjbcaContainerIT {
     /**
      * Create a Hybrid Root CA (RSA-2048 primary + ML-DSA-65 alternative signature).
      *
-     * The EJBCA CLI does not expose alternativeSignatureAlgorithm, so we:
-     *   1. Init the CA with RSA primary
-     *   2. Patch the CAData XML in PostgreSQL to inject alternativeSignatureAlgorithm
-     *   3. Restart EJBCA to pick up the change
-     *   4. Renew the CA cert so the alternative signature extension is present
+     * <p>Through EJBCA's own CLI: 9.6.3's {@code ca init} takes {@code --altsigalg}, and the
+     * alternative key comes from {@code alternativeCertSignKey} in the token properties. An earlier
+     * version patched CAData in PostgreSQL and restarted EJBCA instead, on the belief that the CLI
+     * could not do this. The CA certificate that produced carried an alternative signature but no
+     * SubjectAltPublicKeyInfo, so no relying party could verify the post-quantum half.
      */
     static void createHybridRootCa() throws Exception {
         ContainerState ejbca = ejbcaContainer();
@@ -427,57 +427,10 @@ class EjbcaContainerIT {
             "--tokenName", "TestHSM",
             "--tokenPass", "1234",
             "--tokenprop", "/tmp/it-hybrid-token.properties",
-            "--keyspec", "2048",
-            "--keytype", "RSA",
             "-v", "3650",
             "--policy", "null",
-            "-s", "SHA256WithRSA");
-
-        // Patch CAData XML to inject alternativeSignatureAlgorithm (CLI does not expose this).
-        // The replacement uses literal \n to match the XMLEncoder-serialized data in the DB.
-        ContainerState pg = COMPOSE.getContainerByServiceName("postgres-1").orElseThrow(
-            () -> new IllegalStateException("postgres-1 container not found"));
-        String newFrag =
-            "<string>alternativeSignatureAlgorithm</string>\\n    " +
-            "<string>ML-DSA-65</string>\\n   " +
-            "</void>\\n   " +
-            "<void method=\"put\">\\n    " +
-            "<string>encryptionalgorithm</string>";
-        // E'...' tells PostgreSQL to interpret \n as actual newlines (0x0A).
-        // The CAData XML uses actual newlines; literal \n would corrupt the XML.
-        org.testcontainers.containers.Container.ExecResult patchResult =
-            pg.execInContainer("psql", "-U", "ejbca", "-d", "ejbca", "-c",
-                "UPDATE CAData SET data = replace(data," +
-                " '<string>encryptionalgorithm</string>'," +
-                " E'" + newFrag + "')" +
-                " WHERE name='Hybrid-RootCA'" +
-                " AND data NOT LIKE '%alternativeSignatureAlgorithm%';");
-        if (patchResult.getExitCode() != 0) {
-            throw new IllegalStateException(
-                "Hybrid CA patch failed: " + patchResult.getStderr());
-        }
-
-        // Also inject alternativeCertSignKey into CAToken propertydata.
-        // ca init ignores alternativeCertSignKey in --tokenprop; must be added manually.
-        // The propertydata format: entries separated by \n, no leading spaces,
-        // closing </string> immediately follows the last \n (no space before it).
-        org.testcontainers.containers.Container.ExecResult patchKey =
-            pg.execInContainer("psql", "-U", "ejbca", "-d", "ejbca", "-c",
-                "UPDATE CAData SET data = replace(data," +
-                " E'defaultKey=it-hybridRSA\\n</string>'," +
-                " E'defaultKey=it-hybridRSA\\nalternativeCertSignKey=it-hybridMLDSA\\n</string>')" +
-                " WHERE name='Hybrid-RootCA'" +
-                " AND data NOT LIKE '%alternativeCertSignKey%';");
-        if (patchKey.getExitCode() != 0) {
-            throw new IllegalStateException(
-                "Hybrid CA key patch failed: " + patchKey.getStderr());
-        }
-
-        // Restart EJBCA to pick up the alternativeSignatureAlgorithm DB patch.
-        // Note: ca renewca is intentionally omitted — it disconnects the CA token
-        // from TestHSM and leaves the CA offline. The patched data map takes effect
-        // on restart; EJBCA will include the alternative sig in issued EE certs.
-        restartEjbcaAndWait();
+            "-s", "SHA256WithRSA",
+            "--altsigalg", "ML-DSA-65");
     }
 
     /**
@@ -737,6 +690,26 @@ class EjbcaContainerIT {
         // SHA256WithRSA OID = 1.2.840.113549.1.1.11
         assertEquals("1.2.840.113549.1.1.11", cert.getSigAlgOID(),
             "Certificate must be signed with SHA256WithRSA (primary). sigAlgOID=" + cert.getSigAlgOID());
+
+        // The ML-DSA half is the point of a hybrid CA, and the primary check above says nothing
+        // about it. A relying party verifies it with the alternative key the CA certificate
+        // publishes in SubjectAltPublicKeyInfo; a CA certificate without one leaves the
+        // post-quantum signature unverifiable by anybody.
+        ensureBouncyCastle();
+        org.bouncycastle.cert.X509CertificateHolder ca =
+            new org.bouncycastle.cert.X509CertificateHolder(caCertificate("Hybrid-RootCA").getEncoded());
+        org.bouncycastle.asn1.x509.Extension altKey =
+            ca.getExtension(org.bouncycastle.asn1.x509.Extension.subjectAltPublicKeyInfo);
+        assertNotNull(altKey, "the hybrid CA certificate publishes no alternative public key");
+        java.security.PublicKey mlDsa = new org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter()
+            .setProvider("BC").getPublicKey(org.bouncycastle.asn1.x509.SubjectPublicKeyInfo.getInstance(
+                org.bouncycastle.asn1.x509.SubjectAltPublicKeyInfo.getInstance(altKey.getParsedValue())
+                    .toASN1Primitive()));
+        assertTrue(new org.bouncycastle.cert.X509CertificateHolder(cert.getEncoded())
+                .isAlternativeSignatureValid(
+                    new org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder()
+                        .setProvider("BC").build(mlDsa)),
+            "the certificate's ML-DSA alternative signature does not verify");
     }
 
     @Test @Order(19)

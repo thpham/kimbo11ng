@@ -239,9 +239,30 @@ up:
     @docker compose exec ejbca sh -c 'until curl -sk https://localhost:8443/ejbca/publicweb/healthcheck/ejbcahealth > /dev/null 2>&1; do sleep 5; done' || true
     @echo "EJBCA is ready."
 
-# Stop all services
+# Stop all services, the PQC demo's web server included
 down:
-    docker compose down
+    docker compose --profile demo down
+
+# ─── PQC demo ────────────────────────────────────────────────────────────────
+# What works with post-quantum certificates in November 2026, on the running dev stack. See
+# docs/PQC_DEMO.md for the walk-through.
+
+# Seed three hierarchies (hybrid, composite, ML-DSA) on TestHSM; safe to re-run
+demo-seed:
+    {{module_dir}}/scripts/demo/pqc-seed.sh
+
+# Serve the hybrid and the ML-DSA web certificates, both with X25519MLKEM768
+demo-web:
+    docker compose --profile demo up -d --force-recreate pqc-web
+    @echo "hybrid site: https://localhost:${PQC_DEMO_HTTPS_PORT:-8444}/  (trust .demo/pqc/hybrid-root.pem first)"
+    @echo "ML-DSA site: https://localhost:${PQC_DEMO_MLDSA_PORT:-8445}/  (curl --cacert .demo/pqc/mldsa-root.pem)"
+
+# Verify every chain with BouncyCastle, OpenSSL and a live TLS connection
+demo-check:
+    {{module_dir}}/scripts/demo/pqc-check.sh
+
+# The whole demo: seed, serve, check
+demo: demo-seed demo-web demo-check
 
 # ─── Thales Luna (optional) ──────────────────────────────────────────────────
 

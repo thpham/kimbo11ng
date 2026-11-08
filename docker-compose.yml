@@ -52,6 +52,18 @@ services:
       retries: 20
       start_period: 120s
 
+  # The PQC demo's web server; off unless asked for: docker compose --profile demo up -d pqc-web
+  # (just demo-web). It serves what scripts/demo/pqc-seed.sh exported into .demo/pqc.
+  pqc-web:
+    image: nginx:1.31-alpine    # built with OpenSSL 3.5, which X25519MLKEM768 needs
+    profiles: ["demo"]
+    ports:
+      - "${PQC_DEMO_HTTPS_PORT:-8444}:443"        # hybrid chain
+      - "${PQC_DEMO_MLDSA_PORT:-8445}:444"        # ML-DSA chain
+    volumes:
+      - ./.demo/pqc:/demo:ro
+      - ./docker/demo/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
 volumes:
   postgres-data:
   softhsm-tokens:

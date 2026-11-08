@@ -362,6 +362,26 @@ public abstract class HsmContract {
     }
 
     /**
+     * A key that can only sign says so to EJBCA. The token decides the default of a usage
+     * attribute a template leaves out, and SoftHSMv3 sets {@code CKA_DECRYPT} and
+     * {@code CKA_UNWRAP}: EJBCA then showed every EC, Edwards and ML-DSA key as SIGN_ENCRYPT.
+     */
+    @ParameterizedTest
+    @CsvSource({"secp256r1, SHA256withECDSA", "Ed25519, Ed25519", "ML-DSA-65, ML-DSA-65"})
+    @DisplayName("generates a signing key that reports signing and nothing else")
+    void signingKeyReportsSignOnly(String keySpec, String jcaName) throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", jcaName) != null,
+                "the token does not offer " + jcaName);
+        String alias = alias("signonly-" + keySpec);
+        impl.generateKeyPair(keySpec, alias);
+
+        assertEquals(java.util.Set.of(org.pkcs11.jacknji11.CKA.SIGN),
+                impl.getKeyUsagesFromKey(alias, true), keySpec + " private key usages");
+        assertEquals(java.util.Set.of(org.pkcs11.jacknji11.CKA.VERIFY),
+                impl.getKeyUsagesFromKey(alias, false), keySpec + " public key usages");
+    }
+
+    /**
      * A second crypto token on the same slot, activated and then deactivated, leaves this one
      * logged in. PKCS#11 login belongs to the application and the slot, so a token that sent
      * {@code C_Logout} for itself logged out every other token on the slot too — on real hardware

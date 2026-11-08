@@ -127,16 +127,29 @@ just cli-token capabilities --slot-ref SLOT_LABEL --slot TestToken
 | --- | --- |
 | `listslots`, `showinfo`, `showslotinfo`, `showtokeninfo` | does the library load, does the slot exist, is the PIN locked — none of which needs a credential |
 | `capabilities` | which algorithms this token can actually do, and the profile kimbo11ng resolves for it |
-| `listkeypairs` | the alias list EJBCA will show, built by the key store the CA reads |
+| `listkeypairs` | the alias list EJBCA will show, built by the key store the CA reads, and the composite keys EJBCA will make of `-COMPQ`/`-COMPC` halves |
 | `listobjects`, `showobjectattributes` | the raw PKCS#11 objects behind those aliases, with `CKA_SENSITIVE` and `CKA_EXTRACTABLE` |
-| `generatekeypair`, `generatekey`, `deleteobject` | the key lifecycle, post-quantum included |
-| `testkeypair` | sign and verify once, the check `HsmKeepAliveWorker` runs on a schedule |
+| `generatekeypair`, `generatekey`, `deleteobject` | the key lifecycle, post-quantum and composite included |
+| `testkeypair` | sign and verify once, the check `HsmKeepAliveWorker` runs on a schedule; on a composite, which half failed and why |
 | `signperformancetest` | throughput and per-signature latency |
 
 `capabilities` is the one with no Enterprise counterpart. The verdict it prints — *"Effective
 algorithms for profile 'pkcs11v32' (18/18 usable)"* — is today only readable in the WildFly log,
 after the crypto token has been created and EJBCA has already tried to use it. As a command it is a
 pre-flight check that needs no PIN.
+
+Composite keys follow EJBCA's naming: `generatekeypair --alias <name>-COMPOSITE --key-spec
+MLDSA44-RSA2048-PSS-SHA256` makes `<name>-COMPQ` and `<name>-COMPC`, which EJBCA then shows as one
+`<name>-COMPOSITE` key, and removes the first half again if the second cannot be made. Which
+composites exist and which the token can sign come from the provider, so the CLI cannot offer one
+the CA could not use. `testkeypair --alias <name>-COMPOSITE` is the hardware check for composites
+in one command: when the signature fails it signs each half on its own and reports whether the
+token rejects the ML-DSA context string, ignores it, or fails on the classical half.
+
+```bash
+kimbo11ng-cli generatekeypair --alias ca-COMPOSITE --key-spec MLDSA44-RSA2048-PSS-SHA256
+kimbo11ng-cli testkeypair --alias ca-COMPOSITE
+```
 
 `signperformancetest` earns its place on SLH-DSA, where the figure is not published by anyone and
 is what decides whether an HSM can serve a CA at a given issuance rate. Measured on the SoftHSMv3 in
@@ -343,8 +356,9 @@ from an empty database: it starts the new image on an old deployment's database 
 only if the CA signs again with the same keys.
 
 **CLI integration tests** (`CliContainerIT`) run the tool from `PATH` inside the same image, against
-real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA and a symmetric key, each generated, signed with,
-inspected and deleted. The container is started with `sleep infinity` and no application server ever
+real SoftHSMv3 — RSA, RSA-PSS, EC, ML-DSA, SLH-DSA, a composite `MLDSA44-RSA2048-PSS-SHA256` and
+a symmetric key, each generated, signed with, inspected and deleted. The container is started with
+`sleep infinity` and no application server ever
 boots, which is the assertion rather than an optimisation: the tool's claim is that it answers
 "does this HSM work" before EJBCA is in the picture. It costs seconds rather than the minutes a full
 stack takes, and it is the only place three things are covered — the launcher finding its classpath,
@@ -353,8 +367,8 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 859 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 29 EJBCA + 23 CLI integration tests (~5 min)
+mvn verify               # 910 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 29 EJBCA + 25 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100

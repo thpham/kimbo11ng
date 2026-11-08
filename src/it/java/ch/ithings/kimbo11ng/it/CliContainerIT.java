@@ -454,4 +454,68 @@ class CliContainerIT {
             assertFalse(out.contains(alias), out);
         }
     }
+
+    /**
+     * A composite key's whole life, on a real token: generated as EJBCA's two halves, listed as
+     * the one key EJBCA will show, signed with — both halves on SoftHSMv3, the ML-DSA half with
+     * its context string — and deleted.
+     *
+     * <p>The test the issue #12 reporter can run against a Thales Luna with the same commands:
+     * the context string is the one thing about composites the in-memory token can only assume.
+     */
+    @Test
+    @Order(30)
+    @DisplayName("a composite key generates, lists, signs and deletes on a real token")
+    void compositeKeyLifecycle() throws Exception {
+        String generated = ok(onToken("generatekeypair", "--alias", "itcomp-COMPOSITE",
+                "--key-spec", "MLDSA44-RSA2048-PSS-SHA256"));
+        assertTrue(generated.contains("Generated composite key pair itcomp-COMPOSITE"), generated);
+
+        String listed = ok(onToken("listkeypairs"));
+        assertTrue(listed.contains("Composite keys EJBCA will show"), listed);
+        assertTrue(listed.contains("itcomp-COMPOSITE  MLDSA44-RSA2048-PSS-SHA256"), listed);
+
+        String tested = ok(onToken("testkeypair", "--alias", "itcomp-COMPOSITE"));
+        assertTrue(tested.contains("signed and verified with MLDSA44-RSA2048-PSS-SHA256"), tested);
+
+        // The halves are ordinary objects to the raw commands, and have to read as such.
+        String objects = ok(onToken("listobjects"));
+        assertTrue(objects.contains("itcomp-COMPQ") && objects.contains("itcomp-COMPC"), objects);
+        String pq = ok(onToken("showobjectattributes", "--alias", "itcomp-COMPQ"));
+        assertTrue(pq.contains("Objects labelled 'itcomp-COMPQ': 2"), pq);
+        assertTrue(pq.contains("ML_DSA"), pq);
+        String classical = ok(onToken("showobjectattributes", "--alias", "itcomp-COMPC"));
+        assertTrue(classical.contains("Objects labelled 'itcomp-COMPC': 2"), classical);
+        assertTrue(classical.contains("RSA"), classical);
+
+        ok(onToken("deleteobject", "--alias", "itcomp-COMPQ"));
+        ok(onToken("deleteobject", "--alias", "itcomp-COMPC"));
+        String after = ok(onToken("listkeypairs"));
+        assertFalse(after.contains("itcomp-"), after);
+    }
+
+    /**
+     * SLH-DSA through every command that lists or inspects, on a real token. The in-memory token
+     * signs SLH-DSA synthetically, so this is where a real SLH-DSA key meets the CLI at all.
+     */
+    @Test
+    @Order(31)
+    @DisplayName("an SLH-DSA key lists, inspects, signs and deletes on a real token")
+    void slhDsaKeyLifecycle() throws Exception {
+        ok(onToken("generatekeypair", "--alias", "itslh", "--key-spec", "SLH-DSA-SHA2-128F"));
+
+        String listed = ok(onToken("listkeypairs"));
+        assertTrue(listed.contains("itslh") && listed.contains("SLH-DSA-SHA2-128F"), listed);
+        String objects = ok(onToken("listobjects"));
+        assertTrue(objects.contains("itslh"), objects);
+        String attributes = ok(onToken("showobjectattributes", "--alias", "itslh"));
+        assertTrue(attributes.contains("Objects labelled 'itslh': 2"), attributes);
+        assertTrue(attributes.contains("SLH_DSA"), attributes);
+
+        String tested = ok(onToken("testkeypair", "--alias", "itslh"));
+        assertTrue(tested.contains("signed and verified with SLH-DSA-SHA2-128F"), tested);
+
+        ok(onToken("deleteobject", "--alias", "itslh"));
+        assertFalse(ok(onToken("listkeypairs")).contains("itslh"));
+    }
 }

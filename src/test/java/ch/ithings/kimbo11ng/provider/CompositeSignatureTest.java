@@ -109,6 +109,16 @@ class CompositeSignatureTest {
         fixture.close();
     }
 
+    /** Re-opens the slot on {@code token}, with the capability probe honoured, not assumed. */
+    private void reopenProbed(FakeToken token) throws Exception {
+        fixture.close();
+        fake = token;
+        fixture = new TestSlot(fake).loggedIn();
+        provider = Kimbo11ngProvider.forToken(new TokenRuntime(fixture.slot(),
+                AlgorithmSupport.compute(profile, fixture.slot().capabilities(), true),
+                true, PublicKeyReader.Policy.LENIENT));
+    }
+
     // ---------------------------------------------------------------- key helpers
 
     private long[] generate(KeyTemplates.Pair templates, long mechanism) throws Exception {
@@ -272,6 +282,43 @@ class CompositeSignatureTest {
             signer.sign();
 
             assertEquals(Pkcs11v32.CKH_HEDGE_PREFERRED, fake.lastSignHedge());
+        }
+
+        @Test
+        @DisplayName("the fake can drop the context, as a token that ignores it would")
+        void fakeCanIgnoreTheContext() throws Exception {
+            reopenProbed(new FakeToken().ignoreSignContext());
+            KeyPair pair = mlDsa("ML-DSA-44");
+            ContextParameterSpec context =
+                    new ContextParameterSpec("ignored".getBytes(StandardCharsets.US_ASCII));
+
+            Signature signer = Signature.getInstance("ML-DSA-44", provider);
+            signer.initSign(pair.getPrivate());
+            signer.setParameter(context);
+            signer.update(MESSAGE);
+            byte[] signature = signer.sign();
+
+            assertTrue(verifiesWithBc("ML-DSA", pair.getPublic(), signature, null));
+            assertFalse(verifiesWithBc("ML-DSA", pair.getPublic(), signature, context));
+        }
+
+        @Test
+        @DisplayName("the fake can refuse the context, as a token without it would")
+        void fakeCanRejectTheContext() throws Exception {
+            reopenProbed(new FakeToken().rejectSignContext());
+            KeyPair pair = mlDsa("ML-DSA-44");
+
+            Signature withContext = Signature.getInstance("ML-DSA-44", provider);
+            withContext.initSign(pair.getPrivate());
+            withContext.setParameter(new ContextParameterSpec(new byte[] {1}));
+            withContext.update(MESSAGE);
+            assertThrows(SignatureException.class, withContext::sign);
+
+            Signature plain = Signature.getInstance("ML-DSA-44", provider);
+            plain.initSign(pair.getPrivate());
+            plain.update(MESSAGE);
+            assertTrue(verifiesWithBc("ML-DSA", pair.getPublic(), plain.sign(), null),
+                    "plain ML-DSA sends no parameter, so it must still sign");
         }
 
         @Test
@@ -530,16 +577,6 @@ class CompositeSignatureTest {
             KeyTools.testKey(pair.getPrivate(), pair.getPublic(), provider.getName());
         }
 
-        /** Re-opens the slot on {@code token}, with the capability probe honoured, not assumed. */
-        private void reopenProbed(FakeToken token) throws Exception {
-            fixture.close();
-            fake = token;
-            fixture = new TestSlot(fake).loggedIn();
-            provider = Kimbo11ngProvider.forToken(new TokenRuntime(fixture.slot(),
-                    AlgorithmSupport.compute(profile, fixture.slot().capabilities(), true),
-                    true, PublicKeyReader.Policy.LENIENT));
-        }
-
         @Test
         @DisplayName("is not offered when the token cannot sign the classical half")
         void gatedOnComponents() throws Exception {
@@ -666,6 +703,85 @@ class CompositeSignatureTest {
                     "BouncyCastle's PKCS#1 v1.5 composites changed; review the exclusion");
             for (String name : pkcs15) {
                 assertNull(provider.getService("Signature", name), name + " is offered");
+            }
+        }
+
+        // ------------------------------------------------ the table, as the CLI reads it
+
+        private Set<String> namesOf(List<Kimbo11ngProvider.CompositeAlgorithm> rows) {
+            return rows.stream().map(Kimbo11ngProvider.CompositeAlgorithm::name)
+                    .collect(Collectors.toCollection(TreeSet::new));
+        }
+
+        private Kimbo11ngProvider.CompositeAlgorithm row(String name) {
+            return provider.compositeAlgorithms().stream().filter(r -> r.name().equals(name))
+                    .findFirst().orElseThrow(() -> new AssertionError("no row " + name));
+        }
+
+        @Test
+        @DisplayName("exposes every composite it offers, each marked as offered")
+        void tableListsEveryOfferedComposite() {
+            List<Kimbo11ngProvider.CompositeAlgorithm> rows = provider.compositeAlgorithms();
+            assertEquals(15, rows.size());
+            assertEquals(offeredComposites(), namesOf(rows));
+            assertTrue(rows.stream().allMatch(Kimbo11ngProvider.CompositeAlgorithm::offered));
+        }
+
+        @Test
+        @DisplayName("keeps the rows a token cannot sign, marked as not offered")
+        void tableKeepsRowsTheTokenCannotSign() throws Exception {
+            reopenProbed(new FakeToken().hideMechanism(CKM.SHA256_RSA_PKCS_PSS,
+                    CKM.SHA384_RSA_PKCS_PSS, CKM.SHA512_RSA_PKCS_PSS));
+
+            assertEquals(15, provider.compositeAlgorithms().size(),
+                    "a row the token cannot sign is still a defined composite");
+            assertFalse(row("MLDSA44-RSA2048-PSS-SHA256").offered());
+            assertTrue(row("MLDSA44-ECDSA-P256-SHA256").offered());
+        }
+
+        @Test
+        @DisplayName("names the key specs of both halves the way BouncyCastle generates them")
+        void tableKeySpecsMatchBouncyCastle() throws Exception {
+            java.lang.reflect.Method keyPairSpecs = CompositeIndex.class
+                    .getDeclaredMethod("getKeyPairSpecs", ASN1ObjectIdentifier.class);
+            keyPairSpecs.setAccessible(true);
+            java.util.Map<String, String> curves = java.util.Map.of(
+                    "P-256", "secp256r1", "P-384", "secp384r1", "P-521", "secp521r1");
+
+            for (Kimbo11ngProvider.CompositeAlgorithm r : provider.compositeAlgorithms()) {
+                ASN1ObjectIdentifier oid = oidOf(r.name());
+                assertEquals(oid.getId(), r.oid(), r.name());
+                assertEquals(Kimbo11ngProvider.compositeHalves(r.name()).get(0), r.mlDsaKeySpec(),
+                        r.name());
+                assertEquals(Kimbo11ngProvider.compositeHalves(r.name()).get(1),
+                        r.classicalSignature(), r.name());
+
+                Object classical = ((Object[]) keyPairSpecs.invoke(null, oid))[1];
+                if (classical instanceof java.security.spec.RSAKeyGenParameterSpec rsa) {
+                    assertEquals(String.valueOf(rsa.getKeysize()), r.classicalKeySpec(), r.name());
+                } else if (classical != null) {
+                    String curve = (String) classical.getClass().getMethod("getName")
+                            .invoke(classical);
+                    assertEquals(curves.getOrDefault(curve, curve), r.classicalKeySpec(),
+                            r.name());
+                } else {
+                    // BC leaves the Edwards spec null; the curve is in the name.
+                    assertTrue(Set.of("Ed25519", "Ed448").contains(r.classicalKeySpec()),
+                            r.name());
+                    assertTrue(r.name().contains("-" + r.classicalKeySpec() + "-"), r.name());
+                }
+            }
+        }
+
+        @Test
+        @DisplayName("names the RSA PKCS#1 v1.5 composites as excluded, with the reason")
+        void excludedAreThePkcs15Three() {
+            java.util.Map<String, String> excluded = Kimbo11ngProvider.excludedComposites();
+            assertEquals(Set.of("MLDSA44-RSA2048-PKCS15-SHA256", "MLDSA65-RSA3072-PKCS15-SHA512",
+                    "MLDSA65-RSA4096-PKCS15-SHA512"), excluded.keySet());
+            for (String name : excluded.keySet()) {
+                assertFalse(namesOf(provider.compositeAlgorithms()).contains(name), name);
+                assertTrue(excluded.get(name).contains("PKCS#1 v1.5"), excluded.get(name));
             }
         }
     }

@@ -147,6 +147,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Map<Long, Long> mechanismFlags = new HashMap<>();
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
+    private boolean ignoreSignContext;
+    private boolean rejectSignContext;
     private PqcMechanismProfile profile;
     /** What this token says its session ceiling is, for C_GetTokenInfo. */
     private static final long MAX_SESSIONS = 64;
@@ -168,6 +170,26 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     // ---------------------------------------------------------------- knobs
+
+    /**
+     * Accept an ML-DSA {@code CK_SIGN_ADDITIONAL_CONTEXT} and sign with the empty context anyway —
+     * the token a composite signature fails on silently: the right length, the right OID, and an
+     * ML-DSA half that verifies under no context but the one nobody asked for.
+     */
+    public FakeToken ignoreSignContext() {
+        ignoreSignContext = true;
+        return this;
+    }
+
+    /**
+     * Refuse an ML-DSA {@code C_SignInit} that carries a {@code CK_SIGN_ADDITIONAL_CONTEXT}, with
+     * {@code CKR_MECHANISM_PARAM_INVALID}, as a token without context support does. Plain ML-DSA,
+     * which sends no parameter, still signs.
+     */
+    public FakeToken rejectSignContext() {
+        rejectSignContext = true;
+        return this;
+    }
 
     /** Report {@code CKA_EC_POINT} raw instead of DER-wrapped, as several HSMs do. */
     public FakeToken ecPointEncoding(EcPointEncoding encoding) {
@@ -1389,11 +1411,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
         }
         byte[] context = null;
         if (mechanism.mechanism == CKM_ML_DSA && parameter != null) {
+            if (rejectSignContext) {
+                return CKR.MECHANISM_PARAM_INVALID;
+            }
             context = signAdditionalContext(mechanism);
             if (context == null) {
                 return CKR.MECHANISM_PARAM_INVALID;
             }
             lastSignHedge = mechanism.pParameter.getNativeLong(0).longValue();
+            if (ignoreSignContext) {
+                context = null;
+            }
         }
         s.signKey = key;
         s.signMechanism = mechanism.mechanism;

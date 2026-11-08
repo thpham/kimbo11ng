@@ -12,8 +12,11 @@ import org.apache.log4j.Logger;
 import org.pkcs11.jacknji11.CKM;
 
 import java.security.Provider;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -150,8 +153,47 @@ public final class Kimbo11ngProvider extends Provider {
      *                  hash BouncyCastle's {@code PSSParameterSpec} for the row names — BC itself asks
      *                  for {@code RSASSA-PSS}, which is offered whenever any PSS mechanism is, and so
      *                  says nothing about whether this hash is there.
+     * @param classicalKeySpec the classical half's key, in the spelling
+     *                  {@code CryptoTokenImpl.generateKeyPair} takes: an RSA size, a curve name, or
+     *                  {@code Ed25519}/{@code Ed448}
      */
-    private record CompositeSignature(String name, String oid, String mlDsa, String classical) {
+    private record CompositeSignature(String name, String oid, String mlDsa, String classical,
+            String classicalKeySpec) {
+    }
+
+    /**
+     * One composite this provider knows, as a tool outside EJBCA needs to see it: what the two
+     * halves are, and whether this token can sign it.
+     *
+     * <p>The command-line tool generates, tests and lists composite keys from this and from
+     * nothing else, so it cannot disagree with what the provider registers.
+     *
+     * @param name               the JCA name, e.g. {@code MLDSA44-RSA2048-PSS-SHA256}
+     * @param oid                its OID, dotted
+     * @param mlDsaKeySpec       the post-quantum half's key spec, e.g. {@code ML-DSA-44}
+     * @param classicalKeySpec   the classical half's key spec: an RSA size, a curve name, or
+     *                           {@code Ed25519}/{@code Ed448}
+     * @param classicalSignature the service the classical half is signed with on its own
+     * @param offered            whether this provider registers the composite for this token
+     */
+    public record CompositeAlgorithm(String name, String oid, String mlDsaKeySpec,
+            String classicalKeySpec, String classicalSignature, boolean offered) {
+    }
+
+    /**
+     * The composites BouncyCastle implements that this provider deliberately never offers, with why.
+     * The pre-hash forms are not listed: they are a different signature, not a refused choice.
+     */
+    private static final Map<String, String> EXCLUDED_COMPOSITES = excluded();
+
+    private static Map<String, String> excluded() {
+        String reason = "EJBCA does not support the legacy PKCS#1 v1.5 signature scheme with"
+                + " composite keys; an RSA classical half always signs with PSS";
+        Map<String, String> map = new LinkedHashMap<>();
+        map.put("MLDSA44-RSA2048-PKCS15-SHA256", reason);
+        map.put("MLDSA65-RSA3072-PKCS15-SHA512", reason);
+        map.put("MLDSA65-RSA4096-PKCS15-SHA512", reason);
+        return Collections.unmodifiableMap(map);
     }
 
     /**
@@ -171,35 +213,35 @@ public final class Kimbo11ngProvider extends Provider {
      */
     private static final List<CompositeSignature> COMPOSITE_SIGNATURES = List.of(
             new CompositeSignature("MLDSA44-RSA2048-PSS-SHA256", "1.3.6.1.5.5.7.6.37",
-                    "ML-DSA-44", "SHA256withRSAandMGF1"),
+                    "ML-DSA-44", "SHA256withRSAandMGF1", "2048"),
             new CompositeSignature("MLDSA44-Ed25519-SHA512", "1.3.6.1.5.5.7.6.39",
-                    "ML-DSA-44", "Ed25519"),
+                    "ML-DSA-44", "Ed25519", "Ed25519"),
             new CompositeSignature("MLDSA44-ECDSA-P256-SHA256", "1.3.6.1.5.5.7.6.40",
-                    "ML-DSA-44", "SHA256withECDSA"),
+                    "ML-DSA-44", "SHA256withECDSA", "secp256r1"),
             new CompositeSignature("MLDSA65-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.41",
-                    "ML-DSA-65", "SHA256withRSAandMGF1"),
+                    "ML-DSA-65", "SHA256withRSAandMGF1", "3072"),
             new CompositeSignature("MLDSA65-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.43",
-                    "ML-DSA-65", "SHA384withRSAandMGF1"),
+                    "ML-DSA-65", "SHA384withRSAandMGF1", "4096"),
             new CompositeSignature("MLDSA65-ECDSA-P256-SHA512", "1.3.6.1.5.5.7.6.45",
-                    "ML-DSA-65", "SHA256withECDSA"),
+                    "ML-DSA-65", "SHA256withECDSA", "secp256r1"),
             new CompositeSignature("MLDSA65-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.46",
-                    "ML-DSA-65", "SHA384withECDSA"),
+                    "ML-DSA-65", "SHA384withECDSA", "secp384r1"),
             new CompositeSignature("MLDSA65-ECDSA-brainpoolP256r1-SHA512", "1.3.6.1.5.5.7.6.47",
-                    "ML-DSA-65", "SHA256withECDSA"),
+                    "ML-DSA-65", "SHA256withECDSA", "brainpoolP256r1"),
             new CompositeSignature("MLDSA65-Ed25519-SHA512", "1.3.6.1.5.5.7.6.48",
-                    "ML-DSA-65", "Ed25519"),
+                    "ML-DSA-65", "Ed25519", "Ed25519"),
             new CompositeSignature("MLDSA87-ECDSA-P384-SHA512", "1.3.6.1.5.5.7.6.49",
-                    "ML-DSA-87", "SHA384withECDSA"),
+                    "ML-DSA-87", "SHA384withECDSA", "secp384r1"),
             new CompositeSignature("MLDSA87-ECDSA-brainpoolP384r1-SHA512", "1.3.6.1.5.5.7.6.50",
-                    "ML-DSA-87", "SHA384withECDSA"),
+                    "ML-DSA-87", "SHA384withECDSA", "brainpoolP384r1"),
             new CompositeSignature("MLDSA87-Ed448-SHAKE256", "1.3.6.1.5.5.7.6.51",
-                    "ML-DSA-87", "Ed448"),
+                    "ML-DSA-87", "Ed448", "Ed448"),
             new CompositeSignature("MLDSA87-RSA3072-PSS-SHA512", "1.3.6.1.5.5.7.6.52",
-                    "ML-DSA-87", "SHA256withRSAandMGF1"),
+                    "ML-DSA-87", "SHA256withRSAandMGF1", "3072"),
             new CompositeSignature("MLDSA87-RSA4096-PSS-SHA512", "1.3.6.1.5.5.7.6.53",
-                    "ML-DSA-87", "SHA384withRSAandMGF1"),
+                    "ML-DSA-87", "SHA384withRSAandMGF1", "4096"),
             new CompositeSignature("MLDSA87-ECDSA-P521-SHA512", "1.3.6.1.5.5.7.6.54",
-                    "ML-DSA-87", "SHA512withECDSA"));
+                    "ML-DSA-87", "SHA512withECDSA", "secp521r1"));
 
     /**
      * Digest services, as {@code {standardName, alias...}}.
@@ -305,6 +347,28 @@ public final class Kimbo11ngProvider extends Provider {
             }
         }
         return keys;
+    }
+
+    /**
+     * Every composite this provider knows, in table order, each marked with whether it is
+     * registered for this token — the list a tool outside EJBCA reads instead of keeping its own.
+     * A composite the token cannot sign is still listed, with {@code offered} false, so a caller
+     * can tell "this token cannot" from "no such composite".
+     */
+    public List<CompositeAlgorithm> compositeAlgorithms() {
+        return COMPOSITE_SIGNATURES.stream()
+                .map(row -> new CompositeAlgorithm(row.name(), row.oid(), row.mlDsa(),
+                        row.classicalKeySpec(), row.classical(),
+                        getService("Signature", row.name()) != null))
+                .toList();
+    }
+
+    /**
+     * The composites deliberately never offered, each with the reason, in a stable order. Not in
+     * {@link #compositeAlgorithms()}: they are refused choices, not unsupported ones.
+     */
+    public static Map<String, String> excludedComposites() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(EXCLUDED_COMPOSITES));
     }
 
     /**

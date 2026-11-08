@@ -157,6 +157,23 @@ class SharedSlotTokensTest {
     }
 
     @Test
+    @DisplayName("a token whose HSM dropped it logs in again when reactivated")
+    void offlineForgetsTheLogin() throws Exception {
+        // The HSM forgot the sessions and the login with them. A token that still believed itself
+        // logged in would skip C_Login on reactivation and fail its next signature.
+        fake.enforceLogin();
+        TestBridge bridge = new TestBridge();
+        CryptoTokenImpl token = token(1, bridge);
+        token.generateKeyPair("2048", "key");
+
+        fake.dropAllSessions();
+        token.getSlot().reportOffline("test: the HSM dropped the connection", null);
+        token.activate(PIN.clone());
+
+        sign(token, bridge, "key");
+    }
+
+    @Test
     @DisplayName("resetting one token leaves the other able to sign")
     void resetLeavesTheOtherTokenSigning() throws Exception {
         // reset() drains the session pool, and the pool is the slot's, not the token's. Closing

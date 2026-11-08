@@ -8,7 +8,7 @@ constants and a conformance test.
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.6.3, JackNJI11 1.3.1, BouncyCastle 1.84 (phases 0–8 were built against 9.3.7 / BC 1.80.2) |
 | **Status** | Phases 0–8 complete.                                 |
-| **Tests**  | Verified 2026-11-08: 930 unit + 5 artifact (`mvn verify`); 30 `EjbcaContainerIT` + 26 `CliContainerIT` (`mvn verify -Pit`); 27 `HsmConformanceIT` on SoftHSMv3 (`just hsm-it`) |
+| **Tests**  | Verified 2026-11-08: 932 unit + 5 artifact (`mvn verify`); 30 `EjbcaContainerIT` + 27 `CliContainerIT` (`mvn verify -Pit`); 27 `HsmConformanceIT` on SoftHSMv3 (`just hsm-it`) |
 
 > Measurements below dated to phases 0–8 (BC 1.80.2, `release=17`, EJBCA 9.3.7) are kept as they were
 > taken — including the test counts in each phase's **Landed** and **Gate** lines, which record what
@@ -595,6 +595,25 @@ synthetic ones by design — so `verifiesSignaturesFor` is overridden there for 
 classical signatures are still checked against BouncyCastle.
 
 ---
+
+## Known limitations
+
+Both come from the PKCS#11 login being shared by every crypto token on a slot (see
+`SessionPool.login`).
+
+- **A crypto token that logs in and is then dropped without `deactivate()` keeps the slot logged
+  in.** Each token holds the shared login and the slot logs out when the last one gives it back.
+  An instance discarded while logged in, or initialised again in place, never gives back its share.
+  `deactivate()` then no longer sends `C_Logout`, and `reset()` keeps the sessions. No EJBCA 9.6.3
+  path does this. Checked in the bytecode: `createCryptoToken` caches the instance it activates,
+  `saveCryptoToken` deactivates the old instance first, and `exportCAKeyStore` and `importCA`
+  activate the cached one. A node's cache replacing an instance after another node edits the token
+  might do it. The fix would be to release the share when the instance is collected, which would
+  need the slot's offline listener to stop holding the token.
+- **A wrong PIN activates a token while another token on the slot is logged in.** `C_Login` on a
+  slot that is already logged in answers `CKR_USER_ALREADY_LOGGED_IN` without checking the PIN.
+  This is PKCS#11 behaviour, and SunPKCS11 does the same. Checking the PIN would need a
+  `C_Logout`, which would log out every other token on the slot.
 
 ## Verification
 

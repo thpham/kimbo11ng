@@ -340,6 +340,43 @@ class SessionPoolTest {
     }
 
     @Test
+    @DisplayName("a login racing the last logout ends logged in, not holding a logged-out slot")
+    void loginRacingTheLastLogout() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        pool.login("1234".toCharArray());
+        // Another crypto token activates while this one's C_Logout is in flight. Unserialised, its
+        // C_Login answered "already logged in", it took a hold, and the logout then landed: it held
+        // a slot that was no longer logged in, and its next signature failed.
+        Thread[] other = new Thread[1];
+        CountDownLatch otherDone = new CountDownLatch(1);
+        token.beforeLogout(() -> {
+            token.beforeLogout(() -> { });
+            other[0] = new Thread(() -> {
+                try {
+                    pool.login("1234".toCharArray());
+                } catch (Exception e) {
+                    throw new AssertionError(e);
+                } finally {
+                    otherDone.countDown();
+                }
+            });
+            other[0].start();
+            try {
+                // Long enough for an unserialised login to finish; a serialised one waits for
+                // this logout instead, and the wait simply runs out.
+                otherDone.await(300, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        pool.logout();
+        other[0].join(10_000);
+
+        assertTrue(token.isLoggedIn(), "the other token holds the login, so the slot must be logged in");
+    }
+
+    @Test
     @DisplayName("fails a login the pool was released under rather than holding a dead pool")
     void loginRacingARelease() {
         SessionPool pool = pool(SessionPoolConfig.defaults());

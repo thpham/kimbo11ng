@@ -405,7 +405,9 @@ public final class Kimbo11ngProvider extends Provider {
      * provider, re-pointed at whichever HSM initialised last, which then advertised that HSM's
      * algorithms and generated keys on it for both. The first library to claim a name keeps it, so
      * nothing changes where file names are unique; any other gets the name qualified by a hash of
-     * its canonical path, which is stable across restarts. EJBCA does not persist provider names.
+     * its canonical path. A path always gets the same qualified name, but which of two libraries
+     * initialises first, and so keeps the plain one, can differ between restarts. That is safe
+     * because EJBCA does not persist provider names; it shows only in logs.
      */
     private static String nameFor(TokenRuntime runtime) {
         P11Slot slot = runtime.slot();

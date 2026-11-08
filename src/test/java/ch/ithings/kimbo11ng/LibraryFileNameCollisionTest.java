@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Two different PKCS#11 libraries that happen to share a file name — {@code libpkcs11.so} from
@@ -68,6 +69,11 @@ class LibraryFileNameCollisionTest {
 
         assertNotEquals(a.getProvider().getName(), b.getProvider().getName(),
                 "one provider name for two HSMs: whichever initialised last serves both");
+        assertTrue(b.getProvider().getName().matches("Kimbo11ng-"
+                        + java.util.regex.Pattern.quote(fileName.replace('.', '_'))
+                        + "-[0-9a-f]{8}-slot" + b.getSlot().slotId()),
+                "the second library's name says which library and slot it is, plus its path tag: "
+                        + b.getProvider().getName());
         assertSame(a.getSlot(), a.getProvider().getSlot(),
                 "the provider of vendor A's library serves vendor B's");
         // EJBCA registers a provider name once and resolves it from then on, so the second

@@ -227,6 +227,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return this;
     }
 
+    private Runnable beforeLogout = () -> { };
+
+    /**
+     * Runs {@code hook} at the start of every {@code C_Logout}, before the token acts on it and
+     * outside the fake's lock, so another thread can reach the token while a logout is in flight.
+     */
+    public FakeToken beforeLogout(Runnable hook) {
+        beforeLogout = hook;
+        return this;
+    }
+
     /** {@code CKA_PRIVATE} true, or a private or secret key that does not say — PKCS#11's default. */
     private static boolean isPrivateObject(Map<Long, byte[]> attributes) {
         byte[] flag = attributes.get(CKA.PRIVATE);
@@ -379,6 +390,8 @@ public final class FakeToken extends UnsupportedNativeProvider {
      */
     public synchronized FakeToken dropAllSessions() {
         sessions.clear();
+        // The login goes with them, as it does when the last session closes.
+        logOutIfLastSessionClosed();
         return this;
     }
 
@@ -897,7 +910,13 @@ public final class FakeToken extends UnsupportedNativeProvider {
     }
 
     @Override
-    public synchronized long C_Logout(long handle) {
+    public long C_Logout(long handle) {
+        // Outside the fake's monitor, so the hook can let another thread call into the token.
+        beforeLogout.run();
+        return logout(handle);
+    }
+
+    private synchronized long logout(long handle) {
         if (session(handle) == null) {
             return CKR.SESSION_HANDLE_INVALID;
         }

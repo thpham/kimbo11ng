@@ -227,7 +227,7 @@ public final class Pkcs11Module {
      */
     public void releaseSlot(long slotId) {
         SessionPool[] released = new SessionPool[1];
-        pools.computeIfPresent(slotId, (id, pool) -> {
+        SessionPool kept = pools.computeIfPresent(slotId, (id, pool) -> {
             if (!pool.closeIfUnheld()) {
                 return pool;
             }
@@ -236,7 +236,7 @@ public final class Pkcs11Module {
         });
         if (released[0] != null) {
             released[0].drain();
-        } else if (log.isDebugEnabled()) {
+        } else if (kept != null && log.isDebugEnabled()) {
             log.debug("Keeping the session pool of slot " + slotId + " of " + canonicalPath
                     + ": another crypto token is still logged in through it");
         }

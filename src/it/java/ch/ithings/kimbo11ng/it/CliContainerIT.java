@@ -541,4 +541,15 @@ class CliContainerIT {
                 "token files EJBCA (uid 10001) cannot read:\n" + notOurs.getStdout());
         ok(onToken("deleteobject", "--alias", "itowner"));
     }
+
+    @Test
+    @Order(33)
+    @DisplayName("a run-as user that is root itself does not send the tool round in circles")
+    void runAsRootDoesNotLoop() throws Exception {
+        // gosu to root lands back in the launcher as root with the variable still set; without
+        // clearing it, the launcher re-executed itself forever. timeout turns that into exit 124.
+        Container.ExecResult result = HSM.execInContainer("sh", "-c",
+                "KIMBO11NG_RUN_AS=0 timeout 60 kimbo11ng-cli listslots");
+        ok(result);
+    }
 }

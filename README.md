@@ -123,6 +123,11 @@ docker compose exec ejbca kimbo11ng-cli listslots       # no PIN, no slot, no li
 just cli-token capabilities --slot-ref SLOT_LABEL --slot TestToken
 ```
 
+`docker exec` arrives as root, but the tool runs as EJBCA's user (uid 10001, from
+`KIMBO11NG_RUN_AS` in the image): SoftHSMv3 writes each object mode 0600, and a key made by root
+would be invisible to the CA. Files you point the tool at, such as a PIN file or an output path,
+must therefore be accessible to that user. `-e KIMBO11NG_RUN_AS=` turns this off.
+
 | Command | What it answers |
 | --- | --- |
 | `listslots`, `showinfo`, `showslotinfo`, `showtokeninfo` | does the library load, does the slot exist, is the PIN locked — none of which needs a credential |
@@ -367,8 +372,8 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 930 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 30 EJBCA + 26 CLI integration tests (~5 min)
+mvn verify               # 932 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 30 EJBCA + 27 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100

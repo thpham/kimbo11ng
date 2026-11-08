@@ -73,6 +73,14 @@ public final class SessionPool {
     private final Semaphore permits;
     private final Deque<Idle> idle = new ArrayDeque<>();
     private final Object lock = new Object();
+    /**
+     * Serialises {@link #login} and {@link #logout} across every crypto token on the slot, held
+     * across the {@code C_Login} or {@code C_Logout} itself. Otherwise a token's login could
+     * answer "already logged in" and take a hold just before another token's last
+     * {@code C_Logout} landed, leaving it holding a slot that was logged out. Taken before
+     * {@code lock}, never after; borrowing and returning sessions do not take it.
+     */
+    private final Object loginLock = new Object();
 
     private int live;
     /** Crypto tokens holding this slot's login; see {@link #login}. Guarded by {@code lock}. */
@@ -231,15 +239,17 @@ public final class SessionPool {
      */
     public void login(char[] pin)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
-        authenticate(pin);
-        synchronized (lock) {
-            if (closed) {
-                // closeIfUnheld ran while this login was in flight and found no hold to keep the
-                // pool for; its drain closes the sessions, and the login with them.
-                throw new CryptoTokenOfflineException("The session pool for slot " + slotId
-                        + " was released while logging in; activate the token again");
+        synchronized (loginLock) {
+            authenticate(pin);
+            synchronized (lock) {
+                if (closed) {
+                    // closeIfUnheld ran while this login was in flight and found no hold to keep
+                    // the pool for; its drain closes the sessions, and the login with them.
+                    throw new CryptoTokenOfflineException("The session pool for slot " + slotId
+                            + " was released while logging in; activate the token again");
+                }
+                loginHolds++;
             }
-            loginHolds++;
         }
     }
 
@@ -339,31 +349,33 @@ public final class SessionPool {
      * Sessions stay open; only the authentication is dropped.
      */
     public void logout() {
-        synchronized (lock) {
-            if (loginHolds > 1) {
-                loginHolds--;
-                if (log.isDebugEnabled()) {
-                    log.debug("Slot " + slotId + " stays logged in: " + loginHolds
-                            + " other holder(s) of its login");
+        synchronized (loginLock) {
+            synchronized (lock) {
+                if (loginHolds > 1) {
+                    loginHolds--;
+                    if (log.isDebugEnabled()) {
+                        log.debug("Slot " + slotId + " stays logged in: " + loginHolds
+                                + " other holder(s) of its login");
+                    }
+                    return;
                 }
-                return;
+                loginHolds = 0;
             }
-            loginHolds = 0;
-        }
-        try {
-            SessionLease lease = borrow();
             try {
-                ce.Logout(lease.session());
-            } catch (RuntimeException e) {
-                invalidateIfDead(lease, e);
-                throw e;
-            } finally {
-                lease.close();
-            }
-        } catch (Exception e) {
-            // Logging out a token that is not logged in is the state we wanted anyway.
-            if (log.isDebugEnabled()) {
-                log.debug("C_Logout on slot " + slotId + ": " + Pkcs11Errors.describe(e));
+                SessionLease lease = borrow();
+                try {
+                    ce.Logout(lease.session());
+                } catch (RuntimeException e) {
+                    invalidateIfDead(lease, e);
+                    throw e;
+                } finally {
+                    lease.close();
+                }
+            } catch (Exception e) {
+                // Logging out a token that is not logged in is the state we wanted anyway.
+                if (log.isDebugEnabled()) {
+                    log.debug("C_Logout on slot " + slotId + ": " + Pkcs11Errors.describe(e));
+                }
             }
         }
     }

@@ -127,14 +127,17 @@ public class CryptoTokenImpl {
                         + e.getMessage(), e);
             }
         }
+        // Read once, so the login and the keystore are about the same runtime even if an init
+        // swaps it meanwhile.
+        TokenRuntime current = runtime;
         try {
             // P11Slot.login classifies the CKR itself, so a missing token surfaces as offline and
             // only a rejected credential surfaces as an authentication failure. Previously every
             // failure here — including "no token in slot" — was reported as a bad PIN.
-            runtime.slot().login(authCode);
+            current.slot().login(authCode);
             // Bound to this token's runtime, not to whichever token last initialised on the slot;
             // see Kimbo11ngProvider.keyStore.
-            KeyStore ks = p11Provider.keyStore(runtime);
+            KeyStore ks = p11Provider.keyStore(current);
             ks.load(null, authCode);
             bridge.bridgeSetKeyStore(ks);
         } catch (CryptoTokenOfflineException | CryptoTokenAuthenticationFailedException e) {

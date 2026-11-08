@@ -38,8 +38,16 @@ set -euo pipefail
 # 0600: a key a root CLI makes is one the running CA cannot read, and it is simply missing from
 # EJBCA. The image names that user in KIMBO11NG_RUN_AS, and the tool runs as it. Outside the image
 # the variable is unset and nothing changes; `-e KIMBO11NG_RUN_AS=` turns it off inside.
-if [ "$(id -u)" = 0 ] && [ -n "${KIMBO11NG_RUN_AS:-}" ] && command -v gosu >/dev/null 2>&1; then
-    exec gosu "$KIMBO11NG_RUN_AS" "$0" "$@"
+#
+# Files the tool is pointed at — a PIN file, an output path — are then opened as that user too.
+# The variable is cleared for the re-executed tool, or a run-as user that is root itself would
+# land back here as root and loop.
+if [ "$(id -u)" = 0 ] && [ -n "${KIMBO11NG_RUN_AS:-}" ]; then
+    if command -v gosu >/dev/null 2>&1; then
+        exec gosu "$KIMBO11NG_RUN_AS" env -u KIMBO11NG_RUN_AS "$0" "$@"
+    fi
+    echo "kimbo11ng-cli: KIMBO11NG_RUN_AS is set but gosu is not installed; running as root," \
+        "so keys written now may be unreadable to $KIMBO11NG_RUN_AS" >&2
 fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

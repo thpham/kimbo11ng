@@ -232,6 +232,61 @@ class KeyStoreEnumerationTest {
         assertTrue(load(vendor).engineContainsAlias("vendorKey"));
     }
 
+    private void generateEdwards(String alias, String curve) throws Exception {
+        generate(KeyTemplates.edwards(alias.getBytes(StandardCharsets.UTF_8),
+                KeyTemplates.newKeyId(), curve), CKM.EC_EDWARDS_KEY_PAIR_GEN);
+    }
+
+    @Test
+    @DisplayName("reads an Edwards curve from the public half when the private one withholds it")
+    void edwardsCurveFromThePublicHalf() throws Exception {
+        // SoftHSMv3: CKA_EC_PARAMS is on the public object only. Before, every Ed25519 and Ed448
+        // key vanished at the first re-enumeration — after a restart, a reactivation.
+        generateEdwards("ed25519Key", "Ed25519");
+        generateEdwards("ed448Key", "Ed448");
+        fake.omitPrivateAttribute(CKA.EC_PARAMS);
+
+        Kimbo11ngKeyStoreSpi spi = load();
+
+        assertEquals("Ed25519", spi.engineGetKey("ed25519Key", null).getAlgorithm());
+        assertEquals("Ed448", spi.engineGetKey("ed448Key", null).getAlgorithm());
+        assertEquals("Ed25519", spi.getPublicKey("ed25519Key").getAlgorithm());
+        assertEquals("Ed448", spi.getPublicKey("ed448Key").getAlgorithm());
+    }
+
+    @Test
+    @DisplayName("still skips an Edwards key whose curve neither half reports")
+    void edwardsCurveOnNeitherHalf() throws Exception {
+        generateEdwards("edKey", "Ed25519");
+        generateRsa("rsaKey");
+        fake.omitAttribute(CKA.EC_PARAMS);
+
+        Kimbo11ngKeyStoreSpi spi = load();
+
+        assertFalse(spi.engineContainsAlias("edKey"),
+                "Ed25519 and Ed448 are different algorithms; guessing signs with the wrong one");
+        assertTrue(spi.engineContainsAlias("rsaKey"));
+    }
+
+    @Test
+    @DisplayName("reads an ML-DSA parameter set from the public half when the private one withholds it")
+    void parameterSetFromThePublicHalf() throws Exception {
+        generatePqc("mldsa44", profile.lookup("ML-DSA-44").orElseThrow(), profile,
+                profile.lookup("ML-DSA-44").orElseThrow().ckmKeyPairGen());
+        generatePqc("mldsa87", profile.lookup("ML-DSA-87").orElseThrow(), profile,
+                profile.lookup("ML-DSA-87").orElseThrow().ckmKeyPairGen());
+        fake.omitPrivateAttribute(profile.ckaParameterSet());
+
+        Kimbo11ngKeyStoreSpi spi = load();
+
+        assertEquals("ML-DSA-44", ((MLDSAKey) spi.getPublicKey("mldsa44"))
+                .getParameterSpec().getName().toUpperCase(java.util.Locale.ROOT));
+        assertEquals("ML-DSA-87", ((MLDSAKey) spi.getPublicKey("mldsa87"))
+                .getParameterSpec().getName().toUpperCase(java.util.Locale.ROOT));
+        assertEquals("ML-DSA-87", spi.algorithmFor("mldsa87").orElseThrow().canonicalName(),
+                "the private key must carry the right row, or it signs with the wrong mechanism");
+    }
+
     @Test
     @DisplayName("skips a PQC key when the parameter set is missing and the type is ambiguous")
     void missingParameterSetWhenAmbiguous() throws Exception {

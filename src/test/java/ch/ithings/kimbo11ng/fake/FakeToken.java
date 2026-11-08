@@ -138,6 +138,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private EcPointEncoding ecPointEncoding = EcPointEncoding.DER;
     private final Set<Long> omittedAttributes = new HashSet<>();
     private final Set<Long> emptyAttributes = new HashSet<>();
+    private final Set<Long> omittedPrivateAttributes = new HashSet<>();
     private String pqcSpkiOid;
     private final Set<Long> readOnlyAttributes = new HashSet<>();
     private final Map<Long, Long> vendorMechanisms = new HashMap<>();
@@ -200,6 +201,19 @@ public final class FakeToken extends UnsupportedNativeProvider {
     /** Hide an attribute entirely, as a vendor that does not implement it would. */
     public FakeToken omitAttribute(long cka) {
         omittedAttributes.add(cka);
+        return this;
+    }
+
+    /**
+     * Hide an attribute on private-key objects only, leaving it on their public halves.
+     *
+     * <p>SoftHSMv3 does this for {@code CKA_EC_PARAMS} on an Edwards private key: the curve is on
+     * the public object and nowhere else, so code that reads it from the private half finds
+     * nothing. Some modules may do the same for {@code CKA_PARAMETER_SET}. The default fake puts
+     * both on the private object, as PKCS#11 allows — which is exactly how the gap went unseen.
+     */
+    public FakeToken omitPrivateAttribute(long cka) {
+        omittedPrivateAttributes.add(cka);
         return this;
     }
 
@@ -882,8 +896,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.OBJECT_HANDLE_INVALID;
         }
         long rv = CKR.OK;
+        boolean privateKey = Arrays.equals(attrs.get(CKA.CLASS), encodeLong(CKO.PRIVATE_KEY));
         for (CKA cka : template) {
-            byte[] value = omittedAttributes.contains(cka.type) ? null : attrs.get(cka.type);
+            boolean omitted = omittedAttributes.contains(cka.type)
+                    || (privateKey && omittedPrivateAttributes.contains(cka.type));
+            byte[] value = omitted ? null : attrs.get(cka.type);
             if (value != null && emptyAttributes.contains(cka.type)) {
                 value = new byte[0];
             }
@@ -1292,8 +1309,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
      * <p>{@code CKA_EC_POINT} is the algorithm's own public-key encoding — 32 bytes for Ed25519,
      * 57 for Ed448 — not a {@code 04 || X || Y} curve point, and it goes through the same
      * {@link #ecPointEncoding} knob so a test can present either the bare or the DER-wrapped form.
-     * {@code CKA_EC_PARAMS} is put on the private object too, which is where the enumeration path
-     * has to read it to tell Ed25519 from Ed448 before the public half is available.
+     * {@code CKA_EC_PARAMS} is put on the private object too, as PKCS#11 allows; enumeration reads
+     * it there first and from the public half otherwise. SoftHSMv3 keeps it on the public object
+     * only — {@link #omitPrivateAttribute} reproduces that.
      */
     private void generateEdwards(Map<Long, byte[]> pub, Map<Long, byte[]> priv) throws Exception {
         byte[] ecParams = pub.get(CKA.EC_PARAMS);

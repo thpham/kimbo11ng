@@ -367,8 +367,8 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 910 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 29 EJBCA + 25 CLI integration tests (~5 min)
+mvn verify               # 915 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 29 EJBCA + 26 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100

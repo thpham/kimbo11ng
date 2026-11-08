@@ -337,6 +337,30 @@ public abstract class HsmContract {
         }
     }
 
+    /**
+     * An Edwards key found again by a fresh enumeration, which is what a restart or a reactivation
+     * does. The classical round trip above signs with the key generation just registered, so it
+     * never asks the token which curve the key is on — and SoftHSMv3 answers that only on the
+     * public half, which made every Edwards key vanish at the first restart.
+     */
+    @ParameterizedTest
+    @CsvSource({"Ed25519", "Ed448"})
+    @DisplayName("finds an Edwards key again after everything cached has been discarded")
+    void edwardsKeySurvivesRestart(String curve) throws Exception {
+        Assumptions.assumeTrue(impl.getProvider().getService("Signature", curve) != null,
+                "the token does not offer " + curve);
+        String alias = alias("restart-" + curve);
+        impl.generateKeyPair(curve, alias);
+
+        Kimbo11ngKeyStoreSpi keyStore = impl.getProvider().getKeyStoreSpi();
+        keyStore.clear();
+        slot().invalidateHandles();
+        keyStore.engineLoad(null, pin());
+
+        assertTrue(keyStore.engineContainsAlias(alias), alias + " did not survive re-enumeration");
+        signAndVerify(alias, curve);
+    }
+
     @Test
     @DisplayName("deletes a key so completely that it is gone from a fresh enumeration")
     void deleteRemovesBothHalves() throws Exception {

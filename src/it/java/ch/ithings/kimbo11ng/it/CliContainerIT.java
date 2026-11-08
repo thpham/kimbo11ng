@@ -85,7 +85,9 @@ class CliContainerIT {
         Container.ExecResult init = HSM.execInContainer("bash", "-c",
                 "command -v softhsm3-util >/dev/null && U=softhsm3-util || U=softhsm2-util; "
                         + "$U --init-token --free --label " + TOKEN_LABEL
-                        + " --pin " + PIN + " --so-pin 12345678");
+                        + " --pin " + PIN + " --so-pin 12345678"
+                        // As init-hsm.sh does: the token belongs to EJBCA's user, not to root.
+                        + " && chown -R 10001:0 /var/lib/softhsmv3/tokens");
         assertEquals(0, init.getExitCode(),
                 "Could not initialise the SoftHSM token: " + init.getStderr());
     }
@@ -517,5 +519,26 @@ class CliContainerIT {
 
         ok(onToken("deleteobject", "--alias", "itslh"));
         assertFalse(ok(onToken("listkeypairs")).contains("itslh"));
+    }
+
+    /**
+     * Everything the tool writes is EJBCA's to read.
+     *
+     * <p>{@code docker exec} runs as root, because the image needs root to start — init-hsm.sh
+     * fixes the volume's ownership and then drops to 10001 for EJBCA. SoftHSMv3 writes each object
+     * mode 0600, so a key made by a root CLI is one the running CA cannot see. Every command above
+     * ran through a plain exec, so a single root-owned file here means one of them wrote as root.
+     */
+    @Test
+    @Order(32)
+    @DisplayName("the objects the tool writes belong to EJBCA's user, not to root")
+    void writesAsEjbcasUser() throws Exception {
+        ok(onToken("generatekeypair", "--alias", "itowner", "--key-spec", "2048"));
+        Container.ExecResult notOurs = HSM.execInContainer("find", "/var/lib/softhsmv3/tokens",
+                "-type", "f", "!", "-uid", "10001");
+        assertEquals(0, notOurs.getExitCode(), notOurs.getStderr());
+        assertEquals("", notOurs.getStdout().trim(),
+                "token files EJBCA (uid 10001) cannot read:\n" + notOurs.getStdout());
+        ok(onToken("deleteobject", "--alias", "itowner"));
     }
 }

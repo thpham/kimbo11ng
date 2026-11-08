@@ -31,6 +31,17 @@
 #
 set -euo pipefail
 
+# ---- whose token it is -------------------------------------------------------------------------
+#
+# The image runs as root so init-hsm.sh can fix the token volume's ownership before it drops to
+# EJBCA's user, and so every `docker exec` arrives as root. SoftHSMv3 writes each object mode
+# 0600: a key a root CLI makes is one the running CA cannot read, and it is simply missing from
+# EJBCA. The image names that user in KIMBO11NG_RUN_AS, and the tool runs as it. Outside the image
+# the variable is unset and nothing changes; `-e KIMBO11NG_RUN_AS=` turns it off inside.
+if [ "$(id -u)" = 0 ] && [ -n "${KIMBO11NG_RUN_AS:-}" ] && command -v gosu >/dev/null 2>&1; then
+    exec gosu "$KIMBO11NG_RUN_AS" "$0" "$@"
+fi
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(dirname "$here")"
 

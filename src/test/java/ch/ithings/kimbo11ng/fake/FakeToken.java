@@ -148,6 +148,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
     private final Map<Long, Long> mechanismFlags = new HashMap<>();
     private final Set<Long> undescribableMechanisms = new HashSet<>();
     private long mechanismListCkr = -1;
+    private boolean enforceLogin;
     private boolean ignoreSignContext;
     private boolean rejectSignContext;
     private PqcMechanismProfile profile;
@@ -202,6 +203,28 @@ public final class FakeToken extends UnsupportedNativeProvider {
     public FakeToken omitAttribute(long cka) {
         omittedAttributes.add(cka);
         return this;
+    }
+
+    /**
+     * Enforce the login, as a real token does: with no user logged in, a private object is left
+     * out of {@code C_FindObjects} and refused by {@code C_SignInit} with
+     * {@code CKR_USER_NOT_LOGGED_IN}. By default the fake requires a login only to generate keys,
+     * which is why a token logged out by another one sharing its slot went unnoticed.
+     */
+    public FakeToken enforceLogin() {
+        enforceLogin = true;
+        return this;
+    }
+
+    /** {@code CKA_PRIVATE} true, or a private or secret key that does not say — PKCS#11's default. */
+    private static boolean isPrivateObject(Map<Long, byte[]> attributes) {
+        byte[] flag = attributes.get(CKA.PRIVATE);
+        if (flag != null) {
+            return flag.length > 0 && flag[0] != 0;
+        }
+        byte[] objectClass = attributes.get(CKA.CLASS);
+        return Arrays.equals(objectClass, encodeLong(CKO.PRIVATE_KEY))
+                || Arrays.equals(objectClass, encodeLong(CKO.SECRET_KEY));
     }
 
     /**
@@ -970,7 +993,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
                     break;
                 }
             }
-            if (match) {
+            if (match && !(enforceLogin && !loggedIn && isPrivateObject(e.getValue()))) {
                 hits.add(e.getKey());
             }
         }
@@ -1412,6 +1435,9 @@ public final class FakeToken extends UnsupportedNativeProvider {
         }
         if (!objects.containsKey(key)) {
             return CKR.KEY_HANDLE_INVALID;
+        }
+        if (enforceLogin && !loggedIn && isPrivateObject(objects.get(key))) {
+            return CKR.USER_NOT_LOGGED_IN;
         }
         // Recorded before it is judged, so a test can see what a refused C_SignInit was sent.
         byte[] parameter = parameterBytes(mechanism);

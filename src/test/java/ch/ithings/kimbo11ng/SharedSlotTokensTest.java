@@ -96,6 +96,66 @@ class SharedSlotTokensTest {
                 "the second token lists secondKey but has no public key for it");
     }
 
+    /** Signs once with {@code alias} through {@code token}'s keystore and provider. */
+    private static void sign(CryptoTokenImpl token, TestBridge bridge, String alias)
+            throws Exception {
+        java.security.PrivateKey key =
+                (java.security.PrivateKey) bridge.bridgeGetKeyStore().getKey(alias, null);
+        java.security.Signature signer =
+                java.security.Signature.getInstance("SHA256withRSA", token.getProvider());
+        signer.initSign(key);
+        signer.update(new byte[] {1, 2, 3});
+        assertNotNull(signer.sign());
+    }
+
+    @Test
+    @DisplayName("deactivating one token leaves the other able to sign")
+    void deactivationLeavesTheOtherTokenSigning() throws Exception {
+        // PKCS#11 logs in per application and slot: one token's C_Logout is every token's.
+        fake.enforceLogin();
+        CryptoTokenImpl first = token(1, new TestBridge());
+        TestBridge secondBridge = new TestBridge();
+        CryptoTokenImpl second = token(2, secondBridge);
+        second.generateKeyPair("2048", "secondKey");
+
+        first.deactivate();
+
+        sign(second, secondBridge, "secondKey");
+    }
+
+    @Test
+    @DisplayName("the last token to deactivate on a slot does log the slot out")
+    void lastDeactivationLogsOut() throws Exception {
+        // The other half: sharing the login must not keep a slot logged in once nothing holds it,
+        // or deactivate stops meaning what it says.
+        fake.enforceLogin();
+        CryptoTokenImpl first = token(1, new TestBridge());
+        CryptoTokenImpl second = token(2, new TestBridge());
+
+        first.deactivate();
+        assertTrue(fake.isLoggedIn(), "the second token still holds the login");
+        second.deactivate();
+        org.junit.jupiter.api.Assertions.assertFalse(fake.isLoggedIn(),
+                "no token holds the login any more, so the slot must be logged out");
+    }
+
+    @Test
+    @DisplayName("a token that went offline and logged in again still logs the slot out once")
+    void offlineReleasesTheLogin() throws Exception {
+        // The offline path drops the token's login without a C_Logout — the token is gone. If it
+        // kept its hold, the reconnected token would count twice and deactivate would never log
+        // the slot out.
+        fake.enforceLogin();
+        CryptoTokenImpl token = token(1, new TestBridge());
+
+        token.getSlot().reportOffline("test: the HSM went away", null);
+        token.activate(PIN.clone());
+        token.deactivate();
+
+        org.junit.jupiter.api.Assertions.assertFalse(fake.isLoggedIn(),
+                "deactivate after a reconnection must log the slot out");
+    }
+
     @Test
     @DisplayName("a token reactivated after EJBCA's throwaway instances of it still sees its keys")
     void reactivationAfterThrowawayInstances() throws Exception {

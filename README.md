@@ -367,7 +367,7 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 917 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify               # 921 unit tests + 5 artifact tests, no Docker (~2 min)
 mvn verify -Pit          # + 30 EJBCA + 26 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs

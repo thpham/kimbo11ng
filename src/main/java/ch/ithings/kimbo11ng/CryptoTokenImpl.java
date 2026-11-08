@@ -915,6 +915,17 @@ public class CryptoTokenImpl {
         return current == null ? null : current.slot();
     }
 
+    /**
+     * This token's keystore SPI, or {@code null} before the first activation.
+     *
+     * <p>Not {@code getProvider().getKeyStoreSpi()}: the provider is shared by every token on the
+     * slot and answers for whichever initialised last.
+     */
+    public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
+        TokenRuntime current = runtime;
+        return current == null ? null : current.keyStoreSpi();
+    }
+
     public PqcMechanismProfile getPqcProfile() {
         TokenRuntime current = runtime;
         return current == null ? null : current.profile();

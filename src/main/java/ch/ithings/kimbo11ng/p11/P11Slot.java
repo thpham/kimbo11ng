@@ -126,7 +126,14 @@ public final class P11Slot {
     public void reportOffline(String reason, Throwable cause) {
         log.warn("Token on slot " + slotId + " of " + module.path() + " went offline: " + reason);
         invalidateHandles();
-        loggedIn = false;
+        synchronized (this) {
+            if (loggedIn) {
+                loggedIn = false;
+                // Without a C_Logout — the token is gone — but the hold is given back, or this
+                // token would count twice once it logs in again and never log the slot out.
+                pool().releaseLoginHold();
+            }
+        }
         OfflineListener listener = offlineListener;
         if (listener != null) {
             try {

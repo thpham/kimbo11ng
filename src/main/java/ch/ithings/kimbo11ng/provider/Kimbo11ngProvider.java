@@ -415,6 +415,12 @@ public final class Kimbo11ngProvider extends Provider {
         return runtime.get().slot();
     }
 
+    /**
+     * The keystore SPI of whichever crypto token last initialised on this (library, slot) — not
+     * necessarily the caller's, when the slot has more than one token or EJBCA has made a
+     * throwaway copy of one. A crypto token reaches its own through
+     * {@code CryptoTokenImpl.getKeyStoreSpi()}.
+     */
     public Kimbo11ngKeyStoreSpi getKeyStoreSpi() {
         return runtime.get().keyStoreSpi();
     }

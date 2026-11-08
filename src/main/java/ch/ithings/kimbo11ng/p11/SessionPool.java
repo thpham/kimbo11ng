@@ -75,6 +75,8 @@ public final class SessionPool {
     private final Object lock = new Object();
 
     private int live;
+    /** Crypto tokens holding this slot's login; see {@link #login}. Guarded by {@code lock}. */
+    private int loginHolds;
     private volatile boolean closed;
 
     private record Idle(long session, long lastUsedMillis) {
@@ -217,11 +219,25 @@ public final class SessionPool {
      * component in this JVM (SunPKCS11 through EJBCA's classic token, most likely) may have logged
      * in to the same slot already — and is not an error.
      *
+     * <p>Each successful call takes one hold on the login; {@link #logout} gives one back, and only
+     * the last sends {@code C_Logout}. One pool serves every crypto token on this slot, and a
+     * token's {@code C_Logout} would log out all of them — the next signature of another token on
+     * the slot failed with {@code CKR_USER_NOT_LOGGED_IN}. Callers take at most one hold each;
+     * {@code P11Slot} guards that.
+     *
      * @param pin zeroed by the caller; this method copies nothing that outlives it
      * @throws CryptoTokenAuthenticationFailedException if {@code pin} is absent or empty, without
      *         contacting the token — see below
      */
     public void login(char[] pin)
+            throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
+        authenticate(pin);
+        synchronized (lock) {
+            loginHolds++;
+        }
+    }
+
+    private void authenticate(char[] pin)
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
         // An absent credential is refused here rather than sent on. Pins.encodeUtf8 turns null into
         // an empty array, and C_Login with an empty PIN is not a no-op: most tokens count it as a
@@ -287,8 +303,32 @@ public final class SessionPool {
         }
     }
 
-    /** Ends the token's login state. Sessions stay open; only the authentication is dropped. */
+    /**
+     * Gives back one hold on the login without logging out, for a holder whose login the token
+     * has already lost — it went offline. Never below zero.
+     */
+    public void releaseLoginHold() {
+        synchronized (lock) {
+            loginHolds = Math.max(0, loginHolds - 1);
+        }
+    }
+
+    /**
+     * Gives back one hold on the login, and ends the token's login state when it was the last.
+     * Sessions stay open; only the authentication is dropped.
+     */
     public void logout() {
+        synchronized (lock) {
+            if (loginHolds > 1) {
+                loginHolds--;
+                if (log.isDebugEnabled()) {
+                    log.debug("Slot " + slotId + " stays logged in: " + loginHolds
+                            + " other holder(s) of its login");
+                }
+                return;
+            }
+            loginHolds = 0;
+        }
         try {
             SessionLease lease = borrow();
             try {

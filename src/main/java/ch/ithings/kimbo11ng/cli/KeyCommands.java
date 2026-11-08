@@ -368,7 +368,7 @@ final class KeyCommands {
         if (explicit != null && !explicit.isBlank()) {
             return explicit.trim();
         }
-        Kimbo11ngKeyStoreSpi spi = token.getProvider().getKeyStoreSpi();
+        Kimbo11ngKeyStoreSpi spi = token.getKeyStoreSpi();
         if (spi != null) {
             var entry = spi.algorithmFor(alias);
             if (entry.isPresent()) {

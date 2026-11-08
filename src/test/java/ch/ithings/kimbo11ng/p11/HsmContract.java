@@ -388,6 +388,26 @@ public abstract class HsmContract {
     }
 
     @Test
+    @DisplayName("keeps signing after another token on the same slot is reset")
+    void anotherTokensResetKeepsThisOneSigning() throws Exception {
+        String alias = alias("shared-reset");
+        impl.generateKeyPair("2048", alias);
+
+        Properties properties = new Properties();
+        properties.setProperty(CryptoTokenImpl.SHLIB_LABEL_KEY, libPath());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_TYPE, slotLabelType());
+        properties.setProperty(CryptoTokenImpl.SLOT_LABEL_VALUE, slotLabelValue());
+        properties.setProperty(CryptoTokenImpl.DO_NOT_ADD_P11_PROVIDER, "true");
+        properties.putAll(extraProperties());
+        CryptoTokenImpl other = new CryptoTokenImpl(new TestBridge(), registry());
+        other.init(properties, null, 74);
+        other.activate(pin());
+        other.reset();
+
+        signAndVerify(alias, "SHA256withRSA");
+    }
+
+    @Test
     @DisplayName("deletes a key so completely that it is gone from a fresh enumeration")
     void deleteRemovesBothHalves() throws Exception {
         String alias = "hsmcontract-doomed";

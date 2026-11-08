@@ -173,7 +173,10 @@ public class CryptoTokenImpl {
         }
     }
 
-    /** Deactivates, then drains the session pool. The library itself stays initialized. */
+    /**
+     * Deactivates, then drains the session pool unless another token on the slot is still logged
+     * in through it. The library itself stays initialized.
+     */
     public void reset() {
         deactivate();
         TokenRuntime current = runtime;

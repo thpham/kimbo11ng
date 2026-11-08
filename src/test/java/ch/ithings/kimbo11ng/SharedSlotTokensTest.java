@@ -157,6 +157,40 @@ class SharedSlotTokensTest {
     }
 
     @Test
+    @DisplayName("resetting one token leaves the other able to sign")
+    void resetLeavesTheOtherTokenSigning() throws Exception {
+        // reset() drains the session pool, and the pool is the slot's, not the token's. Closing
+        // the application's last session logs the slot out, and the other token with it.
+        fake.enforceLogin();
+        CryptoTokenImpl first = token(1, new TestBridge());
+        TestBridge secondBridge = new TestBridge();
+        CryptoTokenImpl second = token(2, secondBridge);
+        second.generateKeyPair("2048", "secondKey");
+
+        first.reset();
+
+        sign(second, secondBridge, "secondKey");
+    }
+
+    @Test
+    @DisplayName("resetting the last token on a slot still releases its sessions")
+    void lastResetReleasesTheSessions() throws Exception {
+        // The other half: keeping the pool for the other tokens must not keep it once none is
+        // left, or reset stops releasing anything.
+        fake.enforceLogin();
+        CryptoTokenImpl first = token(1, new TestBridge());
+        CryptoTokenImpl second = token(2, new TestBridge());
+
+        first.reset();
+        assertTrue(fake.openSessionCount() > 0, "the second token still uses the slot's sessions");
+        second.reset();
+
+        org.junit.jupiter.api.Assertions.assertEquals(0, fake.openSessionCount(),
+                "no token uses the slot any more, so its sessions must be closed");
+        org.junit.jupiter.api.Assertions.assertFalse(fake.isLoggedIn());
+    }
+
+    @Test
     @DisplayName("a token reactivated after EJBCA's throwaway instances of it still sees its keys")
     void reactivationAfterThrowawayInstances() throws Exception {
         // EJBCA instantiates and inits a token more than once — two short-lived copies with id -1

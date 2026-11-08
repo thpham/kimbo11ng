@@ -216,6 +216,17 @@ public final class FakeToken extends UnsupportedNativeProvider {
         return this;
     }
 
+    private Runnable onLogin = () -> { };
+
+    /**
+     * Runs {@code hook} inside every successful {@code C_Login}, before it returns: the one point
+     * where something racing a login can be made to happen deterministically.
+     */
+    public FakeToken onLogin(Runnable hook) {
+        onLogin = hook;
+        return this;
+    }
+
     /** {@code CKA_PRIVATE} true, or a private or secret key that does not say — PKCS#11's default. */
     private static boolean isPrivateObject(Map<Long, byte[]> attributes) {
         byte[] flag = attributes.get(CKA.PRIVATE);
@@ -817,7 +828,11 @@ public final class FakeToken extends UnsupportedNativeProvider {
 
     @Override
     public synchronized long C_CloseSession(long handle) {
-        return sessions.remove(handle) == null ? CKR.SESSION_HANDLE_INVALID : CKR.OK;
+        if (sessions.remove(handle) == null) {
+            return CKR.SESSION_HANDLE_INVALID;
+        }
+        logOutIfLastSessionClosed();
+        return CKR.OK;
     }
 
     @Override
@@ -826,7 +841,18 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.SLOT_ID_INVALID;
         }
         sessions.clear();
+        logOutIfLastSessionClosed();
         return CKR.OK;
+    }
+
+    /**
+     * PKCS#11 ends the login when the application's last session on the token closes. Modelled
+     * only under {@link #enforceLogin()}, the knob that makes the fake care about login at all.
+     */
+    private void logOutIfLastSessionClosed() {
+        if (enforceLogin && sessions.isEmpty()) {
+            loggedIn = false;
+        }
     }
 
     @Override
@@ -866,6 +892,7 @@ public final class FakeToken extends UnsupportedNativeProvider {
             return CKR.PIN_INCORRECT;
         }
         loggedIn = true;
+        onLogin.run();
         return CKR.OK;
     }
 

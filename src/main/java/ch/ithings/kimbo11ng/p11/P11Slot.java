@@ -183,7 +183,8 @@ public final class P11Slot {
     }
 
     /**
-     * Closes every session on this slot and forgets its pool.
+     * Logs this token out, and closes the slot's sessions unless another token is still logged in
+     * through them — see {@link Pkcs11Module#releaseSlot}.
      *
      * <p>The library stays initialised: see {@link Pkcs11Module} for why finalising it would break
      * other users of the same library in this JVM.

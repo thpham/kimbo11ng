@@ -323,4 +323,31 @@ class SessionPoolTest {
         assertThrows(com.keyfactor.util.keys.token.CryptoTokenAuthenticationFailedException.class,
                 () -> pool.login("wrong-pin".toCharArray()));
     }
+
+    @Test
+    @DisplayName("stays open for release while a crypto token holds its login, and closes after")
+    void closesOnlyWhenNoLoginIsHeld() throws Exception {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        pool.login("1234".toCharArray());
+
+        org.junit.jupiter.api.Assertions.assertFalse(pool.closeIfUnheld(),
+                "a token is logged in through the pool; draining it would log that token out");
+        pool.borrow().close();
+
+        pool.logout();
+        assertTrue(pool.closeIfUnheld(), "nothing holds the login any more");
+        assertThrows(CryptoTokenOfflineException.class, pool::borrow);
+    }
+
+    @Test
+    @DisplayName("fails a login the pool was released under rather than holding a dead pool")
+    void loginRacingARelease() {
+        SessionPool pool = pool(SessionPoolConfig.defaults());
+        // The release lands after C_Login succeeded and before the hold is taken, so it saw no
+        // hold and its drain is about to close the sessions — and the login with them.
+        token.onLogin(() -> assertTrue(pool.closeIfUnheld()));
+
+        assertThrows(CryptoTokenOfflineException.class, () -> pool.login("1234".toCharArray()),
+                "a token told it is logged in through a drained pool would fail its next signature");
+    }
 }

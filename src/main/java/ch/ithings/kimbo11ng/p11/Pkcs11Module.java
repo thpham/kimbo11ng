@@ -216,13 +216,29 @@ public final class Pkcs11Module {
     }
 
     /**
-     * Drains and forgets the pool for a slot. The library itself stays initialised — see the class
-     * comment on why {@code C_Finalize} is not called.
+     * Drains and forgets the pool for a slot, unless another crypto token is still logged in
+     * through it. The library itself stays initialised — see the class comment on why
+     * {@code C_Finalize} is not called.
+     *
+     * <p>The pool is the slot's, not the caller's. Draining it closes the application's last
+     * sessions on the token, and PKCS#11 ends the login with them: another token on the slot lost
+     * its private keys the moment one token was reset. A pool nobody holds the login of is drained
+     * as before; a token that is merely deactivated holds nothing and simply opens a fresh pool.
      */
     public void releaseSlot(long slotId) {
-        SessionPool pool = pools.remove(slotId);
-        if (pool != null) {
-            pool.drain();
+        SessionPool[] released = new SessionPool[1];
+        pools.computeIfPresent(slotId, (id, pool) -> {
+            if (!pool.closeIfUnheld()) {
+                return pool;
+            }
+            released[0] = pool;
+            return null;
+        });
+        if (released[0] != null) {
+            released[0].drain();
+        } else if (log.isDebugEnabled()) {
+            log.debug("Keeping the session pool of slot " + slotId + " of " + canonicalPath
+                    + ": another crypto token is still logged in through it");
         }
     }
 

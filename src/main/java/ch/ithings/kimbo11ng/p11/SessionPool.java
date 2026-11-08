@@ -233,7 +233,28 @@ public final class SessionPool {
             throws CryptoTokenOfflineException, CryptoTokenAuthenticationFailedException {
         authenticate(pin);
         synchronized (lock) {
+            if (closed) {
+                // closeIfUnheld ran while this login was in flight and found no hold to keep the
+                // pool for; its drain closes the sessions, and the login with them.
+                throw new CryptoTokenOfflineException("The session pool for slot " + slotId
+                        + " was released while logging in; activate the token again");
+            }
             loginHolds++;
+        }
+    }
+
+    /**
+     * Closes the pool to new borrows if no crypto token holds its login, and says whether it did.
+     * Checked and closed under one lock, so a login either takes its hold first and keeps the pool
+     * open, or finds it closed and fails; see {@link Pkcs11Module#releaseSlot}.
+     */
+    boolean closeIfUnheld() {
+        synchronized (lock) {
+            if (loginHolds > 0) {
+                return false;
+            }
+            closed = true;
+            return true;
         }
     }
 

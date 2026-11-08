@@ -367,8 +367,8 @@ every post-quantum algorithm reports as excluded.
 
 ```bash
 # Counts verified 2026-11-08.
-mvn verify               # 915 unit tests + 5 artifact tests, no Docker (~2 min)
-mvn verify -Pit          # + 29 EJBCA + 26 CLI integration tests (~5 min)
+mvn verify               # 917 unit tests + 5 artifact tests, no Docker (~2 min)
+mvn verify -Pit          # + 30 EJBCA + 26 CLI integration tests (~5 min)
 
 # The concurrency soak: 100 consecutive fault-injection runs
 mvn test -Dtest='ConcurrentTokenAccessTest#survivesInjectedFaults' -Dkimbo11ng.soak.runs=100
@@ -441,7 +441,7 @@ kimbo11ng/
       ch/ithings/kimbo11ng/          # Unit tests
         fake/                        # FakeToken: in-memory PKCS#11 v3.2 token with fault knobs
     it/java/
-      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 29 tests,
+      ch/ithings/kimbo11ng/it/       # Integration tests (EjbcaContainerIT — 30 tests,
                                      #   HsmConformanceIT — the HSM contract on a real library)
     it/openapi/
       ejbca-api.json                 # EJBCA CE REST API spec (OpenAPI)

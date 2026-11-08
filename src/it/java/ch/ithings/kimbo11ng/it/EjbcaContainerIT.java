@@ -973,6 +973,31 @@ class EjbcaContainerIT {
         }
     }
 
+    /**
+     * A key made with kimbo11ng-cli next to the running CA is one the CA can use.
+     *
+     * <p>The way an operator runs it — a plain {@code docker compose exec}, which is root in this
+     * image. A root CLI wrote 0600 root-owned objects that EJBCA, running as 10001, could not read:
+     * the key existed on the token and was missing from EJBCA.
+     */
+    @Test @Order(29)
+    void keyFromTheCli_isVisibleToEjbca() throws Exception {
+        ContainerState ejbca = ejbcaContainer();
+        exec(ejbca, "kimbo11ng-cli", "generatekeypair", "--slot-ref", "SLOT_LABEL",
+            "--slot", "TestToken", "--password", "1234",
+            "--alias", "it-fromcli", "--key-spec", "2048");
+        // EJBCA caches the token's key list; a reactivation is what makes it read the token again.
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "deactivate", "--token", "TestHSM");
+        exec(ejbca, "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "activate", "--token", "TestHSM",
+            "--pin", "1234");
+
+        org.testcontainers.containers.Container.ExecResult keys = ejbca.execInContainer(
+            "/opt/keyfactor/bin/ejbca.sh", "cryptotoken", "listkeys", "--token", "TestHSM");
+        assertTrue(keys.getStdout().contains("it-fromcli"),
+            "a key the CLI made is missing from EJBCA:\n" + keys.getStdout());
+        assertKeyTestSucceeds("it-fromcli");
+    }
+
     private static ContainerState ejbcaContainer() {
         return COMPOSE.getContainerByServiceName("ejbca-1").orElseThrow(
             () -> new IllegalStateException("ejbca-1 container not found"));

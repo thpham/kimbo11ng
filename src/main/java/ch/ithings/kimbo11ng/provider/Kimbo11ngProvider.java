@@ -419,6 +419,24 @@ public final class Kimbo11ngProvider extends Provider {
         return runtime.get().keyStoreSpi();
     }
 
+    /**
+     * A keystore over {@code owner}'s token, served by this provider.
+     *
+     * <p>What a crypto token activates with, instead of {@code KeyStore.getInstance("PKCS11", this)}.
+     * That service binds its SPI to this provider's current runtime — whichever crypto token last
+     * initialised on this (library, slot) — and EJBCA initialises more than one: two short-lived
+     * copies of every token it creates, and every other token on the same slot. A token that
+     * activated through the service then read its keys through a runtime that was not its own,
+     * while its own SPI stayed the empty one deactivation had cleared, and EJBCA listed none of
+     * its keys. This binds the SPI to the token that asks.
+     */
+    public java.security.KeyStore keyStore(TokenRuntime owner) {
+        Kimbo11ngKeyStoreSpi spi = new Kimbo11ngKeyStoreSpi(owner);
+        owner.adoptKeyStoreSpi(spi);
+        return new java.security.KeyStore(spi, this, "PKCS11") {
+        };
+    }
+
     private void registerServices(TokenRuntime initialRuntime) {
         putService(new Service(this, "KeyStore", "PKCS11",
                 Kimbo11ngKeyStoreSpi.class.getName(), null, null) {

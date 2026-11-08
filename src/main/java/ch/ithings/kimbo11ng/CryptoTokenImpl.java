@@ -132,7 +132,9 @@ public class CryptoTokenImpl {
             // only a rejected credential surfaces as an authentication failure. Previously every
             // failure here — including "no token in slot" — was reported as a bad PIN.
             runtime.slot().login(authCode);
-            KeyStore ks = KeyStore.getInstance("PKCS11", p11Provider);
+            // Bound to this token's runtime, not to whichever token last initialised on the slot;
+            // see Kimbo11ngProvider.keyStore.
+            KeyStore ks = p11Provider.keyStore(runtime);
             ks.load(null, authCode);
             bridge.bridgeSetKeyStore(ks);
         } catch (CryptoTokenOfflineException | CryptoTokenAuthenticationFailedException e) {

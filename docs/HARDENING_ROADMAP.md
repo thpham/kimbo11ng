@@ -8,7 +8,7 @@ constants and a conformance test.
 | ---------- | ---------------------------------------------------- |
 | **Target** | EJBCA CE 9.6.3, JackNJI11 1.3.1, BouncyCastle 1.84 (phases 0–8 were built against 9.3.7 / BC 1.80.2) |
 | **Status** | Phases 0–8 complete.                                 |
-| **Tests**  | Verified 2026-11-08: 926 unit + 5 artifact (`mvn verify`); 30 `EjbcaContainerIT` + 26 `CliContainerIT` (`mvn verify -Pit`); 27 `HsmConformanceIT` on SoftHSMv3 (`just hsm-it`) |
+| **Tests**  | Verified 2026-11-08: 930 unit + 5 artifact (`mvn verify`); 30 `EjbcaContainerIT` + 26 `CliContainerIT` (`mvn verify -Pit`); 27 `HsmConformanceIT` on SoftHSMv3 (`just hsm-it`) |
 
 > Measurements below dated to phases 0–8 (BC 1.80.2, `release=17`, EJBCA 9.3.7) are kept as they were
 > taken — including the test counts in each phase's **Landed** and **Gate** lines, which record what

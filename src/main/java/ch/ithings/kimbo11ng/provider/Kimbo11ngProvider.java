@@ -43,6 +43,8 @@ public final class Kimbo11ngProvider extends Provider {
 
     private static final ConcurrentMap<String, Kimbo11ngProvider> INSTANCES =
             new ConcurrentHashMap<>();
+    /** Unqualified provider name to the canonical path of the library that took it; see nameFor. */
+    private static final ConcurrentMap<String, String> NAME_OWNERS = new ConcurrentHashMap<>();
 
     /**
      * The capability-dependent services currently registered, as {@code "type:algorithm"}, so that
@@ -394,9 +396,44 @@ public final class Kimbo11ngProvider extends Provider {
                 && offered.contains("Signature:" + row.classical());
     }
 
+    /**
+     * The provider name for a runtime's (library, slot).
+     *
+     * <p>{@code Kimbo11ng-<library file name>-slot<n>}, the scheme EJBCA uses for SunPKCS11. The
+     * file name alone does not identify a library, though: two vendors' {@code libpkcs11.so}, or two
+     * versions of one client installed side by side, share it. Under one name they shared one
+     * provider, re-pointed at whichever HSM initialised last, which then advertised that HSM's
+     * algorithms and generated keys on it for both. The first library to claim a name keeps it, so
+     * nothing changes where file names are unique; any other gets the name qualified by a hash of
+     * its canonical path, which is stable across restarts. EJBCA does not persist provider names.
+     */
     private static String nameFor(TokenRuntime runtime) {
-        return "Kimbo11ng-" + runtime.slot().libraryName()
-                + "-slot" + runtime.slot().slotId();
+        P11Slot slot = runtime.slot();
+        String plain = "Kimbo11ng-" + slot.libraryName() + "-slot" + slot.slotId();
+        String owner = NAME_OWNERS.putIfAbsent(plain, slot.libPath());
+        if (owner == null || owner.equals(slot.libPath())) {
+            return plain;
+        }
+        String qualified = "Kimbo11ng-" + slot.libraryName() + "-" + pathTag(slot.libPath())
+                + "-slot" + slot.slotId();
+        if (!INSTANCES.containsKey(qualified)) {
+            log.warn("PKCS#11 libraries " + owner + " and " + slot.libPath() + " share a file"
+                    + " name; the second is served by provider " + qualified + " rather than "
+                    + plain);
+        }
+        return qualified;
+    }
+
+    /** Eight hex digits of the SHA-256 of a library's canonical path. */
+    private static String pathTag(String canonicalPath) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(canonicalPath.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest, 0, 4);
+        } catch (NoSuchAlgorithmException e) {
+            // Every Java platform is required to provide SHA-256.
+            throw new IllegalStateException(e);
+        }
     }
 
     private Kimbo11ngProvider(String name, TokenRuntime initialRuntime) {

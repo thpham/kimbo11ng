@@ -151,7 +151,8 @@ public final class P11Slot {
     /**
      * The library file name with everything but {@code [A-Za-z0-9_-]} replaced, used to build the
      * JCA provider name. Stable for a given library, which is what EJBCA relies on: it resolves
-     * providers by name and registers a name only once.
+     * providers by name and registers a name only once. Not unique: two libraries can share a file
+     * name, which the provider resolves by qualifying the second one's name.
      */
     public String libraryName() {
         return new File(module.path()).getName().replaceAll("[^a-zA-Z0-9_-]", "_");
